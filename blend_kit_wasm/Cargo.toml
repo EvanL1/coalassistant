@@ -1,0 +1,31 @@
+[package]
+name = "blend_kit_wasm"
+version = "0.1.0"
+edition = "2021"
+description = "豆哥配煤 - WASM 包装层, 把 blend_kit 暴露给浏览器"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+blend_kit = { path = "../blend_kit_rs" }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+default = ["console_error_panic_hook"]
+
+# wasm-pack 自带的 wasm-opt 版本过旧, 不识 Rust 1.82+ 默认启用的 bulk memory.
+# 禁用 wasm-opt 不影响功能, opt-level="z" + LTO 已经把 .wasm 压到 ~400KB 量级.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+# WASM 体积优化: opt-level z + LTO 把不要的代码全砍掉
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

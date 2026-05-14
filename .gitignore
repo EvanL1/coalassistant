@@ -9,6 +9,10 @@ dist/
 .npm/
 *.log
 
+# WASM 构建产物 (CI 重新生成)
+blend_kit_wasm/pkg/
+blend_kit_wasm/target/
+
 # Tauri
 src-tauri/gen/android/.gradle/
 src-tauri/gen/android/app/build/

@@ -1,0 +1,86 @@
+# 豆哥配煤 Web 版自动部署到 GitHub Pages
+#
+# 触发: push 到 main, 或手动触发
+# 流程:
+#   1. 编译 blend_kit_wasm → WASM 包
+#   2. npm 装依赖 + vite build
+#   3. 上传 dist 作为 Pages artifact
+#   4. 部署到 https://EvanL1.github.io/coalassistant/
+#
+# 跟 release.yml 互补: release 出 APK + DMG, 这个出 Web 版
+name: Deploy Web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Pages 部署需要的权限
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同时只跑一个部署
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            blend_kit_rs
+            blend_kit_wasm
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM package
+        working-directory: blend_kit_wasm
+        run: wasm-pack build --target web --out-dir pkg --release
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: doudou_blend/package-lock.json
+
+      - name: Install npm deps
+        working-directory: doudou_blend
+        run: npm install
+
+      - name: Build production bundle
+        working-directory: doudou_blend
+        env:
+          # GitHub Pages 路径前缀: https://<user>.github.io/<repo>/
+          VITE_BASE_PATH: /coalassistant/
+        run: npm run build -- --base=/coalassistant/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: doudou_blend/dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

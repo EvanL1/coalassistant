@@ -1,94 +1,128 @@
-import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useState } from "react";
+import { getBackend } from "./backend";
 
-const SAMPLE_INPUT = JSON.stringify({
-  coals: [
-    {
-      name: "临北",
-      props: { S: 2.0, A: 6.0, V: 22, G: 93, Y: 17, petro: 0.01, CSR: 70, M: 11 },
-      fob: 1425,
-      frt: 25,
-    },
-    {
-      name: "筛精",
-      props: { S: 3.9, A: 9.5, V: 25, G: 100, Y: 22, petro: 0.08, CSR: 65, M: 9.5 },
-      fob: 970,
-      frt: 30,
-    },
-  ],
-  specs: [
-    { indicator: "S", direction: "Upper", max: 3.0, enabled: true },
-    { indicator: "V", direction: "Range", min: 18, max: 27, enabled: true },
-  ],
-  total_quantity: 1000,
-  truncate_decimal: true,
-}, null, 2);
+const SAMPLE_INPUT = JSON.stringify(
+  {
+    coals: [
+      {
+        name: "临北",
+        props: { S: 2.0, A: 6.0, V: 22, G: 93, Y: 17, petro: 0.01, CSR: 70, M: 11 },
+        fob: 1425,
+        frt: 25,
+      },
+      {
+        name: "筛精",
+        props: { S: 3.9, A: 9.5, V: 25, G: 100, Y: 22, petro: 0.08, CSR: 65, M: 9.5 },
+        fob: 970,
+        frt: 30,
+      },
+    ],
+    specs: [
+      { indicator: "S", direction: "Upper", max: 3.0, enabled: true },
+      { indicator: "V", direction: "Range", min: 18, max: 27, enabled: true },
+    ],
+    total_quantity: 1000,
+    truncate_decimal: true,
+  },
+  null,
+  2
+);
 
 function App() {
-  const [versionResult, setVersionResult] = useState<string>("");
+  const [backendKind, setBackendKind] = useState<string>("loading...");
+  const [version, setVersion] = useState<string>("");
   const [solveResult, setSolveResult] = useState<string>("");
-  const [loading, setLoading] = useState<{ version: boolean; solve: boolean }>({
-    version: false,
-    solve: false,
-  });
+  const [loading, setLoading] = useState(false);
 
-  async function checkVersion() {
-    setLoading((l) => ({ ...l, version: true }));
-    try {
-      const v = await invoke<string>("version");
-      setVersionResult(v);
-    } catch (e) {
-      setVersionResult(`Error: ${e}`);
-    } finally {
-      setLoading((l) => ({ ...l, version: false }));
-    }
-  }
+  useEffect(() => {
+    getBackend()
+      .then(async (b) => {
+        setBackendKind(b.kind);
+        const v = await b.getVersion();
+        setVersion(v);
+      })
+      .catch((e) => setBackendKind(`error: ${e}`));
+  }, []);
 
   async function runSolve() {
-    setLoading((l) => ({ ...l, solve: true }));
+    setLoading(true);
+    setSolveResult("");
     try {
-      const raw = await invoke<string>("solve_blend", { inputJson: SAMPLE_INPUT });
-      setSolveResult(JSON.stringify(JSON.parse(raw), null, 2));
+      const t0 = performance.now();
+      const backend = await getBackend();
+      const raw = await backend.solveJson(SAMPLE_INPUT);
+      const elapsed = performance.now() - t0;
+      const parsed = JSON.parse(raw);
+      setSolveResult(
+        `耗时: ${elapsed.toFixed(2)}ms\n\n` + JSON.stringify(parsed, null, 2)
+      );
     } catch (e) {
       setSolveResult(`Error: ${e}`);
     } finally {
-      setLoading((l) => ({ ...l, solve: false }));
+      setLoading(false);
     }
   }
 
   return (
-    <main style={{ fontFamily: "monospace", padding: "1rem" }}>
-      <h2>配煤求解验证 Demo</h2>
+    <main
+      style={{
+        fontFamily: "system-ui, sans-serif",
+        padding: "1.5rem",
+        maxWidth: "720px",
+        margin: "0 auto",
+      }}
+    >
+      <h2 style={{ margin: "0 0 1rem 0" }}>豆哥配煤 - 双后端验证</h2>
 
-      <section style={{ marginBottom: "1.5rem" }}>
-        <button onClick={checkVersion} disabled={loading.version}>
-          {loading.version ? "..." : "检查 Rust 版本"}
-        </button>
-        {versionResult && (
-          <pre style={{ background: "#f0f0f0", padding: "0.5rem", marginTop: "0.5rem" }}>
-            {versionResult}
-          </pre>
-        )}
-      </section>
+      <div
+        style={{
+          background: "#f5f6f8",
+          padding: "0.75rem 1rem",
+          borderRadius: "8px",
+          marginBottom: "1.5rem",
+          fontSize: "13px",
+        }}
+      >
+        <div>
+          运行模式: <strong>{backendKind}</strong>
+          {backendKind === "tauri" && " (原生 IPC)"}
+          {backendKind === "wasm" && " (浏览器 WASM)"}
+        </div>
+        {version && <div>blend_kit 版本: {version}</div>}
+      </div>
 
-      <section>
-        <button onClick={runSolve} disabled={loading.solve}>
-          {loading.solve ? "求解中..." : "跑一次配煤求解"}
-        </button>
-        {solveResult && (
-          <pre
-            style={{
-              background: "#f0f0f0",
-              padding: "0.5rem",
-              marginTop: "0.5rem",
-              maxHeight: "60vh",
-              overflow: "auto",
-            }}
-          >
-            {solveResult}
-          </pre>
-        )}
-      </section>
+      <button
+        onClick={runSolve}
+        disabled={loading || backendKind === "loading..."}
+        style={{
+          padding: "0.75rem 1.5rem",
+          fontSize: "16px",
+          background: "#0a5fff",
+          color: "white",
+          border: "none",
+          borderRadius: "8px",
+          cursor: "pointer",
+        }}
+      >
+        {loading ? "求解中..." : "跑一次配煤求解"}
+      </button>
+
+      {solveResult && (
+        <pre
+          style={{
+            background: "#1e1e1e",
+            color: "#e8e8e8",
+            padding: "1rem",
+            marginTop: "1rem",
+            borderRadius: "8px",
+            maxHeight: "60vh",
+            overflow: "auto",
+            fontSize: "12px",
+          }}
+        >
+          {solveResult}
+        </pre>
+      )}
     </main>
   );
 }
