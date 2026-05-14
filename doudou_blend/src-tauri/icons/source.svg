@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- 豆哥配煤 - APP 图标
+       设计:
+         背景:  暖白渐变, 烘托煤堆
+         主体:  不规则多边形煤块, 自然堆叠
+         材质:  深炭灰 + 棱面高光, 真实煤块的反光感
+         点睛:  右上角一束工业蓝光, 暗示"数字化优化" -->
+
+  <defs>
+    <!-- 背景: 暖白米色, 工业气质 -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#f5f6f8"/>
+      <stop offset="100%" stop-color="#dde0e6"/>
+    </linearGradient>
+
+    <!-- 煤块主色: 深炭黑到深灰 -->
+    <linearGradient id="coalDark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#3a3a3a"/>
+      <stop offset="100%" stop-color="#1a1a1a"/>
+    </linearGradient>
+    <linearGradient id="coalMid" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#4a4a4a"/>
+      <stop offset="100%" stop-color="#2d2d2d"/>
+    </linearGradient>
+    <linearGradient id="coalLight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#5c5c5c"/>
+      <stop offset="100%" stop-color="#3d3d3d"/>
+    </linearGradient>
+
+    <!-- 棱面高光 (右上侧, 模拟自然光) -->
+    <linearGradient id="hi" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#7a7a7a" stop-opacity="0.5"/>
+      <stop offset="40%" stop-color="#7a7a7a" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- 地面阴影 -->
+    <radialGradient id="ground" cx="50%" cy="50%" r="60%">
+      <stop offset="0%"   stop-color="#000000" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- 数据线高亮色 -->
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"  stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 背景圆角 -->
+  <rect x="0" y="0" width="1024" height="1024" rx="180" ry="180" fill="url(#bg)"/>
+
+  <!-- 地面投影 -->
+  <ellipse cx="512" cy="850" rx="350" ry="40" fill="url(#ground)"/>
+
+  <!-- ============================================================
+       煤堆 - 自下而上堆叠的 7 块不规则煤
+       配色: dark (后排深) / mid (中排) / light (前排亮)
+       ============================================================ -->
+
+  <!-- 底层左块 (大, 深色, 在后面) -->
+  <polygon points="
+    180,820
+    280,720
+    420,690
+    480,740
+    420,820
+  " fill="url(#coalDark)"/>
+  <polygon points="
+    280,720
+    420,690
+    480,740
+    400,725
+    340,720
+  " fill="url(#hi)"/>
+
+  <!-- 底层中块 (最大, 主体) -->
+  <polygon points="
+    380,820
+    430,700
+    560,650
+    670,680
+    700,790
+    640,830
+  " fill="url(#coalMid)"/>
+  <polygon points="
+    430,700
+    560,650
+    670,680
+    620,700
+    520,690
+  " fill="url(#hi)"/>
+
+  <!-- 底层右块 -->
+  <polygon points="
+    620,820
+    660,720
+    790,700
+    850,800
+    800,830
+  " fill="url(#coalDark)"/>
+  <polygon points="
+    660,720
+    790,700
+    850,800
+    810,740
+    720,720
+  " fill="url(#hi)"/>
+
+  <!-- 中层左块 -->
+  <polygon points="
+    340,690
+    380,600
+    490,570
+    540,620
+    510,690
+  " fill="url(#coalLight)"/>
+  <polygon points="
+    380,600
+    490,570
+    540,620
+    480,600
+    420,605
+  " fill="url(#hi)"/>
+
+  <!-- 中层右块 -->
+  <polygon points="
+    540,680
+    580,560
+    690,540
+    740,600
+    720,690
+  " fill="url(#coalMid)"/>
+  <polygon points="
+    580,560
+    690,540
+    740,600
+    680,580
+    620,575
+  " fill="url(#hi)"/>
+
+  <!-- 顶层块 (小, 最亮, 在最前面) -->
+  <polygon points="
+    470,580
+    510,460
+    600,440
+    640,520
+    600,580
+  " fill="url(#coalLight)"/>
+  <polygon points="
+    510,460
+    600,440
+    640,520
+    580,470
+    540,460
+  " fill="url(#hi)"/>
+
+  <!-- 顶部小块 (尖, 强调金字塔感) -->
+  <polygon points="
+    540,460
+    570,360
+    615,380
+    620,450
+  " fill="url(#coalMid)"/>
+
+  <!-- ============================================================
+       数据线 (右上角斜射出, 像扫描光束)
+       象征"配煤优化"的科技维度
+       ============================================================ -->
+  <g opacity="0.9">
+    <line x1="640" y1="200" x2="820" y2="160" stroke="url(#accent)" stroke-width="6" stroke-linecap="round"/>
+    <circle cx="820" cy="160" r="12" fill="url(#accent)"/>
+    <circle cx="820" cy="160" r="6" fill="#f5f6f8"/>
+  </g>
+  <g opacity="0.6">
+    <line x1="680" y1="260" x2="850" y2="240" stroke="url(#accent)" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="850" cy="240" r="9" fill="url(#accent)"/>
+  </g>
+  <g opacity="0.4">
+    <line x1="700" y1="310" x2="860" y2="310" stroke="url(#accent)" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="860" cy="310" r="6" fill="url(#accent)"/>
+  </g>
+</svg>

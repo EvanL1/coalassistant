@@ -1,0 +1,56 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node
+node_modules/
+dist/
+.npm/
+*.log
+
+# Tauri
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/build/
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/.idea/
+src-tauri/target/
+
+# 不要提交生成的 Android 工程 (CI 会重新 init)
+doudou_blend/src-tauri/gen/android/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# 临时
+/tmp/
+*.bak
+*.tmp
+
+# 用户数据库 (不应进仓库)
+*.db
+*.sqlite
+*.sqlite3
+
+# 旧 Flutter 项目 (已被 Tauri 替代)
+coal_blending_app/
+配煤APP技术方案文档.md
+mockup/dougeruan_mobile.html.bak
+
+# Python venv (本地脚本用过)
+.venv/
+__pycache__/
+
+# secrets
+.env
+.env.local
+*.pem
+*.key
