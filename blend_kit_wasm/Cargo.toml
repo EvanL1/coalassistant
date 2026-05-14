@@ -1,6 +1,6 @@
 [package]
 name = "blend_kit_wasm"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "豆哥配煤 - WASM 包装层, 把 blend_kit 暴露给浏览器"
 
