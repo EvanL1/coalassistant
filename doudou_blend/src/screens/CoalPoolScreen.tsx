@@ -1,12 +1,13 @@
 /**
  * 屏 2 - 煤池
- * 列出 master 里 73+ 种煤, 状态分组, 显示化验值 + 价格.
- * 当前版本: 只读展示. 编辑功能后续迭代加 (走 user_overrides 表).
+ * 73+ 煤列表 + 状态过滤 + 点击编辑 (CoalEditor)
  */
 import { useEffect, useState } from "react";
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalStatus, MasterCoalEntry } from "../types";
+import { CoalEditor } from "../CoalEditor";
+import { getCoalPrefs, type CoalPrefs } from "../storage";
 
 const STATUS_LABEL: Record<CoalStatus, string> = {
   verified: "主力煤",
@@ -26,10 +27,18 @@ const STATUS_ORDER: CoalStatus[] = [
 
 export function CoalPoolScreen() {
   const [master, setMaster] = useState<CoalMaster | null>(null);
-  const [filter, setFilter] = useState<CoalStatus | "all">("all");
+  const [prefs, setPrefs] = useState<CoalPrefs>({});
+  const [filter, setFilter] = useState<CoalStatus | "all" | "enabled">("all");
+  const [editing, setEditing] = useState<MasterCoalEntry | null>(null);
 
   useEffect(() => {
     loadMaster().then(setMaster).catch(console.error);
+    setPrefs(getCoalPrefs());
+
+    // 监听 prefs 变化
+    const onChange = () => setPrefs(getCoalPrefs());
+    window.addEventListener("doudou:prefs_changed", onChange);
+    return () => window.removeEventListener("doudou:prefs_changed", onChange);
   }, []);
 
   if (!master) {
@@ -40,10 +49,18 @@ export function CoalPoolScreen() {
   for (const c of master.coals) {
     counts[c.status] = (counts[c.status] || 0) + 1;
   }
+  function isEnabled(coal: MasterCoalEntry): boolean {
+    const p = prefs[coal.name];
+    if (p?.enabled != null) return p.enabled;
+    // 默认: verified 启用, 其他停用
+    return coal.status === "verified";
+  }
 
   const filtered =
     filter === "all"
       ? master.coals
+      : filter === "enabled"
+      ? master.coals.filter(isEnabled)
       : master.coals.filter((c) => c.status === filter);
 
   return (
@@ -52,12 +69,12 @@ export function CoalPoolScreen() {
         <div>
           <h1 className="page-title">煤池</h1>
           <div className="page-subtitle">
-            共 {master.coals.length} 种煤 (master {master.version})
+            共 {master.coals.length} 种煤 · 今日启用{" "}
+            {master.coals.filter(isEnabled).length} 种
           </div>
         </div>
       </div>
 
-      {/* 状态过滤器 */}
       <div
         style={{
           display: "flex",
@@ -72,6 +89,11 @@ export function CoalPoolScreen() {
           onClick={() => setFilter("all")}
           label={`全部 ${master.coals.length}`}
         />
+        <FilterChip
+          active={filter === "enabled"}
+          onClick={() => setFilter("enabled")}
+          label={`已启用 ${master.coals.filter(isEnabled).length}`}
+        />
         {STATUS_ORDER.map((s) => (
           <FilterChip
             key={s}
@@ -83,8 +105,20 @@ export function CoalPoolScreen() {
       </div>
 
       {filtered.map((coal) => (
-        <CoalCard key={coal.name} coal={coal} />
+        <CoalCard
+          key={coal.name}
+          coal={coal}
+          enabled={isEnabled(coal)}
+          onClick={() => setEditing(coal)}
+        />
       ))}
+
+      {editing && (
+        <CoalEditor
+          coal={editing}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </>
   );
 }
@@ -117,15 +151,30 @@ function FilterChip({
   );
 }
 
-function CoalCard({ coal }: { coal: MasterCoalEntry }) {
+function CoalCard({
+  coal,
+  enabled,
+  onClick,
+}: {
+  coal: MasterCoalEntry;
+  enabled: boolean;
+  onClick: () => void;
+}) {
   const PROP_ORDER_TOP = ["S", "A", "V", "G"];
-  const propOrder2 = ["M", "petro", "Y", "CSR"];
+  const PROP_ORDER_BOTTOM = ["M", "petro", "Y", "CSR"];
 
   const cif =
     coal.fob != null && coal.frt != null ? coal.fob + coal.frt : null;
 
   return (
-    <div className="coal-card">
+    <div
+      className="coal-card"
+      onClick={onClick}
+      style={{
+        cursor: "pointer",
+        opacity: enabled ? 1 : 0.55,
+      }}
+    >
       <div className="coal-row">
         <div>
           <div className="coal-name">{coal.name}</div>
@@ -139,7 +188,7 @@ function CoalCard({ coal }: { coal: MasterCoalEntry }) {
             <>
               <div className="coal-price">¥{cif}</div>
               <div className="coal-price-detail">
-                {coal.fob} + 运费 {coal.frt}
+                单价 {coal.fob} + 运费 {coal.frt}
               </div>
             </>
           ) : (
@@ -150,7 +199,6 @@ function CoalCard({ coal }: { coal: MasterCoalEntry }) {
         </div>
       </div>
 
-      {/* 化验值 */}
       {PROP_ORDER_TOP.some((k) => coal.props[k] != null) && (
         <div className="coal-props">
           {PROP_ORDER_TOP.map((k) => {
@@ -172,10 +220,9 @@ function CoalCard({ coal }: { coal: MasterCoalEntry }) {
         </div>
       )}
 
-      {/* 第二行 (仅 verified 才有) */}
       {coal.status === "verified" && (
         <div className="coal-props">
-          {propOrder2.map((k) => {
+          {PROP_ORDER_BOTTOM.map((k) => {
             const v = coal.props[k];
             if (v == null)
               return (
@@ -198,11 +245,15 @@ function CoalCard({ coal }: { coal: MasterCoalEntry }) {
         <span className={`status-pill status-${coal.status}`}>
           {STATUS_LABEL[coal.status]}
         </span>
-        {coal.note && (
-          <span style={{ fontSize: 10, color: "var(--c-text-3)", marginLeft: 8 }}>
-            {coal.note}
-          </span>
-        )}
+        <span
+          style={{
+            fontSize: 11,
+            color: enabled ? "var(--c-success)" : "var(--c-text-3)",
+            fontWeight: 600,
+          }}
+        >
+          {enabled ? "● 启用中" : "○ 停用 · 点击编辑"}
+        </span>
       </div>
     </div>
   );

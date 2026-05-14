@@ -1,56 +1,121 @@
 /**
  * 屏 1 - 今日（首页）
  *
- * 用 master 里 verified 状态的 4 主力煤 + 默认合同, 跑 LP 求解.
- * 展示成本、配方、8 项指标体检、binding 谈判方向.
+ * 数据源:
+ *   - 煤池: master + user_coal_prefs (启用 + 价格 + 化验值 override)
+ *   - 合同: user_contract ?? master.default_contract
+ *   - 默认: master verified 的 4 主力煤启用, 其他停用
+ *
+ * 求解后展示成本、配方、8 项指标、binding 谈判方向, 并支持保存到历史.
  */
 import { useEffect, useState } from "react";
 import { getBackend } from "../backend";
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
-import type { BlendRequest, BlendResult, MasterCoalEntry } from "../types";
+import type {
+  BlendRequest,
+  BlendResult,
+  Coal,
+  MasterCoalEntry,
+  Spec,
+} from "../types";
+import {
+  appendHistory,
+  getCoalPrefs,
+  getUserContract,
+  type CoalPrefs,
+} from "../storage";
 
-const RECIPE_COLORS = ["#0a5fff", "#7c3aed", "#ec4899", "#f59e0b", "#10b981"];
+const RECIPE_COLORS = ["#0a5fff", "#7c3aed", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#8b5cf6"];
 
 function formatPrice(n: number): { int: string; dec: string } {
   const [intPart, decPart] = n.toFixed(2).split(".");
   return { int: intPart, dec: decPart };
 }
 
+/** 应用 user_overrides 到 master 煤上, 返回 LP 用的 Coal. */
+function applyOverrides(coal: MasterCoalEntry, prefs: CoalPrefs): Coal | null {
+  const pref = prefs[coal.name];
+  // 基础检查: 必须有 fob/frt
+  const fob = pref?.fob_override ?? coal.fob;
+  const frt = pref?.frt_override ?? coal.frt;
+  if (fob == null || frt == null) return null;
+
+  // 合并 props: master + override
+  const props: Record<string, number> = {};
+  for (const [k, v] of Object.entries(coal.props)) {
+    if (v != null) props[k] = v;
+  }
+  if (pref?.props_override) {
+    for (const [k, v] of Object.entries(pref.props_override)) {
+      if (v != null) props[k] = v;
+    }
+  }
+
+  return { name: coal.name, props, fob, frt };
+}
+
+/** 启用状态: 显式 override > master verified 默认启用. */
+function isEnabled(coal: MasterCoalEntry, prefs: CoalPrefs): boolean {
+  const p = prefs[coal.name];
+  if (p?.enabled != null) return p.enabled;
+  return coal.status === "verified";
+}
+
 interface SolveState {
   status: "loading" | "ok" | "error";
   result?: BlendResult;
   contractName?: string;
+  request?: BlendRequest;
+  enabledCount?: number;
   error?: string;
 }
 
 export function TodayScreen() {
   const [state, setState] = useState<SolveState>({ status: "loading" });
+  const [saveFlag, setSaveFlag] = useState(false);
 
   useEffect(() => {
     void runSolve();
+    // 监听 prefs/contract 变化, 自动重算
+    const refresh = () => void runSolve();
+    window.addEventListener("doudou:prefs_changed", refresh);
+    window.addEventListener("doudou:contract_changed", refresh);
+    return () => {
+      window.removeEventListener("doudou:prefs_changed", refresh);
+      window.removeEventListener("doudou:contract_changed", refresh);
+    };
   }, []);
 
   async function runSolve() {
     setState({ status: "loading" });
     try {
       const master = await loadMaster();
-      const verified: MasterCoalEntry[] = master.coals.filter(
-        (c) => c.status === "verified"
-      );
-      if (verified.length === 0) {
-        setState({ status: "error", error: "没有 verified 主力煤" });
+      const prefs = getCoalPrefs();
+      const userContract = getUserContract();
+
+      // 启用煤集
+      const enabledMaster = master.coals.filter((c) => isEnabled(c, prefs));
+      const coals = enabledMaster
+        .map((c) => applyOverrides(c, prefs))
+        .filter((c): c is Coal => c != null);
+
+      if (coals.length === 0) {
+        setState({
+          status: "error",
+          error: "没有启用的煤. 去煤池启用一些主力煤吧.",
+        });
         return;
       }
 
+      const specs: Spec[] = userContract ?? master.default_contract.specs;
+      const contractName = userContract
+        ? "用户自定义合同"
+        : master.default_contract.name;
+
       const request: BlendRequest = {
-        coals: verified.map((c) => ({
-          name: c.name,
-          props: c.props,
-          fob: c.fob!,
-          frt: c.frt!,
-        })),
-        specs: master.default_contract.specs,
+        coals,
+        specs,
         total_quantity: 3700,
         truncate_decimal: true,
       };
@@ -61,11 +126,26 @@ export function TodayScreen() {
       setState({
         status: "ok",
         result,
-        contractName: master.default_contract.name,
+        contractName,
+        request,
+        enabledCount: coals.length,
       });
     } catch (e) {
       setState({ status: "error", error: String(e) });
     }
+  }
+
+  function saveToHistory() {
+    if (state.status !== "ok" || !state.result?.cost || !state.result.ok) return;
+    const recipe: Record<string, number> = {};
+    for (const o of state.result.orders) recipe[o.coal] = o.ratio;
+    appendHistory({
+      cost_cif: state.result.cost.cif_per_ton,
+      recipe,
+      contract_name: state.contractName || "",
+    });
+    setSaveFlag(true);
+    setTimeout(() => setSaveFlag(false), 2000);
   }
 
   if (state.status === "loading") {
@@ -74,7 +154,7 @@ export function TodayScreen() {
   if (state.status === "error" || !state.result) {
     return (
       <div className="empty">
-        <p>出错了: {state.error}</p>
+        <p style={{ marginBottom: 16 }}>{state.error}</p>
         <button className="btn btn-primary" onClick={runSolve}>
           重试
         </button>
@@ -82,15 +162,41 @@ export function TodayScreen() {
     );
   }
 
-  const { result, contractName } = state;
+  const { result, contractName, enabledCount } = state;
   if (!result.ok) {
     return (
-      <div className="empty">
-        <p>当前配置不可行: {result.reason}</p>
-        <button className="btn btn-primary" onClick={runSolve}>
-          重试
-        </button>
-      </div>
+      <>
+        <div className="page-header">
+          <div>
+            <h1 className="page-title">今日配煤</h1>
+            <div className="page-subtitle">{contractName}</div>
+          </div>
+        </div>
+        <div
+          className="card"
+          style={{ borderLeft: "4px solid var(--c-danger)" }}
+        >
+          <div className="card-title" style={{ color: "var(--c-danger)" }}>
+            ✗ 不可行
+          </div>
+          <p style={{ margin: 0, fontSize: 13 }}>{result.reason}</p>
+          {result.warnings.length > 0 && (
+            <ul style={{ fontSize: 12, color: "var(--c-text-3)", paddingLeft: 18 }}>
+              {result.warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <p style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}>
+          建议: 去「合同」放宽某项约束, 或去「煤池」启用更多煤源.
+        </p>
+        <div className="action-row">
+          <button className="btn btn-secondary" onClick={runSolve}>
+            重试
+          </button>
+        </div>
+      </>
     );
   }
 
@@ -98,7 +204,7 @@ export function TodayScreen() {
   const { int: costInt, dec: costDec } = formatPrice(cost.cif_per_ton);
   const totalIndicators = result.indicator_check.length;
   const passing = result.indicator_check.filter(
-    (ic) => !ic.slack || ic.slack >= -0.01
+    (ic) => ic.slack == null || ic.slack >= -0.01
   ).length;
   const today = new Date();
   const dateStr = `${today.getFullYear()} 年 ${today.getMonth() + 1} 月 ${today.getDate()} 日`;
@@ -116,7 +222,6 @@ export function TodayScreen() {
         <div className="contract-chip">{contractName || "默认合同"}</div>
       </div>
 
-      {/* 成本卡 */}
       <div className="cost-card">
         <div className="cost-label">最低到厂价</div>
         <div className="cost-amount">
@@ -128,15 +233,17 @@ export function TodayScreen() {
           <span className="badge">
             {passing}/{totalIndicators} 项达标
           </span>
+          <span style={{ opacity: 0.85 }}>
+            {enabledCount} 种煤可选
+          </span>
           {cost.total_cif != null && (
             <span style={{ opacity: 0.85 }}>
-              总额 {cost.total_cif.toLocaleString("zh-CN", { maximumFractionDigits: 0 })} 元
+              总额 {Math.round(cost.total_cif).toLocaleString("zh-CN")} 元
             </span>
           )}
         </div>
       </div>
 
-      {/* 配方卡 */}
       <div className="card">
         <div
           className="card-title"
@@ -148,7 +255,7 @@ export function TodayScreen() {
         >
           <span>今日配方</span>
           <span style={{ fontSize: 11, color: "var(--c-text-3)" }}>
-            共 {sortedRecipe.length} 种煤
+            选用 {sortedRecipe.length} 种煤
           </span>
         </div>
         <div className="recipe-bar">
@@ -185,7 +292,6 @@ export function TodayScreen() {
         </div>
       </div>
 
-      {/* 8 项指标 */}
       <div className="card">
         <div
           className="card-title"
@@ -237,7 +343,6 @@ export function TodayScreen() {
         </div>
       </div>
 
-      {/* 谈判方向 */}
       {binding.length > 0 && (
         <div className="binding-list">
           <div className="binding-list-title">谈判方向 (binding 顶格)</div>
@@ -250,9 +355,15 @@ export function TodayScreen() {
         </div>
       )}
 
-      {/* 警告 */}
       {result.warnings.length > 0 && (
-        <div className="binding-list" style={{ background: "#fef3c7", borderColor: "#fde6b3", marginTop: 12 }}>
+        <div
+          className="binding-list"
+          style={{
+            background: "#fef3c7",
+            borderColor: "#fde6b3",
+            marginTop: 12,
+          }}
+        >
           <div className="binding-list-title">提示</div>
           {result.warnings.map((w, i) => (
             <div key={i}>{w}</div>
@@ -264,8 +375,8 @@ export function TodayScreen() {
         <button className="btn btn-secondary" onClick={runSolve}>
           重新计算
         </button>
-        <button className="btn btn-primary" onClick={() => alert("方案保存到历史 (TODO)")}>
-          保存方案
+        <button className="btn btn-primary" onClick={saveToHistory}>
+          {saveFlag ? "✓ 已保存" : "保存方案"}
         </button>
       </div>
     </>
