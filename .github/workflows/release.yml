@@ -4,19 +4,21 @@
 # 产出:
 #   - Android APK (arm64 + armv7) - 主流移动机型
 #   - macOS .dmg (universal, arm64+x86_64) - 桌面 Mac
-# 上传: GitHub Releases (草稿态, 手动 publish)
+# 上传: GitHub Releases (publish 态, 不再 draft)
 #
-# 不构建: Windows / iOS / 32 位 Android x86 (按需扩展)
+# 注: Tauri 前端 build 时 TypeScript 要解析 import 'blend-kit-wasm',
+# 所以即使 Tauri 运行时用 IPC 不用 WASM, build 流程也必须先跑 wasm-pack
+# 生成 blend_kit_wasm/pkg/ 让 npm 能 resolve 这个 local file dep.
 name: Release Build
 
 on:
   push:
     tags:
       - 'v*.*.*'
-  workflow_dispatch:    # 也允许手动触发
+  workflow_dispatch:
 
 permissions:
-  contents: write       # 写 release
+  contents: write
 
 jobs:
   # ============================================================
@@ -52,7 +54,7 @@ jobs:
       - name: Set up Rust + Android targets
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android,wasm32-unknown-unknown
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -60,10 +62,18 @@ jobs:
           workspaces: |
             doudou_blend/src-tauri
             blend_kit_rs
+            blend_kit_wasm
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM package (for npm resolve)
+        working-directory: blend_kit_wasm
+        run: wasm-pack build --target web --out-dir pkg --release
 
       - name: Install npm deps
         working-directory: doudou_blend
-        run: npm ci
+        run: npm install --no-package-lock-only
 
       - name: Initialize Tauri Android (one-time per CI run)
         working-directory: doudou_blend
@@ -74,12 +84,6 @@ jobs:
         working-directory: doudou_blend
         run: |
           npx @tauri-apps/cli android build --apk --target aarch64 --target armv7
-
-      - name: Locate APKs
-        id: locate
-        run: |
-          find doudou_blend/src-tauri/gen/android -name "*.apk" -not -path "*intermediates*" || true
-          echo "apk_dir=$(find doudou_blend/src-tauri/gen/android -type d -name "outputs" | head -1)" >> $GITHUB_OUTPUT
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
@@ -97,7 +101,7 @@ jobs:
           generate_release_notes: true
 
   # ============================================================
-  # macOS DMG (开发者自测, 选做)
+  # macOS DMG
   # ============================================================
   macos:
     runs-on: macos-latest
@@ -115,7 +119,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,wasm32-unknown-unknown
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -123,10 +127,18 @@ jobs:
           workspaces: |
             doudou_blend/src-tauri
             blend_kit_rs
+            blend_kit_wasm
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM package (for npm resolve)
+        working-directory: blend_kit_wasm
+        run: wasm-pack build --target web --out-dir pkg --release
 
       - name: Install npm deps
         working-directory: doudou_blend
-        run: npm ci
+        run: npm install --no-package-lock-only
 
       - name: Build macOS DMG (universal)
         working-directory: doudou_blend
