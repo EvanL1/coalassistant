@@ -536,6 +536,43 @@ button {
   font-weight: 400;
 }
 
+/* ========== Login ========== */
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.login-label {
+  font-size: 12px;
+  color: var(--c-text-2);
+  font-weight: 500;
+  padding-left: 4px;
+}
+.login-field input {
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  font-size: 15px;
+  font-family: inherit;
+  background: var(--c-bg);
+  color: var(--c-text);
+  transition: border 0.15s;
+  outline: none;
+}
+.login-field input:focus {
+  border-color: var(--c-primary);
+  background: white;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+.shake { animation: shake 0.4s; }
+
 /* placeholder screens */
 .placeholder-screen {
   text-align: center;

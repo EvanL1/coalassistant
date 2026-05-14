@@ -15,6 +15,7 @@ import type { Spec } from "./types";
 const KEY_COAL_PREFS = "doudou_blend.coal_prefs.v1";
 const KEY_CONTRACT = "doudou_blend.contract.v1";
 const KEY_HISTORY = "doudou_blend.history.v1";
+const KEY_AUTH = "doudou_blend.auth.v1";
 
 /** 单个煤的用户偏好: 启用 + 价格覆盖 + 化验值覆盖 */
 export interface CoalPref {
@@ -137,4 +138,33 @@ export function appendHistory(entry: Omit<HistoryEntry, "id" | "occurred_at">): 
 export function clearHistory(): void {
   localStorage.removeItem(KEY_HISTORY);
   window.dispatchEvent(new CustomEvent("doudou:history_changed"));
+}
+
+// ============================================================
+// 认证 (轻量门禁, 非真正安全)
+// ============================================================
+//
+// 账号/密码 hardcoded 在前端, 防陌生人看到, 不防恶意攻击.
+// 任何人查看源码都能拿到密码, 严肃认证需要服务器, 但那违背"端算"哲学.
+// 这里就是"门口提示词", 跟某些工具站的访问码同性质.
+
+const AUTH_USER = "doudou";
+const AUTH_PASS = "123456";
+
+export function isLoggedIn(): boolean {
+  return localStorage.getItem(KEY_AUTH) === "1";
+}
+
+export function tryLogin(user: string, pass: string): boolean {
+  if (user.trim() === AUTH_USER && pass === AUTH_PASS) {
+    localStorage.setItem(KEY_AUTH, "1");
+    window.dispatchEvent(new CustomEvent("doudou:auth_changed"));
+    return true;
+  }
+  return false;
+}
+
+export function logout(): void {
+  localStorage.removeItem(KEY_AUTH);
+  window.dispatchEvent(new CustomEvent("doudou:auth_changed"));
 }

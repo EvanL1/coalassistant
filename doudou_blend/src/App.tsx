@@ -1,14 +1,28 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 import { TabBar, type TabId } from "./TabBar";
 import { TodayScreen } from "./screens/TodayScreen";
 import { CoalPoolScreen } from "./screens/CoalPoolScreen";
 import { ContractScreen } from "./screens/ContractScreen";
 import { HistoryScreen } from "./screens/HistoryScreen";
-import { PlaceholderScreen } from "./screens/PlaceholderScreen";
+import { MeScreen } from "./screens/MeScreen";
+import { LoginScreen } from "./LoginScreen";
+import { isLoggedIn } from "./storage";
 
 function App() {
   const [tab, setTab] = useState<TabId>("today");
+  const [authed, setAuthed] = useState(isLoggedIn());
+
+  // 监听认证变化 (登录/登出后自动切屏)
+  useEffect(() => {
+    const onChange = () => setAuthed(isLoggedIn());
+    window.addEventListener("doudou:auth_changed", onChange);
+    return () => window.removeEventListener("doudou:auth_changed", onChange);
+  }, []);
+
+  if (!authed) {
+    return <LoginScreen />;
+  }
 
   return (
     <div className="app">
@@ -17,13 +31,7 @@ function App() {
         {tab === "pool" && <CoalPoolScreen />}
         {tab === "contract" && <ContractScreen />}
         {tab === "history" && <HistoryScreen />}
-        {tab === "me" && (
-          <PlaceholderScreen
-            title="我的"
-            subtitle="设置 / 公式校准 / 关于"
-            hint="后续会加 CSR 回归校准、数据导出、关于豆哥配煤等设置项."
-          />
-        )}
+        {tab === "me" && <MeScreen />}
       </div>
       <TabBar active={tab} onChange={setTab} />
     </div>
