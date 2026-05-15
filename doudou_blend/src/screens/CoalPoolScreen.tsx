@@ -8,7 +8,12 @@ import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalStatus, MasterCoalEntry } from "../types";
 import { CoalEditor } from "../CoalEditor";
 import { NewCoalDialog } from "../NewCoalDialog";
-import { getCoalPrefs, getUserCoals, type CoalPrefs } from "../storage";
+import {
+  getCoalPrefs,
+  getUserCoals,
+  normalizeCoalName,
+  type CoalPrefs,
+} from "../storage";
 
 const STATUS_LABEL: Record<CoalStatus, string> = {
   verified: "主力煤",
@@ -31,6 +36,7 @@ export function CoalPoolScreen() {
   const [prefs, setPrefs] = useState<CoalPrefs>({});
   const [userCoals, setUserCoals] = useState<MasterCoalEntry[]>([]);
   const [filter, setFilter] = useState<CoalStatus | "all" | "enabled">("all");
+  const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<MasterCoalEntry | null>(null);
   const [showNew, setShowNew] = useState(false);
 
@@ -70,12 +76,21 @@ export function CoalPoolScreen() {
     return coal.status === "verified";
   }
 
-  const filtered =
+  const byStatus =
     filter === "all"
       ? allCoals
       : filter === "enabled"
       ? allCoals.filter(isEnabled)
       : allCoals.filter((c) => c.status === filter);
+
+  // 搜索: 大小写无关 + 全角空格容错, 匹配煤名 / 产地 / 煤类任一字段
+  const q = normalizeCoalName(query);
+  const filtered = q
+    ? byStatus.filter((c) => {
+        const hay = `${c.name} ${c.region ?? ""} ${c.coal_type ?? ""}`;
+        return normalizeCoalName(hay).includes(q);
+      })
+    : byStatus;
 
   return (
     <>
@@ -108,6 +123,37 @@ export function CoalPoolScreen() {
         </button>
       </div>
 
+      <div style={{ position: "relative", marginBottom: 10 }}>
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="搜索煤名 / 产地 / 煤类"
+          className="search-input"
+        />
+        {query && (
+          <button
+            aria-label="清空搜索"
+            onClick={() => setQuery("")}
+            style={{
+              position: "absolute",
+              right: 10,
+              top: "50%",
+              transform: "translateY(-50%)",
+              width: 22,
+              height: 22,
+              borderRadius: "50%",
+              background: "var(--c-text-3)",
+              color: "white",
+              fontSize: 14,
+              lineHeight: 1,
+            }}
+          >
+            ×
+          </button>
+        )}
+      </div>
+
       <div
         style={{
           display: "flex",
@@ -120,7 +166,7 @@ export function CoalPoolScreen() {
         <FilterChip
           active={filter === "all"}
           onClick={() => setFilter("all")}
-          label={`全部 ${master.coals.length}`}
+          label={`全部 ${allCoals.length}`}
         />
         <FilterChip
           active={filter === "enabled"}
@@ -137,14 +183,29 @@ export function CoalPoolScreen() {
         ))}
       </div>
 
-      {filtered.map((coal) => (
-        <CoalCard
-          key={coal.name}
-          coal={coal}
-          enabled={isEnabled(coal)}
-          onClick={() => setEditing(coal)}
-        />
-      ))}
+      {filtered.length === 0 ? (
+        <div
+          style={{
+            textAlign: "center",
+            color: "var(--c-text-3)",
+            fontSize: 13,
+            padding: "32px 16px",
+          }}
+        >
+          {query
+            ? `没找到匹配「${query}」的煤种`
+            : "当前过滤条件下没有煤种"}
+        </div>
+      ) : (
+        filtered.map((coal) => (
+          <CoalCard
+            key={coal.name}
+            coal={coal}
+            enabled={isEnabled(coal)}
+            onClick={() => setEditing(coal)}
+          />
+        ))
+      )}
 
       {editing && (
         <CoalEditor
