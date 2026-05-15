@@ -156,7 +156,8 @@ export function isLoggedIn(): boolean {
 }
 
 export function tryLogin(user: string, pass: string): boolean {
-  if (user.trim() === AUTH_USER && pass === AUTH_PASS) {
+  // 账号大小写无关 + 两端 trim, 密码 trim (防复制粘贴带空格/换行)
+  if (user.trim().toLowerCase() === AUTH_USER && pass.trim() === AUTH_PASS) {
     localStorage.setItem(KEY_AUTH, "1");
     window.dispatchEvent(new CustomEvent("doudou:auth_changed"));
     return true;
