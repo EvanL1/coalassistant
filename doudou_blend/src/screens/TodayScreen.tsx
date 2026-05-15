@@ -23,6 +23,7 @@ import {
   appendHistory,
   getCoalPrefs,
   getUserContract,
+  getUserCoals,
   type CoalPrefs,
 } from "../storage";
 
@@ -77,13 +78,15 @@ export function TodayScreen() {
 
   useEffect(() => {
     void runSolve();
-    // 监听 prefs/contract 变化, 自动重算
+    // 监听 prefs/contract/user_coals 变化, 自动重算
     const refresh = () => void runSolve();
     window.addEventListener("doudou:prefs_changed", refresh);
     window.addEventListener("doudou:contract_changed", refresh);
+    window.addEventListener("doudou:user_coals_changed", refresh);
     return () => {
       window.removeEventListener("doudou:prefs_changed", refresh);
       window.removeEventListener("doudou:contract_changed", refresh);
+      window.removeEventListener("doudou:user_coals_changed", refresh);
     };
   }, []);
 
@@ -93,10 +96,15 @@ export function TodayScreen() {
       const master = await loadMaster();
       const prefs = getCoalPrefs();
       const userContract = getUserContract();
+      const userCoals = getUserCoals();
 
-      // 启用煤集
-      const enabledMaster = master.coals.filter((c) => isEnabled(c, prefs));
-      const coals = enabledMaster
+      // 启用煤集: master + 用户新增 (新增的也走同样的启用判定 + override 流程)
+      // 没填 fob/frt 的会在 applyOverrides 里被过滤掉 (返回 null), 所以
+      // 用户刚新增、还没在 CoalEditor 里补价格的 draft 煤自动不会被卷进 LP.
+      const enabledAll = [...master.coals, ...userCoals].filter((c) =>
+        isEnabled(c, prefs),
+      );
+      const coals = enabledAll
         .map((c) => applyOverrides(c, prefs))
         .filter((c): c is Coal => c != null);
 

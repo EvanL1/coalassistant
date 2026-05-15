@@ -10,12 +10,13 @@
  *   - 重置 = 清空 localStorage 对应 key
  */
 
-import type { Spec } from "./types";
+import type { Spec, MasterCoalEntry } from "./types";
 
 const KEY_COAL_PREFS = "doudou_blend.coal_prefs.v1";
 const KEY_CONTRACT = "doudou_blend.contract.v1";
 const KEY_HISTORY = "doudou_blend.history.v1";
 const KEY_AUTH = "doudou_blend.auth.v1";
+const KEY_USER_COALS = "doudou_blend.user_coals.v1";
 
 /** 单个煤的用户偏好: 启用 + 价格覆盖 + 化验值覆盖 */
 export interface CoalPref {
@@ -138,6 +139,63 @@ export function appendHistory(entry: Omit<HistoryEntry, "id" | "occurred_at">): 
 export function clearHistory(): void {
   localStorage.removeItem(KEY_HISTORY);
   window.dispatchEvent(new CustomEvent("doudou:history_changed"));
+}
+
+// ============================================================
+// 用户新增的煤种
+// ============================================================
+//
+// master 73 种煤是只读 (嵌入 WASM), 用户新增的煤暂存这里.
+// 新增时仅录煤名/产地/煤类, 化验值后续在 CoalEditor 里补 (status=draft).
+// 注: 当前不参与求解, 等用户在 CoalEditor 补全化验值并启用后, 后续接求解器再说.
+
+export function getUserCoals(): MasterCoalEntry[] {
+  try {
+    const raw = localStorage.getItem(KEY_USER_COALS);
+    return raw ? (JSON.parse(raw) as MasterCoalEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function addUserCoal(coal: MasterCoalEntry): void {
+  const all = getUserCoals();
+  all.push(coal);
+  localStorage.setItem(KEY_USER_COALS, JSON.stringify(all));
+  window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
+}
+
+export function removeUserCoal(name: string): void {
+  const all = getUserCoals().filter((c) => c.name !== name);
+  localStorage.setItem(KEY_USER_COALS, JSON.stringify(all));
+  window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
+}
+
+export function clearUserCoals(): void {
+  localStorage.removeItem(KEY_USER_COALS);
+  window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
+}
+
+/**
+ * 煤名归一化用于查重: trim + 全角空格转半角 + 大小写无关.
+ * "老山兰 " / "老山兰" / "老山兰　" / "LaoShanLan" / "laoshanlan" 视为同一个名字.
+ */
+export function normalizeCoalName(s: string): string {
+  return s.replace(/　/g, " ").trim().toLowerCase();
+}
+
+/**
+ * 在已有煤种列表中找跟 candidate 同名的煤, 返回原始名字 (供 UI 提示);
+ * 找不到返回 null.
+ */
+export function findDuplicateCoalName(
+  candidate: string,
+  existing: { name: string }[],
+): string | null {
+  const target = normalizeCoalName(candidate);
+  if (!target) return null;
+  const hit = existing.find((c) => normalizeCoalName(c.name) === target);
+  return hit ? hit.name : null;
 }
 
 // ============================================================
