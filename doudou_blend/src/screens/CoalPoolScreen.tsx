@@ -2,12 +2,13 @@
  * 屏 2 - 煤池
  * 73+ 煤列表 + 状态过滤 + 点击编辑 (CoalEditor)
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalStatus, MasterCoalEntry } from "../types";
 import { CoalEditor } from "../CoalEditor";
-import { getCoalPrefs, type CoalPrefs } from "../storage";
+import { NewCoalDialog } from "../NewCoalDialog";
+import { getCoalPrefs, getUserCoals, type CoalPrefs } from "../storage";
 
 const STATUS_LABEL: Record<CoalStatus, string> = {
   verified: "主力煤",
@@ -28,25 +29,38 @@ const STATUS_ORDER: CoalStatus[] = [
 export function CoalPoolScreen() {
   const [master, setMaster] = useState<CoalMaster | null>(null);
   const [prefs, setPrefs] = useState<CoalPrefs>({});
+  const [userCoals, setUserCoals] = useState<MasterCoalEntry[]>([]);
   const [filter, setFilter] = useState<CoalStatus | "all" | "enabled">("all");
   const [editing, setEditing] = useState<MasterCoalEntry | null>(null);
+  const [showNew, setShowNew] = useState(false);
 
   useEffect(() => {
     loadMaster().then(setMaster).catch(console.error);
     setPrefs(getCoalPrefs());
+    setUserCoals(getUserCoals());
 
-    // 监听 prefs 变化
-    const onChange = () => setPrefs(getCoalPrefs());
-    window.addEventListener("doudou:prefs_changed", onChange);
-    return () => window.removeEventListener("doudou:prefs_changed", onChange);
+    const onPrefs = () => setPrefs(getCoalPrefs());
+    const onUserCoals = () => setUserCoals(getUserCoals());
+    window.addEventListener("doudou:prefs_changed", onPrefs);
+    window.addEventListener("doudou:user_coals_changed", onUserCoals);
+    return () => {
+      window.removeEventListener("doudou:prefs_changed", onPrefs);
+      window.removeEventListener("doudou:user_coals_changed", onUserCoals);
+    };
   }, []);
+
+  // master 73 种 + 用户新增的合并展示, 用户新增的排前 (新的更容易找到)
+  const allCoals = useMemo<MasterCoalEntry[]>(
+    () => (master ? [...userCoals, ...master.coals] : []),
+    [master, userCoals],
+  );
 
   if (!master) {
     return <div className="loading">加载中...</div>;
   }
 
   const counts: Record<string, number> = {};
-  for (const c of master.coals) {
+  for (const c of allCoals) {
     counts[c.status] = (counts[c.status] || 0) + 1;
   }
   function isEnabled(coal: MasterCoalEntry): boolean {
@@ -58,10 +72,10 @@ export function CoalPoolScreen() {
 
   const filtered =
     filter === "all"
-      ? master.coals
+      ? allCoals
       : filter === "enabled"
-      ? master.coals.filter(isEnabled)
-      : master.coals.filter((c) => c.status === filter);
+      ? allCoals.filter(isEnabled)
+      : allCoals.filter((c) => c.status === filter);
 
   return (
     <>
@@ -69,10 +83,29 @@ export function CoalPoolScreen() {
         <div>
           <h1 className="page-title">煤池</h1>
           <div className="page-subtitle">
-            共 {master.coals.length} 种煤 · 今日启用{" "}
-            {master.coals.filter(isEnabled).length} 种
+            共 {allCoals.length} 种煤
+            {userCoals.length > 0 && ` (含新增 ${userCoals.length})`}
+            {" · 今日启用 "}
+            {allCoals.filter(isEnabled).length} 种
           </div>
         </div>
+        <button
+          aria-label="新增煤种"
+          onClick={() => setShowNew(true)}
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: "50%",
+            background: "var(--c-primary)",
+            color: "white",
+            fontSize: 22,
+            fontWeight: 600,
+            lineHeight: 1,
+            boxShadow: "var(--shadow-sm)",
+          }}
+        >
+          +
+        </button>
       </div>
 
       <div
@@ -117,6 +150,13 @@ export function CoalPoolScreen() {
         <CoalEditor
           coal={editing}
           onClose={() => setEditing(null)}
+        />
+      )}
+
+      {showNew && (
+        <NewCoalDialog
+          existing={allCoals}
+          onClose={() => setShowNew(false)}
         />
       )}
     </>
