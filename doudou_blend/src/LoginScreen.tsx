@@ -102,7 +102,7 @@ export function LoginScreen() {
               type="password"
               value={pass}
               onChange={(e) => setPass(e.target.value)}
-              placeholder="••••••"
+              placeholder="请输入密码"
               autoComplete="current-password"
             />
           </label>
