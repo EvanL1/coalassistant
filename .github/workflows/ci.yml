@@ -1,8 +1,7 @@
 # 豆哥配煤 - 持续集成
-# 三条平行链路, 任何一条挂都拦合并:
+# 两条平行链路, 任何一条挂都拦合并:
 #   1. blend_kit_rs  Rust 算法核心 (cargo test)
 #   2. worker        Cloudflare Worker 44 个集成测试 (vitest + miniflare D1)
-#   3. flutter       鸿蒙端 Dart 静态分析 + 40 测试 (sqflite_ffi 内存 DB)
 name: CI
 
 on:
@@ -78,31 +77,3 @@ jobs:
       - name: "npm test (vitest workers pool, 44 个)"
         working-directory: doudou_blend
         run: npm test
-
-  # ============================================================
-  # 3) Flutter - 鸿蒙端 Dart 测试
-  # ============================================================
-  flutter:
-    name: Flutter (analyze + 40 测试)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          flutter-version: '3.27.x'
-          cache: true
-
-      - name: flutter pub get
-        working-directory: doudou_blend_flutter
-        run: flutter pub get
-
-      - name: flutter analyze
-        working-directory: doudou_blend_flutter
-        run: flutter analyze
-
-      - name: "flutter test (40 个: models / repos / solver)"
-        working-directory: doudou_blend_flutter
-        run: flutter test
