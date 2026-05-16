@@ -89,8 +89,6 @@ jobs:
         run: |
           set -euo pipefail
           export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-} -Duser.country=CN"
-          # 注意: sdkmgr install 调华为服务器, 可能受 GFW 反向影响 (海外 runner
-          # 拉国内服务器). 用 || true 兜底, 让下一步能看到具体缺啥
           command-line-tools/sdkmanager/bin/sdkmgr install \
             toolchains:9 OpenHarmony/toolchains:9 --accept-license || true
           echo "--- 检查产物 ---"
@@ -111,24 +109,22 @@ jobs:
         working-directory: doudou_blend_flutter
         run: |
           export PATH=$HOME/flutter_ohos/bin:$PATH
-          # || true: 不同 fork 版本对 --platforms ohos 支持差异大, 先尝试,
-          # 失败也让后续 step 看到产物 (或缺产物)
           flutter create . --platforms ohos --org com.doudou --project-name doudou_blend_flutter || true
           echo "--- ohos/ 目录 ---"
           ls -la ohos/ 2>/dev/null || echo "ohos/ 未生成"
 
       # ----------------------------------------------------------
-      # 4) pubspec_overrides
+      # 4) pubspec_overrides — 这轮只放确定有 OH 端口的:
+      #    path_provider / shared_preferences 路径已经 search 确认
+      #    sqflite 暂时不 override (flutter_packages 仓库里没收 sqflite),
+      #    后续 flutter build hap 报错时再换源 (sqflite_ohos pub 包 或
+      #    单独 git 仓库)
       # ----------------------------------------------------------
       - name: Write pubspec_overrides.yaml
         working-directory: doudou_blend_flutter
         run: |
           cat > pubspec_overrides.yaml <<'EOF'
           dependency_overrides:
-            sqflite:
-              git:
-                url: https://gitcode.com/openharmony-sig/flutter_packages.git
-                path: packages/sqflite/sqflite
             path_provider:
               git:
                 url: https://gitcode.com/openharmony-sig/flutter_packages.git
