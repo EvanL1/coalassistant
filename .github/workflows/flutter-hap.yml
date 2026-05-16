@@ -6,19 +6,7 @@
 # 产物: doudou_blend_flutter/build/ohos/outputs/.../entry-default-unsigned.hap
 #       作为 GH Actions artifact 上传, 14 天保留.
 #
-# **当前状态: 实验性**
-# 鸿蒙 Flutter 工程在 CI 上构建链路是:
-#   1. 拉 OpenHarmony Flutter fork SDK (gitcode 镜像) - shallow + unshallow 拉 tags
-#   2. 用 openharmony-rs/setup-ohos-sdk action 装 OH SDK 6.1 (API 23,
-#      对应 Mate X5 鸿蒙 6.1). 这个 action 是 GitHub Releases mirror,
-#      不调华为 CDN, 海外 runner 也能 30 秒拉下来 + 自动缓存
-#   3. 装 hvigor 通过 npm @ohos:registry
-#   4. flutter create . --platforms ohos (生成 ohos/ 模块)
-#   5. pubspec_overrides.yaml 把 path_provider / shared_preferences 指
-#      向 openharmony-sig/flutter_packages
-#   6. flutter pub get
-#   7. flutter build hap --debug → unsigned .hap
-#
+# **当前状态: 实验性, 迭代中**
 # 已修过的卡点:
 #   - run 1: API rate limit (cmdline-tools 用 API 查 latest) → 硬编码 URL
 #     [此版本已经不需要 cmdline-tools 了, 整个步骤删了]
@@ -26,11 +14,8 @@
 #   - run 3: Flutter OH fork shallow 没 tags, version=0.0.0 → unshallow
 #   - run 4: sdkmgr 调华为 CDN 海外不通, HOS_SDK_HOME 指向空目录 → 改用
 #     openharmony-rs/setup-ohos-sdk
-#
-# 还可能踩的:
-#   - sqflite 没 ohos 端口 (flutter build hap 时会报)
-#   - flutter create ohos 命令行支持差异
-#   - 签名: 当前只出 unsigned .hap, 装真机需要 dev cert. 后续加 secrets.
+#   - run 5: SDK 装上了但 flutter 仍报 "No Hmos SDK found" → 加诊断 ls + 用
+#     `flutter config --ohos-sdk` 显式注入路径 + flutter doctor 验证
 name: Build HarmonyOS .hap
 
 on:
@@ -60,20 +45,18 @@ jobs:
           node-version: '18'
 
       # ----------------------------------------------------------
-      # 1) Flutter for OpenHarmony fork (必须 unshallow 拉 tags)
+      # 1) Flutter OH fork (unshallow 拉 tags)
       # ----------------------------------------------------------
       - name: Clone Flutter OH fork (full, 含 tags)
         run: |
           set -euo pipefail
           git clone --depth 1 https://gitcode.com/openharmony-sig/flutter_flutter.git $HOME/flutter_ohos
           cd $HOME/flutter_ohos
-          echo "--- 补拉 tags (flutter --version 解析依赖) ---"
           git fetch --unshallow
           git fetch --tags
           git describe --tags --abbrev=0 || echo "no tag found"
           echo "$HOME/flutter_ohos/bin" >> $GITHUB_PATH
           export PATH=$HOME/flutter_ohos/bin:$PATH
-          echo "--- flutter --version 输出 ---"
           flutter --version
 
       - name: Pre-cache Flutter
@@ -83,28 +66,57 @@ jobs:
           flutter precache
 
       # ----------------------------------------------------------
-      # 2) OH SDK 6.1 (API 23, 对应 Mate X5 鸿蒙 6.1)
-      #    走 GitHub Releases mirror, 不调华为 CDN
+      # 2) OH SDK 6.1 (API 23, Mate X5)
       # ----------------------------------------------------------
       - name: Setup OpenHarmony SDK 6.1
         id: ohos_sdk
         uses: openharmony-rs/setup-ohos-sdk@v1.0.0
         with:
           version: '6.1'
+          components: 'all'    # 显式 all, 包括 toolchains + ets + js + previewer
           cache: true
 
-      - name: Compute HOS_SDK_HOME (native 的上一级)
+      - name: 诊断 - SDK 实际内容
         run: |
           set -euo pipefail
           NATIVE="${{ steps.ohos_sdk.outputs.ohos_sdk_native }}"
-          echo "ohos_sdk_native = $NATIVE"
+          BASE="${{ steps.ohos_sdk.outputs.ohos-base-sdk-home }}"
+          echo "=== ohos_sdk_native = $NATIVE ==="
+          echo "=== ohos-base-sdk-home = $BASE ==="
+          echo "=== outputs.sdk-version = ${{ steps.ohos_sdk.outputs.sdk-version }} ==="
+          echo "=== outputs.api-version = ${{ steps.ohos_sdk.outputs.api-version }} ==="
+          echo
+          echo "=== BASE 顶层 ==="
+          ls -la "$BASE"
+          echo
+          echo "=== 找 native dir ==="
+          find "$BASE" -maxdepth 3 -name native -type d 2>/dev/null
+          echo
+          echo "=== 找 toolchains dir ==="
+          find "$BASE" -maxdepth 3 -name toolchains -type d 2>/dev/null
+          echo
+          echo "=== 找 oh-uni-package.json ==="
+          find "$BASE" -maxdepth 3 -name "oh-uni-package.json" 2>/dev/null
+          # 算出 Flutter 期望的 HOS_SDK_HOME: native 的直接父目录
           HOS_HOME="$(dirname "$NATIVE")"
-          echo "HOS_SDK_HOME = $HOS_HOME"
           echo "HOS_SDK_HOME=$HOS_HOME" >> $GITHUB_ENV
+          echo "--- 选定 HOS_SDK_HOME = $HOS_HOME ---"
           ls -la "$HOS_HOME"
 
+      # 显式告诉 Flutter SDK 在哪 (env var 有些 fork 不认, config 文件靠谱)
+      - name: flutter config --ohos-sdk
+        run: |
+          set -euo pipefail
+          export PATH=$HOME/flutter_ohos/bin:$PATH
+          flutter config --ohos-sdk "$HOS_SDK_HOME" || flutter config | grep -i ohos || true
+
+      - name: flutter doctor -v (诊断 SDK 找不找得到)
+        run: |
+          export PATH=$HOME/flutter_ohos/bin:$PATH
+          flutter doctor -v || true
+
       # ----------------------------------------------------------
-      # 3) hvigor (鸿蒙构建工具, 通过 npm)
+      # 3) hvigor
       # ----------------------------------------------------------
       - name: Install hvigor
         run: |
@@ -125,7 +137,7 @@ jobs:
           ls -la ohos/ 2>/dev/null || echo "ohos/ 未生成"
 
       # ----------------------------------------------------------
-      # 5) pubspec_overrides — 只保留确认有 OH 端口的两个
+      # 5) pubspec_overrides
       # ----------------------------------------------------------
       - name: Write pubspec_overrides.yaml
         working-directory: doudou_blend_flutter
@@ -156,7 +168,6 @@ jobs:
         working-directory: doudou_blend_flutter
         run: |
           export PATH=$HOME/flutter_ohos/bin:$PATH
-          # HOS_SDK_HOME 已经在前面的 step export 到 GITHUB_ENV
           echo "HOS_SDK_HOME=$HOS_SDK_HOME"
           flutter build hap --debug 2>&1 | tee build.log
 
