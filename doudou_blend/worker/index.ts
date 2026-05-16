@@ -87,6 +87,14 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
     return json({ error: "Method not allowed" }, 405);
   }
 
+  // 通用 KV: prefs / contract / history 都走这里
+  if (url.pathname === "/api/settings") {
+    if (req.method === "GET") return handleGetSetting(env, url);
+    if (req.method === "PUT") return handlePutSetting(req, env);
+    if (req.method === "DELETE") return handleDeleteSetting(env, url);
+    return json({ error: "Method not allowed" }, 405);
+  }
+
   return json({ error: "Not found" }, 404);
 }
 
@@ -213,6 +221,53 @@ async function handleMigrate(req: Request, env: Env): Promise<Response> {
     }
   }
   return json({ ok: true, imported });
+}
+
+// ============================================================
+// Settings KV (coal_prefs / user_contract / history)
+// ============================================================
+
+async function handleGetSetting(env: Env, url: URL): Promise<Response> {
+  const key = url.searchParams.get("key");
+  if (!key) return json({ ok: false, error: "缺少 key" }, 400);
+  const row = await env.DB.prepare(
+    `SELECT value FROM user_settings WHERE key = ?`,
+  )
+    .bind(key)
+    .first<{ value: string }>();
+  return json({ value: row?.value ?? null });
+}
+
+async function handlePutSetting(req: Request, env: Env): Promise<Response> {
+  let body: { key?: string; value?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return json({ ok: false, error: "请求体不是合法 JSON" }, 400);
+  }
+  const { key, value } = body;
+  if (!key || typeof value !== "string") {
+    return json({ ok: false, error: "缺少 key/value" }, 400);
+  }
+  await env.DB.prepare(
+    `INSERT INTO user_settings (key, value)
+     VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET
+       value = excluded.value,
+       updated_at = datetime('now')`,
+  )
+    .bind(key, value)
+    .run();
+  return json({ ok: true });
+}
+
+async function handleDeleteSetting(env: Env, url: URL): Promise<Response> {
+  const key = url.searchParams.get("key");
+  if (!key) return json({ ok: false, error: "缺少 key" }, 400);
+  await env.DB.prepare(`DELETE FROM user_settings WHERE key = ?`)
+    .bind(key)
+    .run();
+  return json({ ok: true });
 }
 
 // ============================================================

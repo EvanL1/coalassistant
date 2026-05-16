@@ -87,3 +87,32 @@ export async function apiMigrateCoals(coals: MasterCoalEntry[]): Promise<number>
   const data = (await resp.json()) as { imported: number };
   return data.imported;
 }
+
+// ============================================================
+// 通用 KV settings (coal_prefs / user_contract / history)
+// ============================================================
+
+export async function apiGetSetting(key: string): Promise<string | null> {
+  const resp = await authFetch(
+    `/api/settings?key=${encodeURIComponent(key)}`,
+  );
+  if (!resp.ok) throw new Error(`GET /api/settings 失败: ${resp.status}`);
+  const data = (await resp.json()) as { value: string | null };
+  return data.value;
+}
+
+export async function apiPutSetting(key: string, value: string): Promise<void> {
+  const resp = await authFetch("/api/settings", {
+    method: "PUT",
+    body: JSON.stringify({ key, value }),
+  });
+  if (!resp.ok) throw new Error(`PUT /api/settings 失败: ${resp.status}`);
+}
+
+export async function apiDeleteSetting(key: string): Promise<void> {
+  const resp = await authFetch(
+    `/api/settings?key=${encodeURIComponent(key)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(`DELETE /api/settings 失败: ${resp.status}`);
+}

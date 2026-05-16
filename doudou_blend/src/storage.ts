@@ -14,8 +14,11 @@ import type { Spec, MasterCoalEntry } from "./types";
 import {
   apiAddCoal,
   apiDeleteCoal,
+  apiDeleteSetting,
+  apiGetSetting,
   apiListCoals,
   apiMigrateCoals,
+  apiPutSetting,
   clearApiToken,
   getApiToken,
   setApiToken,
@@ -27,6 +30,24 @@ const KEY_HISTORY = "doudou_blend.history.v1";
 const KEY_AUTH = "doudou_blend.auth.v1";
 const KEY_USER_COALS = "doudou_blend.user_coals.v1";
 const KEY_USER_COALS_MIGRATED = "doudou_blend.user_coals_migrated.v1";
+const KEY_SETTINGS_MIGRATED = "doudou_blend.settings_migrated.v1";
+
+// D1 settings 表里的 key 约定 (跟 schema.sql 注释保持一致)
+const SETTING_COAL_PREFS = "coal_prefs";
+const SETTING_USER_CONTRACT = "user_contract";
+const SETTING_HISTORY = "history";
+
+/**
+ * Fire-and-forget D1 sync: 调用方接口保持同步, 后台静默 sync.
+ * 失败 (离线/未登录) 只 console.warn, UI 不阻塞.
+ */
+function syncSetting(key: string, value: string | null): void {
+  if (!getApiToken()) return;
+  const op = value === null
+    ? apiDeleteSetting(key)
+    : apiPutSetting(key, value);
+  void op.catch((e) => console.warn(`sync ${key} 失败:`, e));
+}
 
 /** 单个煤的用户偏好: 启用 + 价格覆盖 + 化验值覆盖 */
 export interface CoalPref {
@@ -74,8 +95,9 @@ export function setCoalPref(name: string, pref: Partial<CoalPref>): void {
     ...pref,
     updated_at: new Date().toISOString(),
   } as CoalPref;
-  localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(all));
-  // 派发自定义事件让其他组件订阅
+  const serialized = JSON.stringify(all);
+  localStorage.setItem(KEY_COAL_PREFS, serialized);
+  syncSetting(SETTING_COAL_PREFS, serialized);
   window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
 }
 
@@ -86,12 +108,15 @@ export function getCoalPref(name: string): CoalPref | null {
 export function clearCoalPref(name: string): void {
   const all = getCoalPrefs();
   delete all[name];
-  localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(all));
+  const serialized = JSON.stringify(all);
+  localStorage.setItem(KEY_COAL_PREFS, serialized);
+  syncSetting(SETTING_COAL_PREFS, serialized);
   window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
 }
 
 export function clearAllCoalPrefs(): void {
   localStorage.removeItem(KEY_COAL_PREFS);
+  syncSetting(SETTING_COAL_PREFS, null);
   window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
 }
 
@@ -109,12 +134,15 @@ export function getUserContract(): Spec[] | null {
 }
 
 export function setUserContract(specs: Spec[]): void {
-  localStorage.setItem(KEY_CONTRACT, JSON.stringify(specs));
+  const serialized = JSON.stringify(specs);
+  localStorage.setItem(KEY_CONTRACT, serialized);
+  syncSetting(SETTING_USER_CONTRACT, serialized);
   window.dispatchEvent(new CustomEvent("doudou:contract_changed"));
 }
 
 export function clearUserContract(): void {
   localStorage.removeItem(KEY_CONTRACT);
+  syncSetting(SETTING_USER_CONTRACT, null);
   window.dispatchEvent(new CustomEvent("doudou:contract_changed"));
 }
 
@@ -141,13 +169,16 @@ export function appendHistory(entry: Omit<HistoryEntry, "id" | "occurred_at">): 
   all.unshift(full); // 最新在前
   // 保留最近 100 条避免无限增长
   if (all.length > 100) all.length = 100;
-  localStorage.setItem(KEY_HISTORY, JSON.stringify(all));
+  const serialized = JSON.stringify(all);
+  localStorage.setItem(KEY_HISTORY, serialized);
+  syncSetting(SETTING_HISTORY, serialized);
   window.dispatchEvent(new CustomEvent("doudou:history_changed"));
   return full;
 }
 
 export function clearHistory(): void {
   localStorage.removeItem(KEY_HISTORY);
+  syncSetting(SETTING_HISTORY, null);
   window.dispatchEvent(new CustomEvent("doudou:history_changed"));
 }
 
@@ -246,6 +277,59 @@ export async function migrateLocalCoalsToD1(): Promise<number> {
   }
 }
 
+// ============================================================
+// settings (coal_prefs / contract / history) 拉取 + 迁移
+// ============================================================
+
+/** 从 D1 拉所有 settings, 覆盖 localStorage cache + 派发 events. */
+export async function refreshSettings(): Promise<void> {
+  if (!getApiToken()) return;
+  try {
+    const [prefsJson, contractJson, historyJson] = await Promise.all([
+      apiGetSetting(SETTING_COAL_PREFS),
+      apiGetSetting(SETTING_USER_CONTRACT),
+      apiGetSetting(SETTING_HISTORY),
+    ]);
+
+    if (prefsJson !== null) {
+      localStorage.setItem(KEY_COAL_PREFS, prefsJson);
+      window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
+    }
+    if (contractJson !== null) {
+      localStorage.setItem(KEY_CONTRACT, contractJson);
+      window.dispatchEvent(new CustomEvent("doudou:contract_changed"));
+    }
+    if (historyJson !== null) {
+      localStorage.setItem(KEY_HISTORY, historyJson);
+      window.dispatchEvent(new CustomEvent("doudou:history_changed"));
+    }
+  } catch (e) {
+    console.warn("refreshSettings 失败:", e);
+  }
+}
+
+/**
+ * 一次性: 把 localStorage 里的 prefs/contract/history 上传到 D1.
+ * 跟 migrateLocalCoalsToD1 同模式, 已迁移设备不重复跑.
+ */
+export async function migrateLocalSettingsToD1(): Promise<void> {
+  if (!getApiToken()) return;
+  if (localStorage.getItem(KEY_SETTINGS_MIGRATED) === "1") return;
+  try {
+    const prefs = localStorage.getItem(KEY_COAL_PREFS);
+    const contract = localStorage.getItem(KEY_CONTRACT);
+    const history = localStorage.getItem(KEY_HISTORY);
+    const tasks: Promise<void>[] = [];
+    if (prefs) tasks.push(apiPutSetting(SETTING_COAL_PREFS, prefs));
+    if (contract) tasks.push(apiPutSetting(SETTING_USER_CONTRACT, contract));
+    if (history) tasks.push(apiPutSetting(SETTING_HISTORY, history));
+    await Promise.all(tasks);
+    localStorage.setItem(KEY_SETTINGS_MIGRATED, "1");
+  } catch (e) {
+    console.warn("migrateLocalSettingsToD1 失败:", e);
+  }
+}
+
 /**
  * 煤名归一化用于查重: trim + 全角空格转半角 + 大小写无关.
  * "老山兰 " / "老山兰" / "老山兰　" / "LaoShanLan" / "laoshanlan" 视为同一个名字.
@@ -291,8 +375,9 @@ export function tryLogin(user: string, pass: string): boolean {
     // (服务器 secret AUTH_PASS 跟前端 hardcoded AUTH_PASS 必须一致)
     setApiToken(pass.trim());
     window.dispatchEvent(new CustomEvent("doudou:auth_changed"));
-    // 后台触发: 把旧 localStorage user_coals 迁移到 D1 (只跑一次), 然后拉最新
+    // 后台触发: 旧 localStorage 数据迁移到 D1 (各只跑一次), 然后拉最新
     void migrateLocalCoalsToD1().then(() => void refreshUserCoals());
+    void migrateLocalSettingsToD1().then(() => void refreshSettings());
     return true;
   }
   return false;

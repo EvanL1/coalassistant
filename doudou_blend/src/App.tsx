@@ -7,7 +7,7 @@ import { ContractScreen } from "./screens/ContractScreen";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { MeScreen } from "./screens/MeScreen";
 import { LoginScreen } from "./LoginScreen";
-import { isLoggedIn } from "./storage";
+import { isLoggedIn, refreshSettings, refreshUserCoals } from "./storage";
 
 function App() {
   const [tab, setTab] = useState<TabId>("today");
@@ -19,6 +19,14 @@ function App() {
     window.addEventListener("doudou:auth_changed", onChange);
     return () => window.removeEventListener("doudou:auth_changed", onChange);
   }, []);
+
+  // 启动时已登录: 后台拉 D1 最新数据 (新设备打开应用就能看到其他设备改的)
+  useEffect(() => {
+    if (authed) {
+      void refreshUserCoals();
+      void refreshSettings();
+    }
+  }, [authed]);
 
   if (!authed) {
     return <LoginScreen />;
