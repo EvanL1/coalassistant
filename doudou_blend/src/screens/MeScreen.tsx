@@ -21,7 +21,11 @@ function getStats() {
   };
 }
 
-export function MeScreen() {
+interface MeProps {
+  onNavigate: (id: "contract" | "history" | "pool") => void;
+}
+
+export function MeScreen({ onNavigate }: MeProps) {
   const [stats, setStats] = useState(getStats());
 
   useEffect(() => {
@@ -75,15 +79,29 @@ export function MeScreen() {
         </div>
       </div>
 
-      {/* 数据状态 */}
+      {/* 配置入口 */}
       <div className="card">
-        <div className="card-title">本地数据</div>
-        <Row label="煤偏好覆盖" value={`${stats.prefs_count} 项`} />
-        <Row
-          label="自定义合同"
-          value={stats.has_user_contract ? "已修改" : "用默认"}
+        <div className="card-title">配置 / 数据</div>
+        <NavButton
+          label="煤池"
+          hint="管理 73 + 自建煤种, 改价格 / 启用"
+          onClick={() => onNavigate("pool")}
         />
-        <Row label="历史方案" value={`${stats.history_count} 条`} isLast />
+        <NavButton
+          label="合同指标"
+          hint={
+            stats.has_user_contract
+              ? "已修改 (覆盖 master 默认)"
+              : "用 master 默认 8 项"
+          }
+          onClick={() => onNavigate("contract")}
+        />
+        <NavButton
+          label="历史方案"
+          hint={`${stats.history_count} 条`}
+          onClick={() => onNavigate("history")}
+        />
+        <Row label="煤偏好覆盖" value={`${stats.prefs_count} 项`} isLast />
       </div>
 
       {/* 危险区 */}
@@ -169,6 +187,39 @@ function Row({
       <span style={{ color: "var(--c-text-2)" }}>{label}</span>
       <span style={{ fontWeight: 500 }}>{value}</span>
     </div>
+  );
+}
+
+function NavButton({
+  label,
+  hint,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: "flex",
+        width: "100%",
+        textAlign: "left",
+        padding: "12px 0",
+        borderBottom: "1px solid var(--c-border)",
+        justifyContent: "space-between",
+        alignItems: "center",
+      }}
+    >
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 500 }}>{label}</div>
+        <div style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 2 }}>
+          {hint}
+        </div>
+      </div>
+      <span style={{ color: "var(--c-text-3)", fontSize: 18 }}>›</span>
+    </button>
   );
 }
 

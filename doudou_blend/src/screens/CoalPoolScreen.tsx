@@ -12,6 +12,7 @@ import {
   getCoalPrefs,
   getUserCoals,
   normalizeCoalName,
+  refreshUserCoals,
   type CoalPrefs,
 } from "../storage";
 
@@ -31,7 +32,11 @@ const STATUS_ORDER: CoalStatus[] = [
   "archived",
 ];
 
-export function CoalPoolScreen() {
+interface PoolProps {
+  onBack?: () => void;
+}
+
+export function CoalPoolScreen({ onBack }: PoolProps = {}) {
   const [master, setMaster] = useState<CoalMaster | null>(null);
   const [prefs, setPrefs] = useState<CoalPrefs>({});
   const [userCoals, setUserCoals] = useState<MasterCoalEntry[]>([]);
@@ -43,7 +48,8 @@ export function CoalPoolScreen() {
   useEffect(() => {
     loadMaster().then(setMaster).catch(console.error);
     setPrefs(getCoalPrefs());
-    setUserCoals(getUserCoals());
+    setUserCoals(getUserCoals()); // 立即用 cache 渲染
+    void refreshUserCoals(); // 后台拉服务器最新
 
     const onPrefs = () => setPrefs(getCoalPrefs());
     const onUserCoals = () => setUserCoals(getUserCoals());
@@ -96,6 +102,19 @@ export function CoalPoolScreen() {
     <>
       <div className="page-header">
         <div>
+          {onBack && (
+            <button
+              onClick={onBack}
+              style={{
+                fontSize: 13,
+                color: "var(--c-text-3)",
+                marginBottom: 4,
+                padding: 0,
+              }}
+            >
+              ‹ 返回我的
+            </button>
+          )}
           <h1 className="page-title">煤池</h1>
           <div className="page-subtitle">
             共 {allCoals.length} 种煤

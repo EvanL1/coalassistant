@@ -7,3 +7,15 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <App />
   </React.StrictMode>,
 );
+
+// PWA: 注册 service worker (仅 https 生效, dev 模式 file:// 跳过)
+if (
+  "serviceWorker" in navigator &&
+  (location.protocol === "https:" || location.hostname === "localhost")
+) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch((err) => {
+      console.warn("SW register failed:", err);
+    });
+  });
+}

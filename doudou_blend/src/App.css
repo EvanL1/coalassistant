@@ -610,3 +610,30 @@ button {
   font-size: 22px;
   margin: 0 0 8px;
 }
+
+/* ========== 打印 (报价单 PDF) ========== */
+.print-only {
+  display: none;
+}
+
+@media print {
+  body.printing-quote * {
+    visibility: hidden !important;
+  }
+  body.printing-quote .print-only,
+  body.printing-quote .print-only * {
+    visibility: visible !important;
+  }
+  body.printing-quote .print-only {
+    display: block !important;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 30px;
+    box-sizing: border-box;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #000;
+    background: white;
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "豆哥配煤",
+  "short_name": "豆哥配煤",
+  "description": "主焦煤配煤优化 - LP 求解, 跨设备同步",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f5f6f8",
+  "theme_color": "#0a5fff",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

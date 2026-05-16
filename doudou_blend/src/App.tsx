@@ -6,8 +6,18 @@ import { CoalPoolScreen } from "./screens/CoalPoolScreen";
 import { ContractScreen } from "./screens/ContractScreen";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { MeScreen } from "./screens/MeScreen";
+import { CustomersScreen } from "./screens/CustomersScreen";
+import { QuotesScreen } from "./screens/QuotesScreen";
+import { ContractsScreen } from "./screens/ContractsScreen";
 import { LoginScreen } from "./LoginScreen";
-import { isLoggedIn } from "./storage";
+import {
+  isLoggedIn,
+  refreshContracts,
+  refreshCustomers,
+  refreshQuotes,
+  refreshSettings,
+  refreshUserCoals,
+} from "./storage";
 
 function App() {
   const [tab, setTab] = useState<TabId>("today");
@@ -20,6 +30,17 @@ function App() {
     return () => window.removeEventListener("doudou:auth_changed", onChange);
   }, []);
 
+  // 启动时已登录: 后台拉 D1 最新数据 (新设备打开应用就能看到其他设备改的)
+  useEffect(() => {
+    if (authed) {
+      void refreshUserCoals();
+      void refreshSettings();
+      void refreshCustomers();
+      void refreshQuotes();
+      void refreshContracts();
+    }
+  }, [authed]);
+
   if (!authed) {
     return <LoginScreen />;
   }
@@ -28,10 +49,13 @@ function App() {
     <div className="app">
       <div className="app-content">
         {tab === "today" && <TodayScreen />}
-        {tab === "pool" && <CoalPoolScreen />}
-        {tab === "contract" && <ContractScreen />}
-        {tab === "history" && <HistoryScreen />}
-        {tab === "me" && <MeScreen />}
+        {tab === "customers" && <CustomersScreen />}
+        {tab === "quotes" && <QuotesScreen />}
+        {tab === "contracts" && <ContractsScreen />}
+        {tab === "pool" && <CoalPoolScreen onBack={() => setTab("me")} />}
+        {tab === "contract" && <ContractScreen onBack={() => setTab("me")} />}
+        {tab === "history" && <HistoryScreen onBack={() => setTab("me")} />}
+        {tab === "me" && <MeScreen onNavigate={setTab} />}
       </div>
       <TabBar active={tab} onChange={setTab} />
     </div>

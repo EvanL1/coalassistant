@@ -7,21 +7,27 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
-    "blend-kit-wasm": "file:../blend_kit_wasm/pkg"
+    "blend-kit-wasm": "file:../blend_kit_wasm/pkg",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.6",
+    "@cloudflare/workers-types": "^4.20260515.1",
+    "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "@tauri-apps/cli": "^2"
+    "vitest": "^4.1.6",
+    "wrangler": "^4.92.0"
   }
 }
