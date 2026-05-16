@@ -21,5 +21,4 @@ pages_build_output_dir = "dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "coalassistant"
-# 创建数据库后 wrangler 会输出 database_id, 填到这里:
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "6d3637c4-f35e-4892-b2da-1d0caf445616"
