@@ -14,8 +14,8 @@
 #   4. 装 pubspec_overrides.yaml 把插件指向 OH 端口
 #   5. flutter build hap --debug
 #
-# 第一次跑大概率会红, 据 log 迭代. 已知卡点:
-#   - 鸿蒙 SDK 下载链接 (社区 mirror 偶尔会改 URL)
+# 已知卡点 (持续迭代):
+#   - macOS runner 频繁撞 GitHub API rate limit, 所以 SDK URL 硬编码 (写死版本)
 #   - 插件 OH 端口的版本兼容 (sqflite_ohos 跟主 sqflite 版本对得上才行)
 #   - 签名: 当前只出 unsigned .hap, 装真机需要 dev cert. 后续加 secrets.
 name: Build HarmonyOS .hap
@@ -25,6 +25,11 @@ on:
   push:
     tags:
       - 'hap-v*'
+
+env:
+  # 硬编码 OpenHarmony cmdline SDK 版本 (社区 mirror, 不需要华为账号).
+  # 用 API 查 /releases/latest 会撞 GH runner 共享 IP 的 rate limit. 写死.
+  HOS_CMDLINE_URL: https://github.com/harmonyos-dev/hos-sdk/releases/download/v2.0.2/commandline-tools-mac-2.0.0.2.zip
 
 jobs:
   build:
@@ -51,6 +56,7 @@ jobs:
       # ----------------------------------------------------------
       - name: Clone Flutter OH fork
         run: |
+          set -euo pipefail
           git clone --depth 1 https://gitcode.com/openharmony-sig/flutter_flutter.git $HOME/flutter_ohos
           echo "$HOME/flutter_ohos/bin" >> $GITHUB_PATH
           export PATH=$HOME/flutter_ohos/bin:$PATH
@@ -58,48 +64,61 @@ jobs:
 
       - name: Pre-cache Flutter
         run: |
+          set -euo pipefail
           export PATH=$HOME/flutter_ohos/bin:$PATH
           flutter precache
 
       # ----------------------------------------------------------
-      # 2) 鸿蒙命令行 SDK (社区 mirror)
+      # 2) 鸿蒙命令行 SDK
       # ----------------------------------------------------------
-      - name: Install HarmonyOS command-line tools
+      - name: Download HarmonyOS command-line tools
         run: |
-          RELEASE_JSON=$(curl -s -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/harmonyos-dev/hos-sdk/releases/latest)
-          ASSET_URL=$(echo "$RELEASE_JSON" | jq -r \
-            '.assets[] | select(.name | test("commandline-tools-mac-.*.zip")) | .browser_download_url' | head -1)
-          echo "下载 $ASSET_URL"
-          curl -L -o cmdline-tools.zip "$ASSET_URL"
+          set -euo pipefail
+          echo "Downloading: $HOS_CMDLINE_URL"
+          curl -L --fail -o cmdline-tools.zip "$HOS_CMDLINE_URL"
+          ls -lh cmdline-tools.zip
+          file cmdline-tools.zip
           unzip -q cmdline-tools.zip
-          chmod +x command-line-tools/sdkmanager/bin/sdkmgr || true
+          echo "--- unzip done, listing tree ---"
+          ls -la
+          ls -la command-line-tools/ || echo "no command-line-tools dir"
+          ls -la command-line-tools/sdkmanager/bin/ || echo "no sdkmanager/bin"
+          chmod +x command-line-tools/sdkmanager/bin/sdkmgr
 
       - name: Install OH SDK packages
         run: |
-          export JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS -Duser.country=CN"
+          set -euo pipefail
+          export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-} -Duser.country=CN"
+          # 注意: sdkmgr install 调华为服务器, 可能受 GFW 反向影响 (海外 runner
+          # 拉国内服务器). 用 || true 兜底, 让下一步能看到具体缺啥
           command-line-tools/sdkmanager/bin/sdkmgr install \
             toolchains:9 OpenHarmony/toolchains:9 --accept-license || true
+          echo "--- 检查产物 ---"
+          ls -la hwsdk/ 2>/dev/null || echo "hwsdk dir 不存在"
           echo "HOS_SDK_HOME=$(pwd)/hwsdk" >> $GITHUB_ENV
 
       - name: Install hvigor
         run: |
+          set -euo pipefail
           npm init -y > /dev/null
           npm config set @ohos:registry=https://repo.harmonyos.com/npm/
           npm install @ohos/hvigor@2.4.2 @ohos/hvigor-ohos-plugin@2.4.2
 
       # ----------------------------------------------------------
-      # 3) 生成 ohos/ 工程 (一次性)
+      # 3) 生成 ohos/ 工程
       # ----------------------------------------------------------
       - name: flutter create ohos platform
         working-directory: doudou_blend_flutter
         run: |
           export PATH=$HOME/flutter_ohos/bin:$PATH
+          # || true: 不同 fork 版本对 --platforms ohos 支持差异大, 先尝试,
+          # 失败也让后续 step 看到产物 (或缺产物)
           flutter create . --platforms ohos --org com.doudou --project-name doudou_blend_flutter || true
-          ls -la ohos/ || true
+          echo "--- ohos/ 目录 ---"
+          ls -la ohos/ 2>/dev/null || echo "ohos/ 未生成"
 
       # ----------------------------------------------------------
-      # 4) 配置 pubspec_overrides.yaml
+      # 4) pubspec_overrides
       # ----------------------------------------------------------
       - name: Write pubspec_overrides.yaml
         working-directory: doudou_blend_flutter
@@ -128,7 +147,7 @@ jobs:
           flutter pub get
 
       # ----------------------------------------------------------
-      # 5) Build (unsigned)
+      # 5) Build
       # ----------------------------------------------------------
       - name: flutter build hap --debug
         working-directory: doudou_blend_flutter
@@ -145,7 +164,7 @@ jobs:
           find . -path "*/outputs*" -type d 2>/dev/null | head -10
 
       # ----------------------------------------------------------
-      # 6) 上传 artifact (无论 build 成败都上传 log 给我们 debug)
+      # 6) Upload artifact (always, 拿 build.log debug)
       # ----------------------------------------------------------
       - name: Upload .hap artifact
         if: always()
