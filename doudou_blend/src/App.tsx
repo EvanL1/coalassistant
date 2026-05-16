@@ -8,9 +8,11 @@ import { HistoryScreen } from "./screens/HistoryScreen";
 import { MeScreen } from "./screens/MeScreen";
 import { CustomersScreen } from "./screens/CustomersScreen";
 import { QuotesScreen } from "./screens/QuotesScreen";
+import { ContractsScreen } from "./screens/ContractsScreen";
 import { LoginScreen } from "./LoginScreen";
 import {
   isLoggedIn,
+  refreshContracts,
   refreshCustomers,
   refreshQuotes,
   refreshSettings,
@@ -35,6 +37,7 @@ function App() {
       void refreshSettings();
       void refreshCustomers();
       void refreshQuotes();
+      void refreshContracts();
     }
   }, [authed]);
 
@@ -48,7 +51,8 @@ function App() {
         {tab === "today" && <TodayScreen />}
         {tab === "customers" && <CustomersScreen />}
         {tab === "quotes" && <QuotesScreen />}
-        {tab === "pool" && <CoalPoolScreen />}
+        {tab === "contracts" && <ContractsScreen />}
+        {tab === "pool" && <CoalPoolScreen onBack={() => setTab("me")} />}
         {tab === "contract" && <ContractScreen onBack={() => setTab("me")} />}
         {tab === "history" && <HistoryScreen onBack={() => setTab("me")} />}
         {tab === "me" && <MeScreen onNavigate={setTab} />}

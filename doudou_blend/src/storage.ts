@@ -10,19 +10,22 @@
  *   - 重置 = 清空 localStorage 对应 key
  */
 
-import type { Customer, MasterCoalEntry, Quote, Spec } from "./types";
+import type { Contract, Customer, MasterCoalEntry, Quote, Spec } from "./types";
 import {
   apiAddCoal,
   apiDeleteCoal,
+  apiDeleteContract,
   apiDeleteCustomer,
   apiDeleteQuote,
   apiDeleteSetting,
   apiGetSetting,
   apiListCoals,
+  apiListContracts,
   apiListCustomers,
   apiListQuotes,
   apiMigrateCoals,
   apiPutSetting,
+  apiUpsertContract,
   apiUpsertCustomer,
   apiUpsertQuote,
   clearApiToken,
@@ -39,6 +42,7 @@ const KEY_USER_COALS_MIGRATED = "doudou_blend.user_coals_migrated.v1";
 const KEY_SETTINGS_MIGRATED = "doudou_blend.settings_migrated.v1";
 const KEY_CUSTOMERS = "doudou_blend.customers.v1";
 const KEY_QUOTES = "doudou_blend.quotes.v1";
+const KEY_CONTRACTS = "doudou_blend.contracts.v1";
 
 // D1 settings 表里的 key 约定 (跟 schema.sql 注释保持一致)
 const SETTING_COAL_PREFS = "coal_prefs";
@@ -414,6 +418,57 @@ export async function removeQuote(id: string): Promise<void> {
   const all = readQuotesCache().filter((q) => q.id !== id);
   writeQuotesCache(all);
   window.dispatchEvent(new CustomEvent("doudou:quotes_changed"));
+}
+
+// ============================================================
+// Contracts (Phase 2)
+// ============================================================
+//
+// payments / shipments 不缓存 - 每次进合同详情现拉, 数据小且不在
+// "首页随时刷"路径里. contracts 列表用 cache-first 模式.
+
+function readContractsCache(): Contract[] {
+  try {
+    const raw = localStorage.getItem(KEY_CONTRACTS);
+    return raw ? (JSON.parse(raw) as Contract[]) : [];
+  } catch {
+    return [];
+  }
+}
+function writeContractsCache(list: Contract[]): void {
+  localStorage.setItem(KEY_CONTRACTS, JSON.stringify(list));
+}
+
+export function getContracts(): Contract[] {
+  return readContractsCache();
+}
+
+export async function refreshContracts(): Promise<Contract[]> {
+  if (!getApiToken()) return readContractsCache();
+  try {
+    const remote = await apiListContracts();
+    writeContractsCache(remote);
+    window.dispatchEvent(new CustomEvent("doudou:contracts_changed"));
+    return remote;
+  } catch (e) {
+    console.warn("refreshContracts 失败, 使用 cache:", e);
+    return readContractsCache();
+  }
+}
+
+export async function upsertContract(c: Contract): Promise<void> {
+  await apiUpsertContract(c);
+  const all = readContractsCache().filter((x) => x.id !== c.id);
+  all.unshift({ ...c, updated_at: new Date().toISOString() });
+  writeContractsCache(all);
+  window.dispatchEvent(new CustomEvent("doudou:contracts_changed"));
+}
+
+export async function removeContract(id: string): Promise<void> {
+  await apiDeleteContract(id);
+  const all = readContractsCache().filter((c) => c.id !== id);
+  writeContractsCache(all);
+  window.dispatchEvent(new CustomEvent("doudou:contracts_changed"));
 }
 
 /**

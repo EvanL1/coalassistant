@@ -6,12 +6,13 @@ export type TabId =
   | "today"
   | "customers"
   | "quotes"
-  | "pool"
+  | "contracts"
   | "me"
+  | "pool"
   | "contract"
   | "history";
 
-const VISIBLE_TABS: TabId[] = ["today", "customers", "quotes", "pool", "me"];
+const VISIBLE_TABS: TabId[] = ["today", "customers", "quotes", "contracts", "me"];
 
 interface Props {
   active: TabId;
@@ -38,10 +39,9 @@ const ICONS: Record<TabId, JSX.Element> = {
       <path d="M14 2v6h6M9 13h6M9 17h6M9 9h2" />
     </svg>
   ),
-  pool: (
+  contracts: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-      <path d="M3 9h18M9 3v18" />
+      <path d="M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
     </svg>
   ),
   me: (
@@ -50,17 +50,19 @@ const ICONS: Record<TabId, JSX.Element> = {
       <path d="M4 22c0-4 4-7 8-7s8 3 8 7" />
     </svg>
   ),
-  contract: <></>, // 不显示在 TabBar
-  history: <></>,  // 不显示在 TabBar
+  pool: <></>,     // 挪到 "我" 屏入口
+  contract: <></>,
+  history: <></>,
 };
 
 const LABEL: Record<TabId, string> = {
   today: "今日",
   customers: "客户",
   quotes: "报价",
-  pool: "煤池",
+  contracts: "合同",
   me: "我的",
-  contract: "合同",
+  pool: "煤池",
+  contract: "合同指标",
   history: "历史",
 };
 

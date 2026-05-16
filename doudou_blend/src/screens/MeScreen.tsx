@@ -22,7 +22,7 @@ function getStats() {
 }
 
 interface MeProps {
-  onNavigate: (id: "contract" | "history") => void;
+  onNavigate: (id: "contract" | "history" | "pool") => void;
 }
 
 export function MeScreen({ onNavigate }: MeProps) {
@@ -82,6 +82,11 @@ export function MeScreen({ onNavigate }: MeProps) {
       {/* 配置入口 */}
       <div className="card">
         <div className="card-title">配置 / 数据</div>
+        <NavButton
+          label="煤池"
+          hint="管理 73 + 自建煤种, 改价格 / 启用"
+          onClick={() => onNavigate("pool")}
+        />
         <NavButton
           label="合同指标"
           hint={

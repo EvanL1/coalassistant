@@ -9,7 +9,14 @@
  *     额外配置 API base URL, 留下一波.
  */
 
-import type { Customer, MasterCoalEntry, Quote } from "./types";
+import type {
+  Contract,
+  Customer,
+  MasterCoalEntry,
+  Payment,
+  Quote,
+  Shipment,
+} from "./types";
 
 const KEY_API_TOKEN = "doudou_blend.api_token.v1";
 
@@ -231,4 +238,200 @@ export async function apiDeleteQuote(id: string): Promise<void> {
     { method: "DELETE" },
   );
   if (!resp.ok) throw new Error(`DELETE /api/quotes 失败: ${resp.status}`);
+}
+
+// ============================================================
+// Contracts
+// ============================================================
+
+interface ContractWire {
+  id: string;
+  quote_id: string | null;
+  customer_id: string;
+  customer_name: string;
+  contract_no: string | null;
+  billing_location: string | null;
+  prepay_party: string | null;
+  recipe_json: string;
+  unit_price: number;
+  total_tons: number;
+  total_amount: number;
+  first_pay_pct: number;
+  first_pay_amount: number;
+  tail_pay_amount: number;
+  signed_at: string | null;
+  status: string;
+  note: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+function wireToContract(w: ContractWire): Contract {
+  let recipe: Record<string, number> = {};
+  try {
+    recipe = JSON.parse(w.recipe_json) as Record<string, number>;
+  } catch {
+    /* ignore */
+  }
+  return {
+    id: w.id,
+    quote_id: w.quote_id,
+    customer_id: w.customer_id,
+    customer_name: w.customer_name,
+    contract_no: w.contract_no,
+    billing_location: w.billing_location,
+    prepay_party: w.prepay_party,
+    recipe,
+    unit_price: w.unit_price,
+    total_tons: w.total_tons,
+    total_amount: w.total_amount,
+    first_pay_pct: w.first_pay_pct,
+    first_pay_amount: w.first_pay_amount,
+    tail_pay_amount: w.tail_pay_amount,
+    signed_at: w.signed_at,
+    status: w.status as Contract["status"],
+    note: w.note,
+    created_at: w.created_at,
+    updated_at: w.updated_at,
+  };
+}
+
+function contractToWire(c: Contract): ContractWire {
+  return {
+    id: c.id,
+    quote_id: c.quote_id ?? null,
+    customer_id: c.customer_id,
+    customer_name: c.customer_name,
+    contract_no: c.contract_no ?? null,
+    billing_location: c.billing_location ?? null,
+    prepay_party: c.prepay_party ?? null,
+    recipe_json: JSON.stringify(c.recipe),
+    unit_price: c.unit_price,
+    total_tons: c.total_tons,
+    total_amount: c.total_amount,
+    first_pay_pct: c.first_pay_pct,
+    first_pay_amount: c.first_pay_amount,
+    tail_pay_amount: c.tail_pay_amount,
+    signed_at: c.signed_at ?? null,
+    status: c.status,
+    note: c.note ?? null,
+  };
+}
+
+export async function apiListContracts(): Promise<Contract[]> {
+  const resp = await authFetch("/api/contracts");
+  if (!resp.ok) throw new Error(`GET /api/contracts 失败: ${resp.status}`);
+  const data = (await resp.json()) as { contracts: ContractWire[] };
+  return data.contracts.map(wireToContract);
+}
+
+export async function apiUpsertContract(c: Contract): Promise<void> {
+  const resp = await authFetch("/api/contracts", {
+    method: "POST",
+    body: JSON.stringify(contractToWire(c)),
+  });
+  if (!resp.ok) {
+    const e = (await resp.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error || `POST /api/contracts 失败: ${resp.status}`);
+  }
+}
+
+export async function apiDeleteContract(id: string): Promise<void> {
+  const resp = await authFetch(
+    `/api/contracts?id=${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(`DELETE /api/contracts 失败: ${resp.status}`);
+}
+
+// ============================================================
+// Payments
+// ============================================================
+
+export async function apiListPayments(contractId?: string): Promise<Payment[]> {
+  const path = contractId
+    ? `/api/payments?contract_id=${encodeURIComponent(contractId)}`
+    : "/api/payments";
+  const resp = await authFetch(path);
+  if (!resp.ok) throw new Error(`GET /api/payments 失败: ${resp.status}`);
+  const data = (await resp.json()) as { payments: Payment[] };
+  return data.payments.map((p) => ({ ...p, kind: p.kind as Payment["kind"] }));
+}
+
+export async function apiUpsertPayment(p: Payment): Promise<void> {
+  const resp = await authFetch("/api/payments", {
+    method: "POST",
+    body: JSON.stringify(p),
+  });
+  if (!resp.ok) {
+    const e = (await resp.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error || `POST /api/payments 失败: ${resp.status}`);
+  }
+}
+
+export async function apiDeletePayment(id: string): Promise<void> {
+  const resp = await authFetch(
+    `/api/payments?id=${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(`DELETE /api/payments 失败: ${resp.status}`);
+}
+
+// ============================================================
+// Shipments
+// ============================================================
+
+interface ShipmentWire extends Omit<Shipment, "assay"> {
+  assay_json: string | null;
+}
+
+function wireToShipment(w: ShipmentWire): Shipment {
+  let assay: Partial<Record<string, number>> | null = null;
+  if (w.assay_json) {
+    try {
+      assay = JSON.parse(w.assay_json) as Partial<Record<string, number>>;
+    } catch {
+      assay = null;
+    }
+  }
+  const { assay_json: _drop, ...rest } = w;
+  void _drop;
+  return { ...rest, status: w.status as Shipment["status"], assay };
+}
+
+function shipmentToWire(s: Shipment): ShipmentWire {
+  const { assay, ...rest } = s;
+  return {
+    ...rest,
+    assay_json: assay ? JSON.stringify(assay) : null,
+  };
+}
+
+export async function apiListShipments(contractId?: string): Promise<Shipment[]> {
+  const path = contractId
+    ? `/api/shipments?contract_id=${encodeURIComponent(contractId)}`
+    : "/api/shipments";
+  const resp = await authFetch(path);
+  if (!resp.ok) throw new Error(`GET /api/shipments 失败: ${resp.status}`);
+  const data = (await resp.json()) as { shipments: ShipmentWire[] };
+  return data.shipments.map(wireToShipment);
+}
+
+export async function apiUpsertShipment(s: Shipment): Promise<void> {
+  const resp = await authFetch("/api/shipments", {
+    method: "POST",
+    body: JSON.stringify(shipmentToWire(s)),
+  });
+  if (!resp.ok) {
+    const e = (await resp.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error || `POST /api/shipments 失败: ${resp.status}`);
+  }
+}
+
+export async function apiDeleteShipment(id: string): Promise<void> {
+  const resp = await authFetch(
+    `/api/shipments?id=${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(`DELETE /api/shipments 失败: ${resp.status}`);
 }

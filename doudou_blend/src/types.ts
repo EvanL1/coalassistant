@@ -146,3 +146,63 @@ export interface Quote {
   created_at?: string;
   updated_at?: string;
 }
+
+// ===== Phase 2: 合同 / 收款 / 发货 =====
+
+export type ContractStatus = "active" | "completed" | "terminated";
+
+export interface Contract {
+  id: string;
+  quote_id?: string | null;
+  customer_id: string;
+  customer_name: string;
+  contract_no?: string | null;
+  billing_location?: string | null;  // 开票地, 如 "集宁"
+  prepay_party?: string | null;      // 垫资方, "self" / 别的公司名
+  recipe: Record<string, number>;    // 锁定的配方
+  unit_price: number;                // 单价 元/吨
+  total_tons: number;                // 合同总吨数
+  total_amount: number;              // 合同总额 = unit_price * total_tons
+  first_pay_pct: number;             // 首付比例, 默认 80
+  first_pay_amount: number;          // 首付金额
+  tail_pay_amount: number;           // 尾款金额
+  signed_at?: string | null;         // 签约日
+  status: ContractStatus;
+  note?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type PaymentKind = "first" | "tail" | "advance" | "other";
+
+export interface Payment {
+  id: string;
+  contract_id: string;
+  kind: PaymentKind;
+  amount: number;
+  paid_at: string;          // 收款日
+  payer?: string | null;    // 实际打款方
+  method?: string | null;   // "打款" / "现金" / "票据"
+  voucher_no?: string | null;
+  note?: string | null;
+  created_at?: string;
+}
+
+export type ShipmentStatus = "shipped" | "arrived" | "settled";
+
+export interface Shipment {
+  id: string;
+  contract_id: string;
+  vehicle_no?: string | null;
+  net_tons: number;
+  gross_tons?: number | null;
+  tare_tons?: number | null;
+  shipped_at: string;       // 发货日
+  arrived_at?: string | null;
+  settled_at?: string | null;
+  settled_amount?: number | null;
+  assay?: Partial<Record<string, number>> | null; // 化验值, 8 项指标
+  status: ShipmentStatus;
+  note?: string | null;
+  created_at?: string;
+}

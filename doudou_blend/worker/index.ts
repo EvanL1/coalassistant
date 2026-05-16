@@ -109,6 +109,27 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
     return json({ error: "Method not allowed" }, 405);
   }
 
+  if (url.pathname === "/api/contracts") {
+    if (req.method === "GET") return handleListContracts(env);
+    if (req.method === "POST") return handleUpsertContract(req, env);
+    if (req.method === "DELETE") return handleDeleteContract(env, url);
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  if (url.pathname === "/api/payments") {
+    if (req.method === "GET") return handleListPayments(env, url);
+    if (req.method === "POST") return handleUpsertPayment(req, env);
+    if (req.method === "DELETE") return handleDeletePayment(env, url);
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  if (url.pathname === "/api/shipments") {
+    if (req.method === "GET") return handleListShipments(env, url);
+    if (req.method === "POST") return handleUpsertShipment(req, env);
+    if (req.method === "DELETE") return handleDeleteShipment(env, url);
+    return json({ error: "Method not allowed" }, 405);
+  }
+
   return json({ error: "Not found" }, 404);
 }
 
@@ -423,6 +444,293 @@ async function handleDeleteQuote(env: Env, url: URL): Promise<Response> {
   const id = url.searchParams.get("id");
   if (!id) return json({ ok: false, error: "缺少 id" }, 400);
   await env.DB.prepare(`DELETE FROM quotes WHERE id = ?`).bind(id).run();
+  return json({ ok: true });
+}
+
+// ============================================================
+// Contracts
+// ============================================================
+
+interface ContractRow {
+  id: string;
+  quote_id: string | null;
+  customer_id: string;
+  customer_name: string;
+  contract_no: string | null;
+  billing_location: string | null;
+  prepay_party: string | null;
+  recipe_json: string;
+  unit_price: number;
+  total_tons: number;
+  total_amount: number;
+  first_pay_pct: number;
+  first_pay_amount: number;
+  tail_pay_amount: number;
+  signed_at: string | null;
+  status: string;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+async function handleListContracts(env: Env): Promise<Response> {
+  const rows = await env.DB.prepare(
+    `SELECT id, quote_id, customer_id, customer_name, contract_no,
+            billing_location, prepay_party, recipe_json, unit_price,
+            total_tons, total_amount, first_pay_pct, first_pay_amount,
+            tail_pay_amount, signed_at, status, note,
+            created_at, updated_at
+       FROM contracts ORDER BY updated_at DESC`,
+  ).all<ContractRow>();
+  return json({ contracts: rows.results ?? [] });
+}
+
+async function handleUpsertContract(req: Request, env: Env): Promise<Response> {
+  let body: Partial<ContractRow>;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ ok: false, error: "请求体不是合法 JSON" }, 400);
+  }
+  if (!body.id || !body.customer_id || !body.customer_name) {
+    return json({ ok: false, error: "缺少必填字段" }, 400);
+  }
+  await env.DB.prepare(
+    `INSERT INTO contracts
+       (id, quote_id, customer_id, customer_name, contract_no,
+        billing_location, prepay_party, recipe_json, unit_price,
+        total_tons, total_amount, first_pay_pct, first_pay_amount,
+        tail_pay_amount, signed_at, status, note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       contract_no      = excluded.contract_no,
+       billing_location = excluded.billing_location,
+       prepay_party     = excluded.prepay_party,
+       unit_price       = excluded.unit_price,
+       total_tons       = excluded.total_tons,
+       total_amount     = excluded.total_amount,
+       first_pay_pct    = excluded.first_pay_pct,
+       first_pay_amount = excluded.first_pay_amount,
+       tail_pay_amount  = excluded.tail_pay_amount,
+       signed_at        = excluded.signed_at,
+       status           = excluded.status,
+       note             = excluded.note,
+       updated_at       = datetime('now')`,
+  )
+    .bind(
+      body.id,
+      body.quote_id ?? null,
+      body.customer_id,
+      body.customer_name,
+      body.contract_no ?? null,
+      body.billing_location ?? null,
+      body.prepay_party ?? null,
+      body.recipe_json ?? "{}",
+      body.unit_price ?? 0,
+      body.total_tons ?? 0,
+      body.total_amount ?? 0,
+      body.first_pay_pct ?? 80,
+      body.first_pay_amount ?? 0,
+      body.tail_pay_amount ?? 0,
+      body.signed_at ?? null,
+      body.status ?? "active",
+      body.note ?? null,
+    )
+    .run();
+  return json({ ok: true });
+}
+
+async function handleDeleteContract(env: Env, url: URL): Promise<Response> {
+  const id = url.searchParams.get("id");
+  if (!id) return json({ ok: false, error: "缺少 id" }, 400);
+  // 级联删除 (D1 默认不开 foreign key cascade, 手动)
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM payments WHERE contract_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM shipments WHERE contract_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM contracts WHERE id = ?`).bind(id),
+  ]);
+  return json({ ok: true });
+}
+
+// ============================================================
+// Payments
+// ============================================================
+
+interface PaymentRow {
+  id: string;
+  contract_id: string;
+  kind: string;
+  amount: number;
+  paid_at: string;
+  payer: string | null;
+  method: string | null;
+  voucher_no: string | null;
+  note: string | null;
+  created_at: string;
+}
+
+async function handleListPayments(env: Env, url: URL): Promise<Response> {
+  const contractId = url.searchParams.get("contract_id");
+  let rows;
+  if (contractId) {
+    rows = await env.DB.prepare(
+      `SELECT id, contract_id, kind, amount, paid_at, payer, method,
+              voucher_no, note, created_at
+         FROM payments WHERE contract_id = ? ORDER BY paid_at DESC`,
+    )
+      .bind(contractId)
+      .all<PaymentRow>();
+  } else {
+    rows = await env.DB.prepare(
+      `SELECT id, contract_id, kind, amount, paid_at, payer, method,
+              voucher_no, note, created_at
+         FROM payments ORDER BY paid_at DESC`,
+    ).all<PaymentRow>();
+  }
+  return json({ payments: rows.results ?? [] });
+}
+
+async function handleUpsertPayment(req: Request, env: Env): Promise<Response> {
+  let body: Partial<PaymentRow>;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ ok: false, error: "请求体不是合法 JSON" }, 400);
+  }
+  if (!body.id || !body.contract_id || !body.amount || !body.paid_at) {
+    return json({ ok: false, error: "缺少必填字段" }, 400);
+  }
+  await env.DB.prepare(
+    `INSERT INTO payments
+       (id, contract_id, kind, amount, paid_at, payer, method, voucher_no, note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       kind       = excluded.kind,
+       amount     = excluded.amount,
+       paid_at    = excluded.paid_at,
+       payer      = excluded.payer,
+       method     = excluded.method,
+       voucher_no = excluded.voucher_no,
+       note       = excluded.note`,
+  )
+    .bind(
+      body.id,
+      body.contract_id,
+      body.kind ?? "first",
+      body.amount,
+      body.paid_at,
+      body.payer ?? null,
+      body.method ?? null,
+      body.voucher_no ?? null,
+      body.note ?? null,
+    )
+    .run();
+  return json({ ok: true });
+}
+
+async function handleDeletePayment(env: Env, url: URL): Promise<Response> {
+  const id = url.searchParams.get("id");
+  if (!id) return json({ ok: false, error: "缺少 id" }, 400);
+  await env.DB.prepare(`DELETE FROM payments WHERE id = ?`).bind(id).run();
+  return json({ ok: true });
+}
+
+// ============================================================
+// Shipments
+// ============================================================
+
+interface ShipmentRow {
+  id: string;
+  contract_id: string;
+  vehicle_no: string | null;
+  net_tons: number;
+  gross_tons: number | null;
+  tare_tons: number | null;
+  shipped_at: string;
+  arrived_at: string | null;
+  settled_at: string | null;
+  settled_amount: number | null;
+  assay_json: string | null;
+  status: string;
+  note: string | null;
+  created_at: string;
+}
+
+async function handleListShipments(env: Env, url: URL): Promise<Response> {
+  const contractId = url.searchParams.get("contract_id");
+  let rows;
+  if (contractId) {
+    rows = await env.DB.prepare(
+      `SELECT id, contract_id, vehicle_no, net_tons, gross_tons, tare_tons,
+              shipped_at, arrived_at, settled_at, settled_amount,
+              assay_json, status, note, created_at
+         FROM shipments WHERE contract_id = ? ORDER BY shipped_at DESC`,
+    )
+      .bind(contractId)
+      .all<ShipmentRow>();
+  } else {
+    rows = await env.DB.prepare(
+      `SELECT id, contract_id, vehicle_no, net_tons, gross_tons, tare_tons,
+              shipped_at, arrived_at, settled_at, settled_amount,
+              assay_json, status, note, created_at
+         FROM shipments ORDER BY shipped_at DESC`,
+    ).all<ShipmentRow>();
+  }
+  return json({ shipments: rows.results ?? [] });
+}
+
+async function handleUpsertShipment(req: Request, env: Env): Promise<Response> {
+  let body: Partial<ShipmentRow>;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ ok: false, error: "请求体不是合法 JSON" }, 400);
+  }
+  if (!body.id || !body.contract_id || body.net_tons == null || !body.shipped_at) {
+    return json({ ok: false, error: "缺少必填字段" }, 400);
+  }
+  await env.DB.prepare(
+    `INSERT INTO shipments
+       (id, contract_id, vehicle_no, net_tons, gross_tons, tare_tons,
+        shipped_at, arrived_at, settled_at, settled_amount,
+        assay_json, status, note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       vehicle_no     = excluded.vehicle_no,
+       net_tons       = excluded.net_tons,
+       gross_tons     = excluded.gross_tons,
+       tare_tons      = excluded.tare_tons,
+       shipped_at     = excluded.shipped_at,
+       arrived_at     = excluded.arrived_at,
+       settled_at     = excluded.settled_at,
+       settled_amount = excluded.settled_amount,
+       assay_json     = excluded.assay_json,
+       status         = excluded.status,
+       note           = excluded.note`,
+  )
+    .bind(
+      body.id,
+      body.contract_id,
+      body.vehicle_no ?? null,
+      body.net_tons,
+      body.gross_tons ?? null,
+      body.tare_tons ?? null,
+      body.shipped_at,
+      body.arrived_at ?? null,
+      body.settled_at ?? null,
+      body.settled_amount ?? null,
+      body.assay_json ?? null,
+      body.status ?? "shipped",
+      body.note ?? null,
+    )
+    .run();
+  return json({ ok: true });
+}
+
+async function handleDeleteShipment(env: Env, url: URL): Promise<Response> {
+  const id = url.searchParams.get("id");
+  if (!id) return json({ ok: false, error: "缺少 id" }, 400);
+  await env.DB.prepare(`DELETE FROM shipments WHERE id = ?`).bind(id).run();
   return json({ ok: true });
 }
 

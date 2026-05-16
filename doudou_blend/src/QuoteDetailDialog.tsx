@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Quote, QuoteStatus } from "./types";
 import { removeQuote, upsertQuote } from "./storage";
+import { NewContractDialog } from "./NewContractDialog";
 
 interface Props {
   quote: Quote;
@@ -49,6 +50,7 @@ export function QuoteDetailDialog({ quote, onClose }: Props) {
   const [note, setNote] = useState(quote.note ?? "");
   const [status, setStatus] = useState<QuoteStatus>(quote.status);
   const [saving, setSaving] = useState(false);
+  const [showNewContract, setShowNewContract] = useState(false);
 
   useEffect(() => {
     const orig = document.body.style.overflow;
@@ -260,6 +262,16 @@ export function QuoteDetailDialog({ quote, onClose }: Props) {
               {quote.contract_name && ` · 合同 ${quote.contract_name}`}
             </div>
 
+            {(status === "signed" || status === "sent") && (
+              <button
+                className="btn btn-primary"
+                style={{ width: "100%", marginTop: 12 }}
+                onClick={() => setShowNewContract(true)}
+              >
+                ✓ 转合同
+              </button>
+            )}
+
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button
                 className="btn btn-secondary"
@@ -298,6 +310,17 @@ export function QuoteDetailDialog({ quote, onClose }: Props) {
           </div>
         </div>
       </div>
+
+      {showNewContract && (
+        <NewContractDialog
+          quote={{ ...quote, markup: markupNum, quoted_price: newQuotedPrice, note: note.trim() || null, status }}
+          onClose={() => setShowNewContract(false)}
+          onCreated={() => {
+            setShowNewContract(false);
+            onClose();
+          }}
+        />
+      )}
 
       {/* 打印专用: 屏幕上隐藏, 打印时整页显示 */}
       <div className="print-only">
