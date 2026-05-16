@@ -11,12 +11,22 @@
  */
 
 import type { Spec, MasterCoalEntry } from "./types";
+import {
+  apiAddCoal,
+  apiDeleteCoal,
+  apiListCoals,
+  apiMigrateCoals,
+  clearApiToken,
+  getApiToken,
+  setApiToken,
+} from "./api";
 
 const KEY_COAL_PREFS = "doudou_blend.coal_prefs.v1";
 const KEY_CONTRACT = "doudou_blend.contract.v1";
 const KEY_HISTORY = "doudou_blend.history.v1";
 const KEY_AUTH = "doudou_blend.auth.v1";
 const KEY_USER_COALS = "doudou_blend.user_coals.v1";
+const KEY_USER_COALS_MIGRATED = "doudou_blend.user_coals_migrated.v1";
 
 /** 单个煤的用户偏好: 启用 + 价格覆盖 + 化验值覆盖 */
 export interface CoalPref {
@@ -142,14 +152,21 @@ export function clearHistory(): void {
 }
 
 // ============================================================
-// 用户新增的煤种
+// 用户新增的煤种 - 上 Cloudflare D1 后跨设备共享
 // ============================================================
 //
-// master 73 种煤是只读 (嵌入 WASM), 用户新增的煤暂存这里.
-// 新增时仅录煤名/产地/煤类, 化验值后续在 CoalEditor 里补 (status=draft).
-// 注: 当前不参与求解, 等用户在 CoalEditor 补全化验值并启用后, 后续接求解器再说.
+// 数据流: localStorage (cache) ─► UI 立即渲染
+//                 │
+//                 ▼ 启动时后台刷新
+//        Cloudflare D1 (source of truth)
+//
+// - getUserCoals() 同步返回 cache, 用法跟以前不变 (UI 无感知)
+// - addUserCoal / removeUserCoal 改为 async, 调用方需 await
+// - 启动调一次 refreshUserCoals() 把服务器最新拉下来更新 cache
+// - 跨设备: A 设备加煤 → D1 → B 设备打开应用时 refresh → 看到
+// - 离线: 写操作失败 throw, 调用方提示用户; 读操作走 cache
 
-export function getUserCoals(): MasterCoalEntry[] {
+function readCache(): MasterCoalEntry[] {
   try {
     const raw = localStorage.getItem(KEY_USER_COALS);
     return raw ? (JSON.parse(raw) as MasterCoalEntry[]) : [];
@@ -158,22 +175,75 @@ export function getUserCoals(): MasterCoalEntry[] {
   }
 }
 
-export function addUserCoal(coal: MasterCoalEntry): void {
-  const all = getUserCoals();
-  all.push(coal);
-  localStorage.setItem(KEY_USER_COALS, JSON.stringify(all));
+function writeCache(coals: MasterCoalEntry[]): void {
+  localStorage.setItem(KEY_USER_COALS, JSON.stringify(coals));
+}
+
+/** 同步: 返回最后已知的 user_coals (localStorage cache). UI 用. */
+export function getUserCoals(): MasterCoalEntry[] {
+  return readCache();
+}
+
+/**
+ * 异步: 从 D1 拉最新, 更新 cache 并派发事件.
+ * 失败 (离线/未登录) 时静默返回 cache, 不打断 UI.
+ */
+export async function refreshUserCoals(): Promise<MasterCoalEntry[]> {
+  if (!getApiToken()) return readCache();
+  try {
+    const remote = await apiListCoals();
+    writeCache(remote);
+    window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
+    return remote;
+  } catch (e) {
+    console.warn("refreshUserCoals 失败, 使用 cache:", e);
+    return readCache();
+  }
+}
+
+export async function addUserCoal(coal: MasterCoalEntry): Promise<void> {
+  await apiAddCoal(coal);
+  // 服务器成功 → 立刻乐观更新 cache, 然后后台 refresh 跟上
+  const all = readCache();
+  all.unshift(coal); // 最新的排前
+  writeCache(all);
+  window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
+  void refreshUserCoals();
+}
+
+export async function removeUserCoal(name: string): Promise<void> {
+  await apiDeleteCoal(name);
+  const all = readCache().filter((c) => c.name !== name);
+  writeCache(all);
   window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
 }
 
-export function removeUserCoal(name: string): void {
-  const all = getUserCoals().filter((c) => c.name !== name);
-  localStorage.setItem(KEY_USER_COALS, JSON.stringify(all));
-  window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
-}
-
-export function clearUserCoals(): void {
+/** 清本地 cache - 服务器数据不动 (要清服务器请走 D1 console) */
+export function clearUserCoalsCache(): void {
   localStorage.removeItem(KEY_USER_COALS);
   window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
+}
+
+/**
+ * 一次性: 从 localStorage 把旧数据迁移到 D1.
+ * 登录后调一次, 已迁移过的设备不会重复跑.
+ */
+export async function migrateLocalCoalsToD1(): Promise<number> {
+  if (!getApiToken()) return 0;
+  if (localStorage.getItem(KEY_USER_COALS_MIGRATED) === "1") return 0;
+  const local = readCache();
+  if (local.length === 0) {
+    localStorage.setItem(KEY_USER_COALS_MIGRATED, "1");
+    return 0;
+  }
+  try {
+    const n = await apiMigrateCoals(local);
+    localStorage.setItem(KEY_USER_COALS_MIGRATED, "1");
+    return n;
+  } catch (e) {
+    console.warn("migrateLocalCoalsToD1 失败:", e);
+    return 0;
+  }
 }
 
 /**
@@ -217,7 +287,12 @@ export function tryLogin(user: string, pass: string): boolean {
   // 账号大小写无关 + 两端 trim, 密码 trim (防复制粘贴带空格/换行)
   if (user.trim().toLowerCase() === AUTH_USER && pass.trim() === AUTH_PASS) {
     localStorage.setItem(KEY_AUTH, "1");
+    // 单租户共享密码: 把密码同时存为 API token, 后续请求 D1 时用
+    // (服务器 secret AUTH_PASS 跟前端 hardcoded AUTH_PASS 必须一致)
+    setApiToken(pass.trim());
     window.dispatchEvent(new CustomEvent("doudou:auth_changed"));
+    // 后台触发: 把旧 localStorage user_coals 迁移到 D1 (只跑一次), 然后拉最新
+    void migrateLocalCoalsToD1().then(() => void refreshUserCoals());
     return true;
   }
   return false;
@@ -225,5 +300,6 @@ export function tryLogin(user: string, pass: string): boolean {
 
 export function logout(): void {
   localStorage.removeItem(KEY_AUTH);
+  clearApiToken();
   window.dispatchEvent(new CustomEvent("doudou:auth_changed"));
 }

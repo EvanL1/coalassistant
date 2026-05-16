@@ -39,9 +39,11 @@ export function NewCoalDialog({ existing, onClose }: Props) {
   );
 
   const trimmedName = normalizeCoalName(name);
-  const canSubmit = trimmedName.length > 0 && dup == null;
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canSubmit = trimmedName.length > 0 && dup == null && !submitting;
 
-  function submit() {
+  async function submit() {
     if (!canSubmit) return;
     const entry: MasterCoalEntry = {
       name: name.trim(),
@@ -53,8 +55,15 @@ export function NewCoalDialog({ existing, onClose }: Props) {
       frt: null,
       note: null,
     };
-    addUserCoal(entry);
-    onClose();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await addUserCoal(entry);
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -135,6 +144,21 @@ export function NewCoalDialog({ existing, onClose }: Props) {
             新煤默认状态为「待核实」, 不参与配比. 在煤池里点开补全化验值后,
             可切换为启用.
           </p>
+
+          {error && (
+            <div
+              style={{
+                color: "var(--c-danger)",
+                fontSize: 12,
+                marginTop: 8,
+                padding: "8px 12px",
+                background: "rgba(220, 38, 38, 0.08)",
+                borderRadius: 8,
+              }}
+            >
+              新增失败: {error}
+            </div>
+          )}
         </div>
 
         <div className="modal-footer">
@@ -147,7 +171,7 @@ export function NewCoalDialog({ existing, onClose }: Props) {
             disabled={!canSubmit}
             style={{ opacity: canSubmit ? 1 : 0.4 }}
           >
-            新增
+            {submitting ? "新增中..." : "新增"}
           </button>
         </div>
       </div>

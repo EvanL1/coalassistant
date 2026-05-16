@@ -58,3 +58,7 @@ __pycache__/
 .env.local
 *.pem
 *.key
+
+# Cloudflare Wrangler 本地状态
+.wrangler/
+doudou_blend/.wrangler/

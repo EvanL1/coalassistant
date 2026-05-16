@@ -1,0 +1,25 @@
+# Cloudflare Pages + Functions 配置
+#
+# - 静态 build 输出: doudou_blend/dist (vite build)
+# - Serverless 函数: doudou_blend/functions/api/*.ts (自动路由到 /api/*)
+# - D1 binding 名: DB (在 functions 里通过 env.DB 访问)
+#
+# 部署:
+#   wrangler pages deploy dist --project-name coalassistant
+#
+# 本地开发 (函数 + 前端):
+#   npm run build && wrangler pages dev dist --d1 DB=coalassistant
+#
+# 一次性密码 (登录 + API token):
+#   wrangler pages secret put AUTH_PASS --project-name coalassistant
+#   (输入跟前端 hardcoded 同样的密码, 后续可移除前端 hardcode 走 /api/login)
+
+name = "coalassistant"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "coalassistant"
+# 创建数据库后 wrangler 会输出 database_id, 填到这里:
+database_id = "REPLACE_WITH_D1_DATABASE_ID"

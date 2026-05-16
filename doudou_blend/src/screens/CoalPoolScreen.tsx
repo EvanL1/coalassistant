@@ -12,6 +12,7 @@ import {
   getCoalPrefs,
   getUserCoals,
   normalizeCoalName,
+  refreshUserCoals,
   type CoalPrefs,
 } from "../storage";
 
@@ -43,7 +44,8 @@ export function CoalPoolScreen() {
   useEffect(() => {
     loadMaster().then(setMaster).catch(console.error);
     setPrefs(getCoalPrefs());
-    setUserCoals(getUserCoals());
+    setUserCoals(getUserCoals()); // 立即用 cache 渲染
+    void refreshUserCoals(); // 后台拉服务器最新
 
     const onPrefs = () => setPrefs(getCoalPrefs());
     const onUserCoals = () => setUserCoals(getUserCoals());
