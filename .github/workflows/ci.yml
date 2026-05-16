@@ -75,7 +75,7 @@ jobs:
         working-directory: doudou_blend
         run: npm ci
 
-      - name: npm test (vitest workers pool, 44 个)
+      - name: "npm test (vitest workers pool, 44 个)"
         working-directory: doudou_blend
         run: npm test
 
@@ -103,6 +103,6 @@ jobs:
         working-directory: doudou_blend_flutter
         run: flutter analyze
 
-      - name: flutter test (40 个: models / repos / solver)
+      - name: "flutter test (40 个: models / repos / solver)"
         working-directory: doudou_blend_flutter
         run: flutter test
