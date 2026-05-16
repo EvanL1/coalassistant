@@ -49,7 +49,15 @@ export default {
     const url = new URL(req.url);
 
     if (url.pathname.startsWith("/api/")) {
-      return handleApi(req, env, url);
+      try {
+        return await handleApi(req, env, url);
+      } catch (e) {
+        // 兜底: 任何未处理异常 (D1 错误 / 表缺失 / JSON 解析等) 都转成
+        // 带 message 的 500, 否则 Cloudflare runtime 抛裸 500 客户端没法 debug.
+        console.error("API error:", e);
+        const msg = e instanceof Error ? e.message : String(e);
+        return json({ ok: false, error: msg }, 500);
+      }
     }
 
     // 静态资源 (前端 SPA) - Cloudflare ASSETS 已经处理 index.html fallback
@@ -57,12 +65,160 @@ export default {
   },
 };
 
+// 每个 Worker isolate 启动后跑一次 CREATE TABLE IF NOT EXISTS, 失败则下次重试.
+// 跟 cloudflare/schema.sql 保持一致 - 改 schema 两边都要改.
+// 设计原因: phase1/2 每次加表都要手动 wrangler d1 execute, 容易忘 → 直接 500.
+let schemaReady: Promise<void> | null = null;
+
+async function ensureSchema(env: Env): Promise<void> {
+  if (schemaReady) return schemaReady;
+  schemaReady = (async () => {
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          `CREATE TABLE IF NOT EXISTS user_coals (
+             name TEXT PRIMARY KEY,
+             region TEXT, coal_type TEXT,
+             status TEXT NOT NULL DEFAULT 'draft',
+             props_json TEXT NOT NULL DEFAULT '{}',
+             fob REAL, frt REAL, note TEXT,
+             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+             updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_user_coals_status ON user_coals(status)`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_user_coals_updated ON user_coals(updated_at DESC)`,
+        ),
+        env.DB.prepare(
+          `CREATE TABLE IF NOT EXISTS user_settings (
+             key TEXT PRIMARY KEY,
+             value TEXT NOT NULL,
+             updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+        ),
+        env.DB.prepare(
+          `CREATE TABLE IF NOT EXISTS customers (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL,
+             contact TEXT, phone TEXT, note TEXT,
+             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+             updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_customers_updated ON customers(updated_at DESC)`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name)`,
+        ),
+        env.DB.prepare(
+          `CREATE TABLE IF NOT EXISTS quotes (
+             id TEXT PRIMARY KEY,
+             customer_id TEXT NOT NULL,
+             customer_name TEXT NOT NULL,
+             recipe_json TEXT NOT NULL,
+             cost_cif REAL NOT NULL,
+             markup REAL NOT NULL DEFAULT 0,
+             quoted_price REAL NOT NULL,
+             total_tons REAL,
+             contract_name TEXT,
+             status TEXT NOT NULL DEFAULT 'draft',
+             note TEXT,
+             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+             updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_quotes_customer ON quotes(customer_id)`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes(status)`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_quotes_updated ON quotes(updated_at DESC)`,
+        ),
+        env.DB.prepare(
+          `CREATE TABLE IF NOT EXISTS contracts (
+             id TEXT PRIMARY KEY,
+             quote_id TEXT,
+             customer_id TEXT NOT NULL,
+             customer_name TEXT NOT NULL,
+             contract_no TEXT,
+             billing_location TEXT,
+             prepay_party TEXT,
+             recipe_json TEXT NOT NULL,
+             unit_price REAL NOT NULL,
+             total_tons REAL NOT NULL,
+             total_amount REAL NOT NULL,
+             first_pay_pct REAL NOT NULL DEFAULT 80,
+             first_pay_amount REAL NOT NULL,
+             tail_pay_amount REAL NOT NULL,
+             signed_at TEXT,
+             status TEXT NOT NULL DEFAULT 'active',
+             note TEXT,
+             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+             updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_contracts_customer ON contracts(customer_id)`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_contracts_status ON contracts(status)`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_contracts_updated ON contracts(updated_at DESC)`,
+        ),
+        env.DB.prepare(
+          `CREATE TABLE IF NOT EXISTS payments (
+             id TEXT PRIMARY KEY,
+             contract_id TEXT NOT NULL,
+             kind TEXT NOT NULL DEFAULT 'first',
+             amount REAL NOT NULL,
+             paid_at TEXT NOT NULL,
+             payer TEXT, method TEXT, voucher_no TEXT, note TEXT,
+             created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_payments_contract ON payments(contract_id)`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_payments_paid_at ON payments(paid_at DESC)`,
+        ),
+        env.DB.prepare(
+          `CREATE TABLE IF NOT EXISTS shipments (
+             id TEXT PRIMARY KEY,
+             contract_id TEXT NOT NULL,
+             vehicle_no TEXT,
+             net_tons REAL NOT NULL,
+             gross_tons REAL, tare_tons REAL,
+             shipped_at TEXT NOT NULL,
+             arrived_at TEXT, settled_at TEXT,
+             settled_amount REAL,
+             assay_json TEXT,
+             status TEXT NOT NULL DEFAULT 'shipped',
+             note TEXT,
+             created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_shipments_contract ON shipments(contract_id)`,
+        ),
+        env.DB.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_shipments_shipped ON shipments(shipped_at DESC)`,
+        ),
+      ]);
+    } catch (e) {
+      schemaReady = null;
+      throw e;
+    }
+  })();
+  return schemaReady;
+}
+
 async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders() });
   }
 
-  // /api/login 不需要鉴权
+  // /api/login 不需要鉴权 (不访 DB)
   if (url.pathname === "/api/login") {
     if (req.method !== "POST") return json({ error: "POST only" }, 405);
     return handleLogin(req, env);
@@ -74,6 +230,9 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
   if (!m || m[1] !== env.AUTH_PASS) {
     return json({ ok: false, error: "未授权" }, 401);
   }
+
+  // 鉴权过了再 bootstrap schema, 避免未鉴权流量打 DB.
+  await ensureSchema(env);
 
   if (url.pathname === "/api/coals/migrate") {
     if (req.method !== "POST") return json({ error: "POST only" }, 405);

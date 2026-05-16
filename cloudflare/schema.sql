@@ -1,6 +1,10 @@
 -- Cloudflare D1 schema: 用户新增的煤种 (单租户共享库)
 --
--- 部署:
+-- 部署 (新): worker 启动会自动跑 CREATE TABLE IF NOT EXISTS, 一般不用手动 execute.
+--           本文件留作 schema 文档 / 灾备重建用.
+--           改 schema 时, 必须同步改 worker/index.ts 里的 ensureSchema().
+--
+-- 灾备手动重建:
 --   wrangler d1 execute coalassistant --remote --file=cloudflare/schema.sql
 --
 -- 本地开发:
