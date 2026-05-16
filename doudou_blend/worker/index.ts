@@ -359,8 +359,14 @@ async function handleAdd(req: Request, env: Env): Promise<Response> {
       )
       .run();
     return json({ ok: true });
-  } catch {
-    return json({ ok: false, error: "煤种已存在或写入失败" }, 409);
+  } catch (e) {
+    // 仅把 UNIQUE 冲突映射成 409, 其他错误 (表缺失 / 类型不匹配等) 让 fetch
+    // 层的 try/catch 兜底成 500 并带真实信息, 避免误把"煤种已存在"挡在前面.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/UNIQUE|PRIMARY KEY/i.test(msg)) {
+      return json({ ok: false, error: "煤种已存在" }, 409);
+    }
+    throw e;
   }
 }
 
@@ -756,7 +762,7 @@ async function handleUpsertPayment(req: Request, env: Env): Promise<Response> {
   } catch {
     return json({ ok: false, error: "请求体不是合法 JSON" }, 400);
   }
-  if (!body.id || !body.contract_id || !body.amount || !body.paid_at) {
+  if (!body.id || !body.contract_id || body.amount == null || !body.paid_at) {
     return json({ ok: false, error: "缺少必填字段" }, 400);
   }
   await env.DB.prepare(
