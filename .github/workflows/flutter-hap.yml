@@ -8,16 +8,28 @@
 #
 # **当前状态: 实验性**
 # 鸿蒙 Flutter 工程在 CI 上构建链路是:
-#   1. 拉 OpenHarmony Flutter fork SDK (gitcode 镜像)
-#   2. 装鸿蒙命令行 SDK (社区 mirror, 不需要华为账号)
-#   3. flutter create . --platforms ohos  (生成 ohos/ 模块)
-#   4. 装 pubspec_overrides.yaml 把插件指向 OH 端口
-#   5. flutter build hap --debug
+#   1. 拉 OpenHarmony Flutter fork SDK (gitcode 镜像) - shallow + unshallow 拉 tags
+#   2. 用 openharmony-rs/setup-ohos-sdk action 装 OH SDK 6.1 (API 23,
+#      对应 Mate X5 鸿蒙 6.1). 这个 action 是 GitHub Releases mirror,
+#      不调华为 CDN, 海外 runner 也能 30 秒拉下来 + 自动缓存
+#   3. 装 hvigor 通过 npm @ohos:registry
+#   4. flutter create . --platforms ohos (生成 ohos/ 模块)
+#   5. pubspec_overrides.yaml 把 path_provider / shared_preferences 指
+#      向 openharmony-sig/flutter_packages
+#   6. flutter pub get
+#   7. flutter build hap --debug → unsigned .hap
 #
-# 已知卡点 (持续迭代):
-#   - macOS runner 频繁撞 GitHub API rate limit, 所以 SDK URL 硬编码 (写死版本)
-#   - Flutter OH fork 必须有 git tags 才能 self-report version (用 unshallow)
-#   - 插件 OH 端口的版本兼容
+# 已修过的卡点:
+#   - run 1: API rate limit (cmdline-tools 用 API 查 latest) → 硬编码 URL
+#     [此版本已经不需要 cmdline-tools 了, 整个步骤删了]
+#   - run 2: pubspec_overrides 用了不存在的 sqflite 路径 → 删 sqflite override
+#   - run 3: Flutter OH fork shallow 没 tags, version=0.0.0 → unshallow
+#   - run 4: sdkmgr 调华为 CDN 海外不通, HOS_SDK_HOME 指向空目录 → 改用
+#     openharmony-rs/setup-ohos-sdk
+#
+# 还可能踩的:
+#   - sqflite 没 ohos 端口 (flutter build hap 时会报)
+#   - flutter create ohos 命令行支持差异
 #   - 签名: 当前只出 unsigned .hap, 装真机需要 dev cert. 后续加 secrets.
 name: Build HarmonyOS .hap
 
@@ -26,9 +38,6 @@ on:
   push:
     tags:
       - 'hap-v*'
-
-env:
-  HOS_CMDLINE_URL: https://github.com/harmonyos-dev/hos-sdk/releases/download/v2.0.2/commandline-tools-mac-2.0.0.2.zip
 
 jobs:
   build:
@@ -51,11 +60,7 @@ jobs:
           node-version: '18'
 
       # ----------------------------------------------------------
-      # 1) Flutter for OpenHarmony fork
-      #
-      # 必须有 git tags (即非 shallow), 否则 Flutter self-report 版本
-      # 为 0.0.0-unknown, pub resolver 因 SDK 约束 < 3.3.0 拒绝插件解析.
-      # 先 shallow clone 省初始时间, 然后 unshallow 拉所有 tag.
+      # 1) Flutter for OpenHarmony fork (必须 unshallow 拉 tags)
       # ----------------------------------------------------------
       - name: Clone Flutter OH fork (full, 含 tags)
         run: |
@@ -78,32 +83,29 @@ jobs:
           flutter precache
 
       # ----------------------------------------------------------
-      # 2) 鸿蒙命令行 SDK
+      # 2) OH SDK 6.1 (API 23, 对应 Mate X5 鸿蒙 6.1)
+      #    走 GitHub Releases mirror, 不调华为 CDN
       # ----------------------------------------------------------
-      - name: Download HarmonyOS command-line tools
+      - name: Setup OpenHarmony SDK 6.1
+        id: ohos_sdk
+        uses: openharmony-rs/setup-ohos-sdk@v1.0.0
+        with:
+          version: '6.1'
+          cache: true
+
+      - name: Compute HOS_SDK_HOME (native 的上一级)
         run: |
           set -euo pipefail
-          echo "Downloading: $HOS_CMDLINE_URL"
-          curl -L --fail -o cmdline-tools.zip "$HOS_CMDLINE_URL"
-          ls -lh cmdline-tools.zip
-          file cmdline-tools.zip
-          unzip -q cmdline-tools.zip
-          echo "--- unzip done, listing tree ---"
-          ls -la
-          ls -la command-line-tools/ || echo "no command-line-tools dir"
-          ls -la command-line-tools/sdkmanager/bin/ || echo "no sdkmanager/bin"
-          chmod +x command-line-tools/sdkmanager/bin/sdkmgr
+          NATIVE="${{ steps.ohos_sdk.outputs.ohos_sdk_native }}"
+          echo "ohos_sdk_native = $NATIVE"
+          HOS_HOME="$(dirname "$NATIVE")"
+          echo "HOS_SDK_HOME = $HOS_HOME"
+          echo "HOS_SDK_HOME=$HOS_HOME" >> $GITHUB_ENV
+          ls -la "$HOS_HOME"
 
-      - name: Install OH SDK packages
-        run: |
-          set -euo pipefail
-          export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-} -Duser.country=CN"
-          command-line-tools/sdkmanager/bin/sdkmgr install \
-            toolchains:9 OpenHarmony/toolchains:9 --accept-license || true
-          echo "--- 检查产物 ---"
-          ls -la hwsdk/ 2>/dev/null || echo "hwsdk dir 不存在"
-          echo "HOS_SDK_HOME=$(pwd)/hwsdk" >> $GITHUB_ENV
-
+      # ----------------------------------------------------------
+      # 3) hvigor (鸿蒙构建工具, 通过 npm)
+      # ----------------------------------------------------------
       - name: Install hvigor
         run: |
           set -euo pipefail
@@ -112,7 +114,7 @@ jobs:
           npm install @ohos/hvigor@2.4.2 @ohos/hvigor-ohos-plugin@2.4.2
 
       # ----------------------------------------------------------
-      # 3) 生成 ohos/ 工程
+      # 4) 生成 ohos/ 工程
       # ----------------------------------------------------------
       - name: flutter create ohos platform
         working-directory: doudou_blend_flutter
@@ -123,7 +125,7 @@ jobs:
           ls -la ohos/ 2>/dev/null || echo "ohos/ 未生成"
 
       # ----------------------------------------------------------
-      # 4) pubspec_overrides
+      # 5) pubspec_overrides — 只保留确认有 OH 端口的两个
       # ----------------------------------------------------------
       - name: Write pubspec_overrides.yaml
         working-directory: doudou_blend_flutter
@@ -148,13 +150,14 @@ jobs:
           flutter pub get
 
       # ----------------------------------------------------------
-      # 5) Build
+      # 6) Build
       # ----------------------------------------------------------
       - name: flutter build hap --debug
         working-directory: doudou_blend_flutter
         run: |
           export PATH=$HOME/flutter_ohos/bin:$PATH
-          export HOS_SDK_HOME=${{ github.workspace }}/hwsdk
+          # HOS_SDK_HOME 已经在前面的 step export 到 GITHUB_ENV
+          echo "HOS_SDK_HOME=$HOS_SDK_HOME"
           flutter build hap --debug 2>&1 | tee build.log
 
       - name: List build outputs
@@ -165,7 +168,7 @@ jobs:
           find . -path "*/outputs*" -type d 2>/dev/null | head -10
 
       # ----------------------------------------------------------
-      # 6) Upload artifact
+      # 7) Upload artifact (always)
       # ----------------------------------------------------------
       - name: Upload .hap artifact
         if: always()
