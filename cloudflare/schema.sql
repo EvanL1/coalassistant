@@ -43,3 +43,46 @@ CREATE TABLE IF NOT EXISTS user_settings (
   value      TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ============================================================
+-- customers: 客户库 (Phase 1 - Pre 合同流程)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS customers (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  contact     TEXT,
+  phone       TEXT,
+  note        TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_customers_updated ON customers(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
+
+-- ============================================================
+-- quotes: 报价单 (Phase 1 - Pre 合同流程)
+-- ============================================================
+-- recipe_json:   {"老山兰": 0.30, "瘦煤": 0.20, ...}  (sum ≈ 1.0)
+-- status:        draft  (草稿, 默认)
+--                sent   (已发给客户)
+--                signed (已签合同, 锁定)
+--                lost   (输给别家 / 客户取消)
+-- quoted_price = cost_cif + markup  (元/吨)
+CREATE TABLE IF NOT EXISTS quotes (
+  id            TEXT PRIMARY KEY,
+  customer_id   TEXT NOT NULL,
+  customer_name TEXT NOT NULL,
+  recipe_json   TEXT NOT NULL,
+  cost_cif      REAL NOT NULL,
+  markup        REAL NOT NULL DEFAULT 0,
+  quoted_price  REAL NOT NULL,
+  total_tons    REAL,
+  contract_name TEXT,
+  status        TEXT NOT NULL DEFAULT 'draft',
+  note          TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_quotes_customer ON quotes(customer_id);
+CREATE INDEX IF NOT EXISTS idx_quotes_status   ON quotes(status);
+CREATE INDEX IF NOT EXISTS idx_quotes_updated  ON quotes(updated_at DESC);

@@ -95,6 +95,20 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
     return json({ error: "Method not allowed" }, 405);
   }
 
+  if (url.pathname === "/api/customers") {
+    if (req.method === "GET") return handleListCustomers(env);
+    if (req.method === "POST") return handleUpsertCustomer(req, env);
+    if (req.method === "DELETE") return handleDeleteCustomer(env, url);
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  if (url.pathname === "/api/quotes") {
+    if (req.method === "GET") return handleListQuotes(env);
+    if (req.method === "POST") return handleUpsertQuote(req, env);
+    if (req.method === "DELETE") return handleDeleteQuote(env, url);
+    return json({ error: "Method not allowed" }, 405);
+  }
+
   return json({ error: "Not found" }, 404);
 }
 
@@ -267,6 +281,148 @@ async function handleDeleteSetting(env: Env, url: URL): Promise<Response> {
   await env.DB.prepare(`DELETE FROM user_settings WHERE key = ?`)
     .bind(key)
     .run();
+  return json({ ok: true });
+}
+
+// ============================================================
+// Customers
+// ============================================================
+
+interface CustomerRow {
+  id: string;
+  name: string;
+  contact: string | null;
+  phone: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+async function handleListCustomers(env: Env): Promise<Response> {
+  const rows = await env.DB.prepare(
+    `SELECT id, name, contact, phone, note, created_at, updated_at
+       FROM customers ORDER BY updated_at DESC`,
+  ).all<CustomerRow>();
+  return json({ customers: rows.results ?? [] });
+}
+
+async function handleUpsertCustomer(req: Request, env: Env): Promise<Response> {
+  let body: Partial<CustomerRow>;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ ok: false, error: "请求体不是合法 JSON" }, 400);
+  }
+  if (!body.id || !body.name?.trim()) {
+    return json({ ok: false, error: "缺少 id 或 name" }, 400);
+  }
+  await env.DB.prepare(
+    `INSERT INTO customers (id, name, contact, phone, note)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = excluded.name,
+       contact = excluded.contact,
+       phone = excluded.phone,
+       note = excluded.note,
+       updated_at = datetime('now')`,
+  )
+    .bind(
+      body.id,
+      body.name.trim(),
+      body.contact ?? null,
+      body.phone ?? null,
+      body.note ?? null,
+    )
+    .run();
+  return json({ ok: true });
+}
+
+async function handleDeleteCustomer(env: Env, url: URL): Promise<Response> {
+  const id = url.searchParams.get("id");
+  if (!id) return json({ ok: false, error: "缺少 id" }, 400);
+  await env.DB.prepare(`DELETE FROM customers WHERE id = ?`).bind(id).run();
+  return json({ ok: true });
+}
+
+// ============================================================
+// Quotes
+// ============================================================
+
+interface QuoteRow {
+  id: string;
+  customer_id: string;
+  customer_name: string;
+  recipe_json: string;
+  cost_cif: number;
+  markup: number;
+  quoted_price: number;
+  total_tons: number | null;
+  contract_name: string | null;
+  status: string;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+async function handleListQuotes(env: Env): Promise<Response> {
+  const rows = await env.DB.prepare(
+    `SELECT id, customer_id, customer_name, recipe_json, cost_cif, markup,
+            quoted_price, total_tons, contract_name, status, note,
+            created_at, updated_at
+       FROM quotes ORDER BY updated_at DESC`,
+  ).all<QuoteRow>();
+  return json({ quotes: rows.results ?? [] });
+}
+
+async function handleUpsertQuote(req: Request, env: Env): Promise<Response> {
+  let body: Partial<QuoteRow>;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ ok: false, error: "请求体不是合法 JSON" }, 400);
+  }
+  if (!body.id || !body.customer_id || !body.customer_name) {
+    return json({ ok: false, error: "缺少必填字段" }, 400);
+  }
+  await env.DB.prepare(
+    `INSERT INTO quotes
+       (id, customer_id, customer_name, recipe_json, cost_cif, markup,
+        quoted_price, total_tons, contract_name, status, note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       customer_id   = excluded.customer_id,
+       customer_name = excluded.customer_name,
+       recipe_json   = excluded.recipe_json,
+       cost_cif      = excluded.cost_cif,
+       markup        = excluded.markup,
+       quoted_price  = excluded.quoted_price,
+       total_tons    = excluded.total_tons,
+       contract_name = excluded.contract_name,
+       status        = excluded.status,
+       note          = excluded.note,
+       updated_at    = datetime('now')`,
+  )
+    .bind(
+      body.id,
+      body.customer_id,
+      body.customer_name,
+      body.recipe_json ?? "{}",
+      body.cost_cif ?? 0,
+      body.markup ?? 0,
+      body.quoted_price ?? 0,
+      body.total_tons ?? null,
+      body.contract_name ?? null,
+      body.status ?? "draft",
+      body.note ?? null,
+    )
+    .run();
+  return json({ ok: true });
+}
+
+async function handleDeleteQuote(env: Env, url: URL): Promise<Response> {
+  const id = url.searchParams.get("id");
+  if (!id) return json({ ok: false, error: "缺少 id" }, 400);
+  await env.DB.prepare(`DELETE FROM quotes WHERE id = ?`).bind(id).run();
   return json({ ok: true });
 }
 

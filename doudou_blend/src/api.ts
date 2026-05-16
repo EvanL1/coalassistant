@@ -9,7 +9,7 @@
  *     额外配置 API base URL, 留下一波.
  */
 
-import type { MasterCoalEntry } from "./types";
+import type { Customer, MasterCoalEntry, Quote } from "./types";
 
 const KEY_API_TOKEN = "doudou_blend.api_token.v1";
 
@@ -115,4 +115,120 @@ export async function apiDeleteSetting(key: string): Promise<void> {
     { method: "DELETE" },
   );
   if (!resp.ok) throw new Error(`DELETE /api/settings 失败: ${resp.status}`);
+}
+
+// ============================================================
+// Customers
+// ============================================================
+
+export async function apiListCustomers(): Promise<Customer[]> {
+  const resp = await authFetch("/api/customers");
+  if (!resp.ok) throw new Error(`GET /api/customers 失败: ${resp.status}`);
+  const data = (await resp.json()) as { customers: Customer[] };
+  return data.customers;
+}
+
+export async function apiUpsertCustomer(c: Customer): Promise<void> {
+  const resp = await authFetch("/api/customers", {
+    method: "POST",
+    body: JSON.stringify(c),
+  });
+  if (!resp.ok) {
+    const e = (await resp.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error || `POST /api/customers 失败: ${resp.status}`);
+  }
+}
+
+export async function apiDeleteCustomer(id: string): Promise<void> {
+  const resp = await authFetch(
+    `/api/customers?id=${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(`DELETE /api/customers 失败: ${resp.status}`);
+}
+
+// ============================================================
+// Quotes
+// ============================================================
+
+interface QuoteWire {
+  id: string;
+  customer_id: string;
+  customer_name: string;
+  recipe_json: string;
+  cost_cif: number;
+  markup: number;
+  quoted_price: number;
+  total_tons: number | null;
+  contract_name: string | null;
+  status: string;
+  note: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+function wireToQuote(w: QuoteWire): Quote {
+  let recipe: Record<string, number> = {};
+  try {
+    recipe = JSON.parse(w.recipe_json) as Record<string, number>;
+  } catch {
+    recipe = {};
+  }
+  return {
+    id: w.id,
+    customer_id: w.customer_id,
+    customer_name: w.customer_name,
+    recipe,
+    cost_cif: w.cost_cif,
+    markup: w.markup,
+    quoted_price: w.quoted_price,
+    total_tons: w.total_tons,
+    contract_name: w.contract_name,
+    status: w.status as Quote["status"],
+    note: w.note,
+    created_at: w.created_at,
+    updated_at: w.updated_at,
+  };
+}
+
+function quoteToWire(q: Quote): QuoteWire {
+  return {
+    id: q.id,
+    customer_id: q.customer_id,
+    customer_name: q.customer_name,
+    recipe_json: JSON.stringify(q.recipe),
+    cost_cif: q.cost_cif,
+    markup: q.markup,
+    quoted_price: q.quoted_price,
+    total_tons: q.total_tons ?? null,
+    contract_name: q.contract_name ?? null,
+    status: q.status,
+    note: q.note ?? null,
+  };
+}
+
+export async function apiListQuotes(): Promise<Quote[]> {
+  const resp = await authFetch("/api/quotes");
+  if (!resp.ok) throw new Error(`GET /api/quotes 失败: ${resp.status}`);
+  const data = (await resp.json()) as { quotes: QuoteWire[] };
+  return data.quotes.map(wireToQuote);
+}
+
+export async function apiUpsertQuote(q: Quote): Promise<void> {
+  const resp = await authFetch("/api/quotes", {
+    method: "POST",
+    body: JSON.stringify(quoteToWire(q)),
+  });
+  if (!resp.ok) {
+    const e = (await resp.json().catch(() => ({}))) as { error?: string };
+    throw new Error(e.error || `POST /api/quotes 失败: ${resp.status}`);
+  }
+}
+
+export async function apiDeleteQuote(id: string): Promise<void> {
+  const resp = await authFetch(
+    `/api/quotes?id=${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(`DELETE /api/quotes 失败: ${resp.status}`);
 }

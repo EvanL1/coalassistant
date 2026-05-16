@@ -115,3 +115,34 @@ export interface CoalMaster {
   default_contract: DefaultContract;
   coals: MasterCoalEntry[];
 }
+
+// ===== Phase 1: Pre 合同流程 =====
+
+export interface Customer {
+  id: string;
+  name: string;
+  contact?: string | null;
+  phone?: string | null;
+  note?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** 报价单状态: 草稿 / 已发 / 已签 / 已弃 */
+export type QuoteStatus = "draft" | "sent" | "signed" | "lost";
+
+export interface Quote {
+  id: string;
+  customer_id: string;
+  customer_name: string;       // 冗余存, 客户改名后报价历史仍能展示原名
+  recipe: Record<string, number>; // 煤名 → 比例 (sum ≈ 1.0)
+  cost_cif: number;            // 算出的成本 元/吨
+  markup: number;              // 利润加成 元/吨
+  quoted_price: number;        // = cost_cif + markup
+  total_tons?: number | null;
+  contract_name?: string | null;
+  status: QuoteStatus;
+  note?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}

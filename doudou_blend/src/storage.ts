@@ -10,15 +10,21 @@
  *   - 重置 = 清空 localStorage 对应 key
  */
 
-import type { Spec, MasterCoalEntry } from "./types";
+import type { Customer, MasterCoalEntry, Quote, Spec } from "./types";
 import {
   apiAddCoal,
   apiDeleteCoal,
+  apiDeleteCustomer,
+  apiDeleteQuote,
   apiDeleteSetting,
   apiGetSetting,
   apiListCoals,
+  apiListCustomers,
+  apiListQuotes,
   apiMigrateCoals,
   apiPutSetting,
+  apiUpsertCustomer,
+  apiUpsertQuote,
   clearApiToken,
   getApiToken,
   setApiToken,
@@ -31,6 +37,8 @@ const KEY_AUTH = "doudou_blend.auth.v1";
 const KEY_USER_COALS = "doudou_blend.user_coals.v1";
 const KEY_USER_COALS_MIGRATED = "doudou_blend.user_coals_migrated.v1";
 const KEY_SETTINGS_MIGRATED = "doudou_blend.settings_migrated.v1";
+const KEY_CUSTOMERS = "doudou_blend.customers.v1";
+const KEY_QUOTES = "doudou_blend.quotes.v1";
 
 // D1 settings 表里的 key 约定 (跟 schema.sql 注释保持一致)
 const SETTING_COAL_PREFS = "coal_prefs";
@@ -306,6 +314,106 @@ export async function refreshSettings(): Promise<void> {
   } catch (e) {
     console.warn("refreshSettings 失败:", e);
   }
+}
+
+// ============================================================
+// Customers (Phase 1)
+// ============================================================
+//
+// 同 user_coals 的 stale-while-revalidate 模式:
+//   cache = localStorage, source of truth = D1
+//   写操作: 乐观更新 cache + 后台 sync; 失败 throw 调用方处理
+
+function readCustomersCache(): Customer[] {
+  try {
+    const raw = localStorage.getItem(KEY_CUSTOMERS);
+    return raw ? (JSON.parse(raw) as Customer[]) : [];
+  } catch {
+    return [];
+  }
+}
+function writeCustomersCache(list: Customer[]): void {
+  localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(list));
+}
+
+export function getCustomers(): Customer[] {
+  return readCustomersCache();
+}
+
+export async function refreshCustomers(): Promise<Customer[]> {
+  if (!getApiToken()) return readCustomersCache();
+  try {
+    const remote = await apiListCustomers();
+    writeCustomersCache(remote);
+    window.dispatchEvent(new CustomEvent("doudou:customers_changed"));
+    return remote;
+  } catch (e) {
+    console.warn("refreshCustomers 失败, 使用 cache:", e);
+    return readCustomersCache();
+  }
+}
+
+export async function upsertCustomer(c: Customer): Promise<void> {
+  await apiUpsertCustomer(c);
+  const all = readCustomersCache().filter((x) => x.id !== c.id);
+  all.unshift({ ...c, updated_at: new Date().toISOString() });
+  writeCustomersCache(all);
+  window.dispatchEvent(new CustomEvent("doudou:customers_changed"));
+}
+
+export async function removeCustomer(id: string): Promise<void> {
+  await apiDeleteCustomer(id);
+  const all = readCustomersCache().filter((c) => c.id !== id);
+  writeCustomersCache(all);
+  window.dispatchEvent(new CustomEvent("doudou:customers_changed"));
+}
+
+// ============================================================
+// Quotes (Phase 1)
+// ============================================================
+
+function readQuotesCache(): Quote[] {
+  try {
+    const raw = localStorage.getItem(KEY_QUOTES);
+    return raw ? (JSON.parse(raw) as Quote[]) : [];
+  } catch {
+    return [];
+  }
+}
+function writeQuotesCache(list: Quote[]): void {
+  localStorage.setItem(KEY_QUOTES, JSON.stringify(list));
+}
+
+export function getQuotes(): Quote[] {
+  return readQuotesCache();
+}
+
+export async function refreshQuotes(): Promise<Quote[]> {
+  if (!getApiToken()) return readQuotesCache();
+  try {
+    const remote = await apiListQuotes();
+    writeQuotesCache(remote);
+    window.dispatchEvent(new CustomEvent("doudou:quotes_changed"));
+    return remote;
+  } catch (e) {
+    console.warn("refreshQuotes 失败, 使用 cache:", e);
+    return readQuotesCache();
+  }
+}
+
+export async function upsertQuote(q: Quote): Promise<void> {
+  await apiUpsertQuote(q);
+  const all = readQuotesCache().filter((x) => x.id !== q.id);
+  all.unshift({ ...q, updated_at: new Date().toISOString() });
+  writeQuotesCache(all);
+  window.dispatchEvent(new CustomEvent("doudou:quotes_changed"));
+}
+
+export async function removeQuote(id: string): Promise<void> {
+  await apiDeleteQuote(id);
+  const all = readQuotesCache().filter((q) => q.id !== id);
+  writeQuotesCache(all);
+  window.dispatchEvent(new CustomEvent("doudou:quotes_changed"));
 }
 
 /**

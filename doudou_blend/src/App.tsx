@@ -6,8 +6,16 @@ import { CoalPoolScreen } from "./screens/CoalPoolScreen";
 import { ContractScreen } from "./screens/ContractScreen";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { MeScreen } from "./screens/MeScreen";
+import { CustomersScreen } from "./screens/CustomersScreen";
+import { QuotesScreen } from "./screens/QuotesScreen";
 import { LoginScreen } from "./LoginScreen";
-import { isLoggedIn, refreshSettings, refreshUserCoals } from "./storage";
+import {
+  isLoggedIn,
+  refreshCustomers,
+  refreshQuotes,
+  refreshSettings,
+  refreshUserCoals,
+} from "./storage";
 
 function App() {
   const [tab, setTab] = useState<TabId>("today");
@@ -25,6 +33,8 @@ function App() {
     if (authed) {
       void refreshUserCoals();
       void refreshSettings();
+      void refreshCustomers();
+      void refreshQuotes();
     }
   }, [authed]);
 
@@ -36,10 +46,12 @@ function App() {
     <div className="app">
       <div className="app-content">
         {tab === "today" && <TodayScreen />}
+        {tab === "customers" && <CustomersScreen />}
+        {tab === "quotes" && <QuotesScreen />}
         {tab === "pool" && <CoalPoolScreen />}
-        {tab === "contract" && <ContractScreen />}
-        {tab === "history" && <HistoryScreen />}
-        {tab === "me" && <MeScreen />}
+        {tab === "contract" && <ContractScreen onBack={() => setTab("me")} />}
+        {tab === "history" && <HistoryScreen onBack={() => setTab("me")} />}
+        {tab === "me" && <MeScreen onNavigate={setTab} />}
       </div>
       <TabBar active={tab} onChange={setTab} />
     </div>

@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import { getBackend } from "../backend";
 import { loadMaster } from "../master_loader";
+import { SaveQuoteDialog } from "../SaveQuoteDialog";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
 import type {
   BlendRequest,
@@ -75,6 +76,7 @@ interface SolveState {
 export function TodayScreen() {
   const [state, setState] = useState<SolveState>({ status: "loading" });
   const [saveFlag, setSaveFlag] = useState(false);
+  const [showSaveQuote, setShowSaveQuote] = useState(false);
 
   useEffect(() => {
     void runSolve();
@@ -383,10 +385,26 @@ export function TodayScreen() {
         <button className="btn btn-secondary" onClick={runSolve}>
           重新计算
         </button>
-        <button className="btn btn-primary" onClick={saveToHistory}>
-          {saveFlag ? "✓ 已保存" : "保存方案"}
+        <button className="btn btn-secondary" onClick={saveToHistory}>
+          {saveFlag ? "✓" : "存历史"}
+        </button>
+        <button
+          className="btn btn-primary"
+          onClick={() => setShowSaveQuote(true)}
+        >
+          报价
         </button>
       </div>
+
+      {showSaveQuote && (
+        <SaveQuoteDialog
+          recipe={Object.fromEntries(result.orders.map((o) => [o.coal, o.ratio]))}
+          cost_cif={cost.cif_per_ton}
+          total_tons={state.request?.total_quantity ?? null}
+          contract_name={contractName}
+          onClose={() => setShowSaveQuote(false)}
+        />
+      )}
     </>
   );
 }

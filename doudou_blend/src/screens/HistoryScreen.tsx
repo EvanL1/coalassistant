@@ -21,7 +21,11 @@ function recipeBrief(recipe: Record<string, number>): string {
     .join(" · ");
 }
 
-export function HistoryScreen() {
+interface Props {
+  onBack?: () => void;
+}
+
+export function HistoryScreen({ onBack }: Props) {
   const [list, setList] = useState<HistoryEntry[]>(getHistory());
 
   useEffect(() => {
@@ -34,6 +38,19 @@ export function HistoryScreen() {
     <>
       <div className="page-header">
         <div>
+          {onBack && (
+            <button
+              onClick={onBack}
+              style={{
+                fontSize: 13,
+                color: "var(--c-text-3)",
+                marginBottom: 4,
+                padding: 0,
+              }}
+            >
+              ‹ 返回我的
+            </button>
+          )}
           <h1 className="page-title">历史方案</h1>
           <div className="page-subtitle">
             {list.length === 0

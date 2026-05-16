@@ -43,7 +43,11 @@ function formToSpec(f: FormSpec): Spec {
   };
 }
 
-export function ContractScreen() {
+interface Props {
+  onBack?: () => void;
+}
+
+export function ContractScreen({ onBack }: Props) {
   const [master, setMaster] = useState<CoalMaster | null>(null);
   const [form, setForm] = useState<FormSpec[]>([]);
   const [savedFlag, setSavedFlag] = useState(false);
@@ -86,6 +90,19 @@ export function ContractScreen() {
     <>
       <div className="page-header">
         <div>
+          {onBack && (
+            <button
+              onClick={onBack}
+              style={{
+                fontSize: 13,
+                color: "var(--c-text-3)",
+                marginBottom: 4,
+                padding: 0,
+              }}
+            >
+              ‹ 返回我的
+            </button>
+          )}
           <h1 className="page-title">合同约束</h1>
           <div className="page-subtitle">
             {isCustom ? "用户自定义" : master.default_contract.name}
