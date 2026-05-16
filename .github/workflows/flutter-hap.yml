@@ -1,0 +1,159 @@
+# 豆哥配煤 - 鸿蒙 NEXT .hap 包构建
+#
+# 触发: 仅手动 (workflow_dispatch) 或 hap-v* tag.
+# 不挂 push/PR, 避免每次烧 GH Actions macOS 配额 (10x 乘数).
+#
+# 产物: doudou_blend_flutter/build/ohos/outputs/.../entry-default-unsigned.hap
+#       作为 GH Actions artifact 上传, 14 天保留.
+#
+# **当前状态: 实验性**
+# 鸿蒙 Flutter 工程在 CI 上构建链路是:
+#   1. 拉 OpenHarmony Flutter fork SDK (gitcode 镜像)
+#   2. 装鸿蒙命令行 SDK (社区 mirror, 不需要华为账号)
+#   3. flutter create . --platforms ohos  (生成 ohos/ 模块)
+#   4. 装 pubspec_overrides.yaml 把插件指向 OH 端口
+#   5. flutter build hap --debug
+#
+# 第一次跑大概率会红, 据 log 迭代. 已知卡点:
+#   - 鸿蒙 SDK 下载链接 (社区 mirror 偶尔会改 URL)
+#   - 插件 OH 端口的版本兼容 (sqflite_ohos 跟主 sqflite 版本对得上才行)
+#   - 签名: 当前只出 unsigned .hap, 装真机需要 dev cert. 后续加 secrets.
+name: Build HarmonyOS .hap
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'hap-v*'
+
+jobs:
+  build:
+    name: Build .hap (experimental)
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Node 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # ----------------------------------------------------------
+      # 1) Flutter for OpenHarmony fork
+      # ----------------------------------------------------------
+      - name: Clone Flutter OH fork
+        run: |
+          git clone --depth 1 https://gitcode.com/openharmony-sig/flutter_flutter.git $HOME/flutter_ohos
+          echo "$HOME/flutter_ohos/bin" >> $GITHUB_PATH
+          export PATH=$HOME/flutter_ohos/bin:$PATH
+          flutter --version || true
+
+      - name: Pre-cache Flutter
+        run: |
+          export PATH=$HOME/flutter_ohos/bin:$PATH
+          flutter precache
+
+      # ----------------------------------------------------------
+      # 2) 鸿蒙命令行 SDK (社区 mirror)
+      # ----------------------------------------------------------
+      - name: Install HarmonyOS command-line tools
+        run: |
+          RELEASE_JSON=$(curl -s -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/harmonyos-dev/hos-sdk/releases/latest)
+          ASSET_URL=$(echo "$RELEASE_JSON" | jq -r \
+            '.assets[] | select(.name | test("commandline-tools-mac-.*.zip")) | .browser_download_url' | head -1)
+          echo "下载 $ASSET_URL"
+          curl -L -o cmdline-tools.zip "$ASSET_URL"
+          unzip -q cmdline-tools.zip
+          chmod +x command-line-tools/sdkmanager/bin/sdkmgr || true
+
+      - name: Install OH SDK packages
+        run: |
+          export JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS -Duser.country=CN"
+          command-line-tools/sdkmanager/bin/sdkmgr install \
+            toolchains:9 OpenHarmony/toolchains:9 --accept-license || true
+          echo "HOS_SDK_HOME=$(pwd)/hwsdk" >> $GITHUB_ENV
+
+      - name: Install hvigor
+        run: |
+          npm init -y > /dev/null
+          npm config set @ohos:registry=https://repo.harmonyos.com/npm/
+          npm install @ohos/hvigor@2.4.2 @ohos/hvigor-ohos-plugin@2.4.2
+
+      # ----------------------------------------------------------
+      # 3) 生成 ohos/ 工程 (一次性)
+      # ----------------------------------------------------------
+      - name: flutter create ohos platform
+        working-directory: doudou_blend_flutter
+        run: |
+          export PATH=$HOME/flutter_ohos/bin:$PATH
+          flutter create . --platforms ohos --org com.doudou --project-name doudou_blend_flutter || true
+          ls -la ohos/ || true
+
+      # ----------------------------------------------------------
+      # 4) 配置 pubspec_overrides.yaml
+      # ----------------------------------------------------------
+      - name: Write pubspec_overrides.yaml
+        working-directory: doudou_blend_flutter
+        run: |
+          cat > pubspec_overrides.yaml <<'EOF'
+          dependency_overrides:
+            sqflite:
+              git:
+                url: https://gitcode.com/openharmony-sig/flutter_packages.git
+                path: packages/sqflite/sqflite
+            path_provider:
+              git:
+                url: https://gitcode.com/openharmony-sig/flutter_packages.git
+                path: packages/path_provider/path_provider
+            shared_preferences:
+              git:
+                url: https://gitcode.com/openharmony-sig/flutter_packages.git
+                path: packages/shared_preferences/shared_preferences
+          EOF
+          cat pubspec_overrides.yaml
+
+      - name: flutter pub get
+        working-directory: doudou_blend_flutter
+        run: |
+          export PATH=$HOME/flutter_ohos/bin:$PATH
+          flutter pub get
+
+      # ----------------------------------------------------------
+      # 5) Build (unsigned)
+      # ----------------------------------------------------------
+      - name: flutter build hap --debug
+        working-directory: doudou_blend_flutter
+        run: |
+          export PATH=$HOME/flutter_ohos/bin:$PATH
+          export HOS_SDK_HOME=${{ github.workspace }}/hwsdk
+          flutter build hap --debug 2>&1 | tee build.log
+
+      - name: List build outputs
+        if: always()
+        working-directory: doudou_blend_flutter
+        run: |
+          find . -name "*.hap" -type f 2>/dev/null || echo "no .hap found"
+          find . -path "*/outputs*" -type d 2>/dev/null | head -10
+
+      # ----------------------------------------------------------
+      # 6) 上传 artifact (无论 build 成败都上传 log 给我们 debug)
+      # ----------------------------------------------------------
+      - name: Upload .hap artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doudou-blend-hap
+          path: |
+            doudou_blend_flutter/build/**/*.hap
+            doudou_blend_flutter/build.log
+          if-no-files-found: warn
+          retention-days: 14

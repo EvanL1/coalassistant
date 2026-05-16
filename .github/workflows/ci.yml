@@ -1,4 +1,8 @@
-# 豆哥配煤 - 持续集成 (跑测试, 不打包)
+# 豆哥配煤 - 持续集成
+# 三条平行链路, 任何一条挂都拦合并:
+#   1. blend_kit_rs  Rust 算法核心 (cargo test)
+#   2. worker        Cloudflare Worker 44 个集成测试 (vitest + miniflare D1)
+#   3. flutter       鸿蒙端 Dart 静态分析 + 40 测试 (sqflite_ffi 内存 DB)
 name: CI
 
 on:
@@ -7,7 +11,11 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # ============================================================
+  # 1) blend_kit_rs - Rust 算法核心
+  # ============================================================
+  blend_kit_rs:
+    name: blend_kit (Rust)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,29 +26,83 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            blend_kit_rs
-            doudou_blend/src-tauri
+          workspaces: blend_kit_rs
 
-      # blend_kit_rs 核心: 不依赖 Tauri / Android, 最简单
-      - name: Test blend_kit
+      - name: cargo test
         working-directory: blend_kit_rs
         run: cargo test --release
 
-      - name: Build blend_kit demo
+      - name: cargo run --example demo
         working-directory: blend_kit_rs
         run: cargo run --release --example demo
 
-      - name: Build blend_kit master_demo
+      - name: cargo run --example master_demo
         working-directory: blend_kit_rs
         run: cargo run --release --example master_demo
 
-      # Tauri 端: 仅 build, 不跑测试 (需要 Tauri 系统依赖)
-      # 移除 tauri 测试以保持 CI 快速; 真正的端到端测试留给 release.yml
-      - name: Format check
-        run: |
-          cargo fmt --manifest-path blend_kit_rs/Cargo.toml -- --check || echo "blend_kit_rs fmt issues (warn only)"
+      - name: fmt check (warn-only)
+        working-directory: blend_kit_rs
+        run: cargo fmt -- --check || echo "fmt issues - warn only"
 
-      - name: Clippy (blend_kit)
+      - name: clippy (warn-only)
         working-directory: blend_kit_rs
         run: cargo clippy --release -- -D warnings || true
+
+  # ============================================================
+  # 2) Worker - Cloudflare Worker 集成测试 (44)
+  # ============================================================
+  worker:
+    name: Worker (44 集成测试)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: doudou_blend/package-lock.json
+
+      - name: Stub blend_kit_wasm pkg (避免 wasm-pack 拖慢 CI)
+        run: |
+          mkdir -p blend_kit_wasm/pkg
+          cat > blend_kit_wasm/pkg/package.json <<'EOF'
+          {"name":"blend-kit-wasm","version":"0.1.0","main":"index.js"}
+          EOF
+
+      - name: npm ci
+        working-directory: doudou_blend
+        run: npm ci
+
+      - name: "npm test (vitest workers pool, 44 个)"
+        working-directory: doudou_blend
+        run: npm test
+
+  # ============================================================
+  # 3) Flutter - 鸿蒙端 Dart 测试
+  # ============================================================
+  flutter:
+    name: Flutter (analyze + 40 测试)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.27.x'
+          cache: true
+
+      - name: flutter pub get
+        working-directory: doudou_blend_flutter
+        run: flutter pub get
+
+      - name: flutter analyze
+        working-directory: doudou_blend_flutter
+        run: flutter analyze
+
+      - name: "flutter test (40 个: models / repos / solver)"
+        working-directory: doudou_blend_flutter
+        run: flutter test
