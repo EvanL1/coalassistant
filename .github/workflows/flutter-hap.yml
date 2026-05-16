@@ -16,7 +16,8 @@
 #
 # 已知卡点 (持续迭代):
 #   - macOS runner 频繁撞 GitHub API rate limit, 所以 SDK URL 硬编码 (写死版本)
-#   - 插件 OH 端口的版本兼容 (sqflite_ohos 跟主 sqflite 版本对得上才行)
+#   - Flutter OH fork 必须有 git tags 才能 self-report version (用 unshallow)
+#   - 插件 OH 端口的版本兼容
 #   - 签名: 当前只出 unsigned .hap, 装真机需要 dev cert. 后续加 secrets.
 name: Build HarmonyOS .hap
 
@@ -27,8 +28,6 @@ on:
       - 'hap-v*'
 
 env:
-  # 硬编码 OpenHarmony cmdline SDK 版本 (社区 mirror, 不需要华为账号).
-  # 用 API 查 /releases/latest 会撞 GH runner 共享 IP 的 rate limit. 写死.
   HOS_CMDLINE_URL: https://github.com/harmonyos-dev/hos-sdk/releases/download/v2.0.2/commandline-tools-mac-2.0.0.2.zip
 
 jobs:
@@ -53,14 +52,24 @@ jobs:
 
       # ----------------------------------------------------------
       # 1) Flutter for OpenHarmony fork
+      #
+      # 必须有 git tags (即非 shallow), 否则 Flutter self-report 版本
+      # 为 0.0.0-unknown, pub resolver 因 SDK 约束 < 3.3.0 拒绝插件解析.
+      # 先 shallow clone 省初始时间, 然后 unshallow 拉所有 tag.
       # ----------------------------------------------------------
-      - name: Clone Flutter OH fork
+      - name: Clone Flutter OH fork (full, 含 tags)
         run: |
           set -euo pipefail
           git clone --depth 1 https://gitcode.com/openharmony-sig/flutter_flutter.git $HOME/flutter_ohos
+          cd $HOME/flutter_ohos
+          echo "--- 补拉 tags (flutter --version 解析依赖) ---"
+          git fetch --unshallow
+          git fetch --tags
+          git describe --tags --abbrev=0 || echo "no tag found"
           echo "$HOME/flutter_ohos/bin" >> $GITHUB_PATH
           export PATH=$HOME/flutter_ohos/bin:$PATH
-          flutter --version || true
+          echo "--- flutter --version 输出 ---"
+          flutter --version
 
       - name: Pre-cache Flutter
         run: |
@@ -114,11 +123,7 @@ jobs:
           ls -la ohos/ 2>/dev/null || echo "ohos/ 未生成"
 
       # ----------------------------------------------------------
-      # 4) pubspec_overrides — 这轮只放确定有 OH 端口的:
-      #    path_provider / shared_preferences 路径已经 search 确认
-      #    sqflite 暂时不 override (flutter_packages 仓库里没收 sqflite),
-      #    后续 flutter build hap 报错时再换源 (sqflite_ohos pub 包 或
-      #    单独 git 仓库)
+      # 4) pubspec_overrides
       # ----------------------------------------------------------
       - name: Write pubspec_overrides.yaml
         working-directory: doudou_blend_flutter
@@ -160,7 +165,7 @@ jobs:
           find . -path "*/outputs*" -type d 2>/dev/null | head -10
 
       # ----------------------------------------------------------
-      # 6) Upload artifact (always, 拿 build.log debug)
+      # 6) Upload artifact
       # ----------------------------------------------------------
       - name: Upload .hap artifact
         if: always()
