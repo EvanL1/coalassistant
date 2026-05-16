@@ -1,0 +1,47 @@
+name: doudou_blend_flutter
+description: "豆哥配煤 - 鸿蒙 NEXT Flutter 版本. 本地 SQLite 数据 + Rust 算法 FFI."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.6.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI / 路由 / 状态
+  cupertino_icons: ^1.0.8
+  go_router: ^14.6.2
+  provider: ^6.1.2
+
+  # 数据 / 文件
+  sqflite: ^2.4.1
+  sqflite_common_ffi: ^2.3.4   # 桌面 / 测试用 SQLite (鸿蒙真机走 dependency_overrides 切到 _ohos 端口)
+  path: ^1.9.0
+  path_provider: ^2.1.5
+  shared_preferences: ^2.3.4
+
+  # Rust FFI (调 blend_kit_rs cdylib)
+  ffi: ^2.1.3
+
+  # 工具
+  intl: ^0.20.1
+  uuid: ^4.5.1
+
+  # 鸿蒙适配说明:
+  # 真机构建时 pubspec_overrides.yaml 里把以下插件换成 OpenHarmony 版:
+  #   sqflite          → sqflite_ohos          (GitCode openharmony-sig)
+  #   path_provider    → path_provider_ohos
+  #   shared_preferences → shared_preferences_ohos
+  # 详见 ohos/README.md.
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/coal_master.json
