@@ -1,7 +1,7 @@
 # 豆哥配煤 - 持续集成
 # 两条平行链路, 任何一条挂都拦合并:
 #   1. blend_kit_rs  Rust 算法核心 (cargo test)
-#   2. worker        Cloudflare Worker 44 个集成测试 (vitest + miniflare D1)
+#   2. server        Node + Hono + better-sqlite3 集成测试 (vitest, 内存 SQLite)
 name: CI
 
 on:
@@ -48,10 +48,10 @@ jobs:
         run: cargo clippy --release -- -D warnings || true
 
   # ============================================================
-  # 2) Worker - Cloudflare Worker 集成测试 (44)
+  # 2) Server - Node + Hono + better-sqlite3 集成测试
   # ============================================================
-  worker:
-    name: Worker (44 集成测试)
+  server:
+    name: Server (集成测试)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,6 +62,12 @@ jobs:
           node-version: '22'
           cache: 'npm'
           cache-dependency-path: doudou_blend/package-lock.json
+
+      # better-sqlite3 是 native 包, 需要 python + build tools 编原生.
+      # ubuntu-latest 默认有, 这里只是显式声明.
+      - name: Setup native build deps (for better-sqlite3)
+        run: |
+          which python3 || sudo apt-get install -y python3 build-essential
 
       - name: Stub blend_kit_wasm pkg (避免 wasm-pack 拖慢 CI)
         run: |
@@ -74,6 +80,6 @@ jobs:
         working-directory: doudou_blend
         run: npm ci
 
-      - name: "npm test (vitest workers pool, 44 个)"
+      - name: npm test (vitest)
         working-directory: doudou_blend
         run: npm test
