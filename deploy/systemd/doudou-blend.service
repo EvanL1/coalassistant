@@ -1,0 +1,40 @@
+[Unit]
+Description=豆哥配煤 Web 服务 (Node + better-sqlite3)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=doudou-blend
+Group=doudou-blend
+WorkingDirectory=/opt/doudou-blend
+
+# 服务跑在内部端口, Caddy 反代过去
+Environment=PORT=8787
+Environment=DATA_DIR=/var/lib/doudou-blend
+Environment=STATIC_DIR=/opt/doudou-blend/dist
+# AUTH_PASS 不写这里, 走 EnvironmentFile (权限 600), 防止 systemctl status 漏密码
+EnvironmentFile=/etc/doudou-blend.env
+
+ExecStart=/usr/bin/node /opt/doudou-blend/dist-server/index.js
+
+# 自动重启 (崩了 5 秒后拉起)
+Restart=on-failure
+RestartSec=5
+
+# 资源限制 (VPS 4GB 用不完, 2GB 足够 + 防爆)
+MemoryMax=2G
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/doudou-blend
+
+# 日志走 journald, 看日志: journalctl -u doudou-blend -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -24,6 +24,13 @@ export default defineConfig(async () => ({
           port: 1421,
         }
       : undefined,
+    // 开发时 /api/* 转发到本地 Node 服务 (npm run dev:server 启的)
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:8787",
+        changeOrigin: true,
+      },
+    },
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],

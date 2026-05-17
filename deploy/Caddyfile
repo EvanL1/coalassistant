@@ -1,0 +1,23 @@
+# Caddy 反代配置, 部署到 /etc/caddy/Caddyfile
+#
+# Caddy 自动管 Let's Encrypt HTTPS 证书, 80/443 都自动处理.
+# 改完跑: sudo systemctl reload caddy
+#
+# 把 doudou.example.com 改成你买的真域名.
+# Cloudflare DNS 上加 A 记录指 VPS IP, **关橙云走灰云** (DNS only),
+# Caddy 才能 ACME challenge 拿证书.
+
+doudou.example.com {
+	# 反代到 Node 服务 (绑 127.0.0.1, 不直接对外)
+	reverse_proxy 127.0.0.1:8787
+
+	# 启用 gzip / zstd 压缩, SPA 资源传输更快
+	encode zstd gzip
+
+	# 服务自身已经处理 SPA fallback (notFound → index.html), 这里不用配
+}
+
+# 如果没买域名, 临时拿 IP 跑可以用这个 (没 HTTPS, 别长期用):
+# :80 {
+# 	reverse_proxy 127.0.0.1:8787
+# }
