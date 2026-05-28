@@ -9,6 +9,7 @@ import type { CoalMaster, CoalStatus, MasterCoalEntry } from "../types";
 import { CoalEditor } from "../CoalEditor";
 import { NewCoalDialog } from "../NewCoalDialog";
 import {
+  enableAllCoals,
   getCoalPrefs,
   getUserCoals,
   normalizeCoalName,
@@ -120,23 +121,40 @@ export function CoalPoolScreen() {
             {visibleCoals.filter(isEnabled).length} 种
           </div>
         </div>
-        <button
-          aria-label="新增煤种"
-          onClick={() => setShowNew(true)}
-          style={{
-            width: 40,
-            height: 40,
-            borderRadius: "50%",
-            background: "var(--c-primary)",
-            color: "white",
-            fontSize: 22,
-            fontWeight: 600,
-            lineHeight: 1,
-            boxShadow: "var(--shadow-sm)",
-          }}
-        >
-          +
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            onClick={() => enableAllCoals(visibleCoals.map((c) => c.name))}
+            style={{
+              padding: "6px 12px",
+              borderRadius: 8,
+              background: "var(--c-card)",
+              color: "var(--c-text-2)",
+              fontSize: 12,
+              fontWeight: 600,
+              boxShadow: "var(--shadow-sm)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            全部启用
+          </button>
+          <button
+            aria-label="新增煤种"
+            onClick={() => setShowNew(true)}
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: "50%",
+              background: "var(--c-primary)",
+              color: "white",
+              fontSize: 22,
+              fontWeight: 600,
+              lineHeight: 1,
+              boxShadow: "var(--shadow-sm)",
+            }}
+          >
+            +
+          </button>
+        </div>
       </div>
 
       <div style={{ position: "relative", marginBottom: 10 }}>

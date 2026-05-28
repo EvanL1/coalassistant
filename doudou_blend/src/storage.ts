@@ -87,6 +87,16 @@ export function clearAllCoalPrefs(): void {
   window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
 }
 
+export function enableAllCoals(names: string[]): void {
+  const all = getCoalPrefs();
+  const now = new Date().toISOString();
+  for (const name of names) {
+    all[name] = { ...all[name], enabled: true, updated_at: now } as CoalPref;
+  }
+  localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(all));
+  window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
+}
+
 // ============================================================
 // 合同
 // ============================================================
