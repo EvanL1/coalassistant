@@ -49,7 +49,7 @@
       "status": "verified",
       "props": {
         "S": 2.0, "A": 6.0, "V": 22, "G": 93,
-        "Y": 17, "petro": 0.01, "CSR": 70, "M": 11
+        "Y": 17, "petro": 0.08, "CSR": 70, "M": 11
       },
       "fob": 1425, "frt": 25,
       "confidence": {
@@ -64,7 +64,7 @@
       "status": "verified",
       "props": {
         "S": 1.1, "A": 13.5, "V": 21, "G": 80,
-        "Y": 10, "petro": 0.01, "CSR": 50, "M": 23
+        "Y": 10, "petro": 0.07, "CSR": 50, "M": 23
       },
       "fob": 970, "frt": 35,
       "confidence": {
@@ -79,7 +79,7 @@
       "status": "verified",
       "props": {
         "S": 3.8, "A": 11.0, "V": 24, "G": 92,
-        "Y": 19, "petro": 0.01, "CSR": 64, "M": 11
+        "Y": 19, "petro": 0.13, "CSR": 64, "M": 11
       },
       "fob": 1280, "frt": 50,
       "confidence": {
@@ -94,7 +94,7 @@
       "status": "verified",
       "props": {
         "S": 3.0, "A": 8.5, "V": 18, "G": 75,
-        "Y": 12, "petro": 0.01, "CSR": 58, "M": 11
+        "Y": 12, "petro": 0.11, "CSR": 58, "M": 11
       },
       "fob": 1150, "frt": 15,
       "confidence": {

@@ -150,7 +150,7 @@ mod tests {
     fn test_load_embedded() {
         let master = CoalMaster::load_embedded().expect("master 加载失败");
         assert!(!master.coals.is_empty());
-        assert_eq!(master.version, "2.0");
+        assert_eq!(master.version, "2.1");
         assert!(
             master.coals.len() >= 60,
             "煤种数 {} 异常",
@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(lb.props.get("V"), Some(&22.0));
         assert_eq!(lb.props.get("G"), Some(&93.0));
         assert_eq!(lb.props.get("Y"), Some(&17.0));
-        assert_eq!(lb.props.get("petro"), Some(&0.01));
+        assert_eq!(lb.props.get("petro"), Some(&0.08));
         assert_eq!(lb.props.get("CSR"), Some(&70.0));
         assert_eq!(lb.props.get("M"), Some(&11.0));
         assert_eq!(lb.fob, Some(1425.0));
