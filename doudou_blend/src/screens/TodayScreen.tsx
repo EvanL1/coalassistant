@@ -76,11 +76,13 @@ interface SolveState {
 export function TodayScreen() {
   const [state, setState] = useState<SolveState>({ status: "loading" });
   const [saveFlag, setSaveFlag] = useState(false);
+  // 重算反馈: idle / running / done. running 时按钮显示"重算中...", done 时显示"✓ 已重算" 1.5s
+  const [recompute, setRecompute] = useState<"idle" | "running" | "done">("idle");
 
   useEffect(() => {
-    void runSolve();
-    // 监听 prefs/contract/user_coals 变化, 自动重算
-    const refresh = () => void runSolve();
+    void runSolve(true);
+    // 监听 prefs/contract/user_coals 变化, 自动重算 (inline, 不整页 loading)
+    const refresh = () => void runSolve(false);
     window.addEventListener("doudou:prefs_changed", refresh);
     window.addEventListener("doudou:contract_changed", refresh);
     window.addEventListener("doudou:user_coals_changed", refresh);
@@ -91,8 +93,10 @@ export function TodayScreen() {
     };
   }, []);
 
-  async function runSolve() {
-    setState({ status: "loading" });
+  /** initial=true 时整页 loading; 否则原地反馈, 保留旧结果直到新结果出来. */
+  async function runSolve(initial: boolean = false) {
+    if (initial) setState({ status: "loading" });
+    else setRecompute("running");
     try {
       const master = await loadMaster();
       const prefs = getCoalPrefs();
@@ -141,6 +145,11 @@ export function TodayScreen() {
       });
     } catch (e) {
       setState({ status: "error", error: String(e) });
+    } finally {
+      if (!initial) {
+        setRecompute("done");
+        setTimeout(() => setRecompute("idle"), 1500);
+      }
     }
   }
 
@@ -164,7 +173,7 @@ export function TodayScreen() {
     return (
       <div className="empty">
         <p style={{ marginBottom: 16 }}>{state.error}</p>
-        <button className="btn btn-primary" onClick={runSolve}>
+        <button className="btn btn-primary" onClick={() => runSolve(true)}>
           重试
         </button>
       </div>
@@ -201,8 +210,8 @@ export function TodayScreen() {
           建议: 去「合同」放宽某项约束, 或去「煤池」启用更多煤源.
         </p>
         <div className="action-row">
-          <button className="btn btn-secondary" onClick={runSolve}>
-            重试
+          <button className="btn btn-secondary" onClick={() => runSolve(false)}>
+            {recompute === "running" ? "重算中..." : recompute === "done" ? "✓ 已重算" : "重试"}
           </button>
         </div>
       </>
@@ -381,8 +390,16 @@ export function TodayScreen() {
       )}
 
       <div className="action-row">
-        <button className="btn btn-secondary" onClick={runSolve}>
-          重新计算
+        <button
+          className="btn btn-secondary"
+          onClick={() => runSolve(false)}
+          disabled={recompute === "running"}
+        >
+          {recompute === "running"
+            ? "重算中..."
+            : recompute === "done"
+            ? "✓ 已重算"
+            : "重新计算"}
         </button>
         <button className="btn btn-primary" onClick={saveToHistory}>
           {saveFlag ? "✓ 已保存" : "保存方案"}

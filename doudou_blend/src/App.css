@@ -255,6 +255,15 @@ button {
   background: var(--c-card);
   color: var(--c-text);
   box-shadow: var(--shadow-sm);
+  transition: transform 0.08s ease, background 0.15s ease;
+}
+.btn-secondary:active {
+  background: var(--c-border);
+  transform: scale(0.97);
+}
+.btn[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* ========== Bottom Tab Bar ========== */
