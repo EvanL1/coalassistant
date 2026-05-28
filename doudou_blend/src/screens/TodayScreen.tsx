@@ -56,9 +56,10 @@ function applyOverrides(coal: MasterCoalEntry, prefs: CoalPrefs): Coal | null {
   return { name: coal.name, props, fob, frt };
 }
 
-/** 启用状态: 显式 override > master verified 默认启用. */
+/** 启用状态: hidden 一票否决, 否则 显式 override > master verified 默认启用. */
 function isEnabled(coal: MasterCoalEntry, prefs: CoalPrefs): boolean {
   const p = prefs[coal.name];
+  if (p?.hidden) return false;
   if (p?.enabled != null) return p.enabled;
   return coal.status === "verified";
 }

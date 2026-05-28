@@ -15,11 +15,14 @@ import {
   getCoalPref,
   setCoalPref,
   clearCoalPref,
+  removeUserCoal,
   type CoalPref,
 } from "./storage";
 
 interface Props {
   coal: MasterCoalEntry;
+  /** true = 用户自己新增的 (走 removeUserCoal 真删); false/undefined = master 煤 (走 hidden=true 软隐藏) */
+  isUserAdded?: boolean;
   onClose: () => void;
   onSaved?: () => void;
 }
@@ -53,9 +56,10 @@ function parseNumOrNull(s: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-export function CoalEditor({ coal, onClose, onSaved }: Props) {
+export function CoalEditor({ coal, isUserAdded, onClose, onSaved }: Props) {
   const [pref, setPref] = useState<CoalPref | null>(getCoalPref(coal.name));
   const [form, setForm] = useState<FormState>(() => toForm(coal, pref));
+  const isHidden = pref?.hidden === true;
 
   // 锁住 body 滚动
   useEffect(() => {
@@ -94,6 +98,24 @@ export function CoalEditor({ coal, onClose, onSaved }: Props) {
     clearCoalPref(coal.name);
     setPref(null);
     setForm(toForm(coal, null));
+  }
+
+  function removeCoal() {
+    if (isUserAdded) {
+      if (!confirm(`彻底删除「${coal.name}」？\n用户自定义煤, 数据无法恢复.`)) return;
+      removeUserCoal(coal.name);
+    } else {
+      if (!confirm(`隐藏「${coal.name}」？\n之后不再在煤池和求解器中出现. 可在「已隐藏」筛选里找回.`)) return;
+      setCoalPref(coal.name, { hidden: true });
+    }
+    onSaved?.();
+    onClose();
+  }
+
+  function unhideCoal() {
+    setCoalPref(coal.name, { hidden: false });
+    setPref(getCoalPref(coal.name));
+    onSaved?.();
   }
 
   const hasOverrides =
@@ -206,6 +228,27 @@ export function CoalEditor({ coal, onClose, onSaved }: Props) {
               重置为 master 默认值
             </button>
           )}
+
+          {/* 危险区: 隐藏 / 删除 */}
+          <div style={{ marginTop: 12, borderTop: "1px solid var(--c-border)", paddingTop: 12 }}>
+            {isHidden ? (
+              <button
+                className="btn btn-secondary"
+                style={{ width: "100%" }}
+                onClick={unhideCoal}
+              >
+                取消隐藏 · 重新显示
+              </button>
+            ) : (
+              <button
+                className="btn btn-secondary"
+                style={{ width: "100%", color: "var(--c-danger)", borderColor: "var(--c-danger)" }}
+                onClick={removeCoal}
+              >
+                {isUserAdded ? "彻底删除此煤" : "隐藏此煤"}
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="modal-footer">

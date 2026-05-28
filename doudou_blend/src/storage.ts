@@ -21,6 +21,8 @@ const KEY_USER_COALS = "doudou_blend.user_coals.v1";
 /** 单个煤的用户偏好: 启用 + 价格覆盖 + 化验值覆盖 */
 export interface CoalPref {
   enabled: boolean;
+  /** 用户隐藏: true 时从煤池/求解器全部滤掉 (master 煤不能真删, 只能隐藏) */
+  hidden?: boolean;
   /** 用户改后的 FOB; null = 用 master 默认 */
   fob_override?: number | null;
   /** 用户改后的运费; null = 用 master 默认 */

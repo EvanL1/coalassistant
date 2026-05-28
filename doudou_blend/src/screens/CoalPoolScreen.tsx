@@ -35,7 +35,7 @@ export function CoalPoolScreen() {
   const [master, setMaster] = useState<CoalMaster | null>(null);
   const [prefs, setPrefs] = useState<CoalPrefs>({});
   const [userCoals, setUserCoals] = useState<MasterCoalEntry[]>([]);
-  const [filter, setFilter] = useState<CoalStatus | "all" | "enabled">("all");
+  const [filter, setFilter] = useState<CoalStatus | "all" | "enabled" | "hidden">("all");
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<MasterCoalEntry | null>(null);
   const [showNew, setShowNew] = useState(false);
@@ -61,13 +61,17 @@ export function CoalPoolScreen() {
     [master, userCoals],
   );
 
+  const userCoalNames = useMemo(
+    () => new Set(userCoals.map((c) => c.name)),
+    [userCoals],
+  );
+
   if (!master) {
     return <div className="loading">加载中...</div>;
   }
 
-  const counts: Record<string, number> = {};
-  for (const c of allCoals) {
-    counts[c.status] = (counts[c.status] || 0) + 1;
+  function isHidden(coal: MasterCoalEntry): boolean {
+    return prefs[coal.name]?.hidden === true;
   }
   function isEnabled(coal: MasterCoalEntry): boolean {
     const p = prefs[coal.name];
@@ -76,12 +80,23 @@ export function CoalPoolScreen() {
     return coal.status === "verified";
   }
 
+  // 默认所有视图都过滤掉 hidden 煤 (只有 hidden filter 显示)
+  const visibleCoals = allCoals.filter((c) => !isHidden(c));
+  const hiddenCount = allCoals.length - visibleCoals.length;
+
+  const counts: Record<string, number> = {};
+  for (const c of visibleCoals) {
+    counts[c.status] = (counts[c.status] || 0) + 1;
+  }
+
   const byStatus =
-    filter === "all"
-      ? allCoals
+    filter === "hidden"
+      ? allCoals.filter(isHidden)
+      : filter === "all"
+      ? visibleCoals
       : filter === "enabled"
-      ? allCoals.filter(isEnabled)
-      : allCoals.filter((c) => c.status === filter);
+      ? visibleCoals.filter(isEnabled)
+      : visibleCoals.filter((c) => c.status === filter);
 
   // 搜索: 大小写无关 + 全角空格容错, 匹配煤名 / 产地 / 煤类任一字段
   const q = normalizeCoalName(query);
@@ -98,10 +113,11 @@ export function CoalPoolScreen() {
         <div>
           <h1 className="page-title">煤池</h1>
           <div className="page-subtitle">
-            共 {allCoals.length} 种煤
+            共 {visibleCoals.length} 种煤
             {userCoals.length > 0 && ` (含新增 ${userCoals.length})`}
+            {hiddenCount > 0 && ` · 隐藏 ${hiddenCount}`}
             {" · 今日启用 "}
-            {allCoals.filter(isEnabled).length} 种
+            {visibleCoals.filter(isEnabled).length} 种
           </div>
         </div>
         <button
@@ -166,12 +182,12 @@ export function CoalPoolScreen() {
         <FilterChip
           active={filter === "all"}
           onClick={() => setFilter("all")}
-          label={`全部 ${allCoals.length}`}
+          label={`全部 ${visibleCoals.length}`}
         />
         <FilterChip
           active={filter === "enabled"}
           onClick={() => setFilter("enabled")}
-          label={`已启用 ${master.coals.filter(isEnabled).length}`}
+          label={`已启用 ${visibleCoals.filter(isEnabled).length}`}
         />
         {STATUS_ORDER.map((s) => (
           <FilterChip
@@ -181,6 +197,13 @@ export function CoalPoolScreen() {
             label={`${STATUS_LABEL[s]} ${counts[s] || 0}`}
           />
         ))}
+        {hiddenCount > 0 && (
+          <FilterChip
+            active={filter === "hidden"}
+            onClick={() => setFilter("hidden")}
+            label={`已隐藏 ${hiddenCount}`}
+          />
+        )}
       </div>
 
       {filtered.length === 0 ? (
@@ -210,6 +233,7 @@ export function CoalPoolScreen() {
       {editing && (
         <CoalEditor
           coal={editing}
+          isUserAdded={userCoalNames.has(editing.name)}
           onClose={() => setEditing(null)}
         />
       )}
