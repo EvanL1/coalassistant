@@ -5,8 +5,10 @@
 //!
 //! 不破坏默认 per-coal CSR 直接录入行为, 仅在业务侧主动调用时生效.
 
+use serde::{Deserialize, Serialize};
+
 /// 单次历史配煤观测记录.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsrObservation {
     pub s: f64,
     pub a: f64,

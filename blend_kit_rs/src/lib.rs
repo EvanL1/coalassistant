@@ -87,6 +87,7 @@ mod tests {
             specs,
             total_quantity: Some(3700.0),
             truncate_decimal: true,
+            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok, "expected feasible: {:?}", r.reason);
@@ -116,6 +117,7 @@ mod tests {
             specs,
             total_quantity: None,
             truncate_decimal: false,
+            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -134,6 +136,7 @@ mod tests {
             specs: vec![Spec::lower("Y", 14.0)],
             total_quantity: None,
             truncate_decimal: false,
+            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -158,6 +161,7 @@ mod tests {
             specs: vec![s],
             total_quantity: None,
             truncate_decimal: false,
+            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -176,6 +180,7 @@ mod tests {
             specs: vec![Spec::upper("S", 3.0)], // 只对 S 加约束
             total_quantity: None,
             truncate_decimal: false,
+            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -203,6 +208,7 @@ mod tests {
             specs: vec![Spec::upper("S", 2.5)],
             total_quantity: None,
             truncate_decimal: false,
+            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -210,5 +216,153 @@ mod tests {
         // 解会推到 S=2.5 (顶上限) 因为低硫煤贵
         assert!((s_check.value - 2.5).abs() < 0.01, "S = {}", s_check.value);
         assert!(s_check.binding, "S 约束应该 binding");
+    }
+
+    // ===== CSR 预测接入 (A 步) =====
+
+    /// 生成满足 CSR = 30 + S + 0.5A + 0.8V + 0.3G + 0.6Y + 0.4M 的线性可拟合观测.
+    /// 用 sin/cos 拉开 6 个特征的相关性, 保证 XᵀX 非奇异 (同 predict.rs 测试手法).
+    fn perfect_csr_obs(n: usize) -> Vec<CsrObservation> {
+        (0..n)
+            .map(|i| {
+                let t = i as f64;
+                let s = 1.5 + (t * 0.7).sin().abs() * 1.2;
+                let a = 6.0 + (t * 1.3).cos().abs() * 2.5;
+                let v = 18.0 + (t * 0.5 + 1.0).sin().abs() * 8.0;
+                let g = 75.0 + (t * 0.9).cos().abs() * 18.0;
+                let y = 10.0 + (t * 1.7).sin().abs() * 9.0;
+                let m = 8.0 + (t * 0.3 + 0.5).cos().abs() * 3.0;
+                let csr = 30.0 + s + 0.5 * a + 0.8 * v + 0.3 * g + 0.6 * y + 0.4 * m;
+                CsrObservation { s, a, v, g, y, m, csr_measured: csr }
+            })
+            .collect()
+    }
+
+    fn linbei() -> Coal {
+        coal_from_tuple("临北", (2.0, 6.0, 22.0, 93.0, 17.0, 0.01, 70.0, 11.0, 1425.0, 25.0))
+    }
+
+    fn csr_value(r: &BlendResult) -> f64 {
+        r.indicator_check.iter().find(|c| c.indicator == "CSR").unwrap().value
+    }
+
+    /// 提供观测时, 各煤 CSR 被回归预测覆盖. 单煤池 → 混合 CSR = 该煤预测值 ≈ 95.1
+    /// (录入值 70 应被替换). 95.1 = 30 + 2 + 3 + 17.6 + 27.9 + 10.2 + 4.4.
+    #[test]
+    fn test_csr_prediction_overrides_recorded() {
+        let req = BlendRequest {
+            coals: vec![linbei()],
+            specs: vec![],
+            total_quantity: None,
+            truncate_decimal: false,
+            csr_observations: Some(perfect_csr_obs(10)),
+        };
+        let r = solve(&req);
+        assert!(r.ok, "{:?}", r.reason);
+        let csr = csr_value(&r);
+        assert!((csr - 95.1).abs() < 0.1, "预测 CSR 应 ≈95.1 (录入 70 被覆盖), 实际 {}", csr);
+    }
+
+    /// 不提供观测 → 行为不变, 保留录入 CSR=70.
+    #[test]
+    fn test_no_observations_keeps_recorded_csr() {
+        let req = BlendRequest {
+            coals: vec![linbei()],
+            specs: vec![],
+            total_quantity: None,
+            truncate_decimal: false,
+            csr_observations: None,
+        };
+        let r = solve(&req);
+        assert!(r.ok);
+        assert!((csr_value(&r) - 70.0).abs() < 1e-6, "无观测应保留 CSR=70");
+    }
+
+    /// 样本不足 (<7) → 拟合失败, 回退录入 CSR 并加警告, 不静默吞掉.
+    #[test]
+    fn test_insufficient_observations_warns_and_falls_back() {
+        let req = BlendRequest {
+            coals: vec![linbei()],
+            specs: vec![],
+            total_quantity: None,
+            truncate_decimal: false,
+            csr_observations: Some(perfect_csr_obs(5)),
+        };
+        let r = solve(&req);
+        assert!(r.ok);
+        assert!((csr_value(&r) - 70.0).abs() < 1e-6, "样本不足应回退 CSR=70");
+        assert!(r.warnings.iter().any(|w| w.contains("CSR")), "应有 CSR 跳过警告: {:?}", r.warnings);
+    }
+
+    /// 生成线性关系极弱的观测: CSR 在 40/95 间高频交替, 平滑特征拟合不出 → R² 很低.
+    fn noisy_csr_obs(n: usize) -> Vec<CsrObservation> {
+        (0..n)
+            .map(|i| {
+                let t = i as f64;
+                let s = 1.5 + (t * 0.7).sin().abs() * 1.2;
+                let a = 6.0 + (t * 1.3).cos().abs() * 2.5;
+                let v = 18.0 + (t * 0.5 + 1.0).sin().abs() * 8.0;
+                let g = 75.0 + (t * 0.9).cos().abs() * 18.0;
+                let y = 10.0 + (t * 1.7).sin().abs() * 9.0;
+                let m = 8.0 + (t * 0.3 + 0.5).cos().abs() * 3.0;
+                let csr = if i % 2 == 0 { 40.0 } else { 95.0 };
+                CsrObservation { s, a, v, g, y, m, csr_measured: csr }
+            })
+            .collect()
+    }
+
+    /// 样本够但拟合质量差 (R² 低) → 不信任预测, 回退录入 CSR 并附 R² 警告.
+    #[test]
+    fn test_low_r2_falls_back_with_warning() {
+        let req = BlendRequest {
+            coals: vec![linbei()],
+            specs: vec![],
+            total_quantity: None,
+            truncate_decimal: false,
+            csr_observations: Some(noisy_csr_obs(24)),
+        };
+        let r = solve(&req);
+        assert!(r.ok);
+        assert!((csr_value(&r) - 70.0).abs() < 1e-6, "低 R² 应回退 CSR=70, 实际 {}", csr_value(&r));
+        assert!(r.warnings.iter().any(|w| w.contains("R²")), "应有 R² 不足警告: {:?}", r.warnings);
+    }
+
+    /// 拟合成功但某煤缺输入指标 → 该煤保留录入 CSR, 并逐煤点名警告 (不静默).
+    #[test]
+    fn test_coal_missing_input_keeps_csr_and_warns() {
+        let mut no_g = linbei();
+        no_g.name = "缺G".into();
+        no_g.props.remove("G"); // 缺 G 输入 → 无法预测 CSR
+        let req = BlendRequest {
+            coals: vec![no_g],
+            specs: vec![], // 无 CSR spec, 该煤不会被剔除
+            total_quantity: None,
+            truncate_decimal: false,
+            csr_observations: Some(perfect_csr_obs(10)),
+        };
+        let r = solve(&req);
+        assert!(r.ok);
+        assert!((csr_value(&r) - 70.0).abs() < 1e-6, "缺输入应保留录入 CSR=70");
+        assert!(
+            r.warnings.iter().any(|w| w.contains("缺G") && w.contains("CSR")),
+            "应逐煤点名警告: {:?}",
+            r.warnings
+        );
+    }
+
+    /// 走真实 JSON 入口, 验证 serde 能反序列化 csr_observations 并生效.
+    #[test]
+    fn test_solve_json_accepts_csr_observations() {
+        let req = BlendRequest {
+            coals: vec![linbei()],
+            specs: vec![],
+            total_quantity: None,
+            truncate_decimal: false,
+            csr_observations: Some(perfect_csr_obs(8)),
+        };
+        let out = solve_json(&serde_json::to_string(&req).unwrap());
+        let r: BlendResult = serde_json::from_str(&out).unwrap();
+        assert!(r.ok);
+        assert!((csr_value(&r) - 95.1).abs() < 0.1, "JSON 入口预测 CSR 应 ≈95.1");
     }
 }

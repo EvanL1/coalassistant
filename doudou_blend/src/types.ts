@@ -41,11 +41,24 @@ export interface Coal {
   frt: number;
 }
 
+/** 单次历史配煤观测: 混合后的 6 项指标 + 实测 CSR. 用于线性回归预测 CSR. */
+export interface CsrObservation {
+  s: number;
+  a: number;
+  v: number;
+  g: number;
+  y: number;
+  m: number;
+  csr_measured: number;
+}
+
 export interface BlendRequest {
   coals: Coal[];
   specs: Spec[];
   total_quantity?: number | null;
   truncate_decimal?: boolean;
+  /** 可选: 提供历史观测时, 用回归预测覆盖各煤 CSR. */
+  csr_observations?: CsrObservation[] | null;
 }
 
 export interface CostBreakdown {

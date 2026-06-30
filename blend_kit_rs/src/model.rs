@@ -140,6 +140,10 @@ pub struct BlendRequest {
     /// 是否启用一位小数截断规则.
     #[serde(default = "default_truncate")]
     pub truncate_decimal: bool,
+    /// 可选: 历史 [混合指标 → 实测 CSR] 观测.
+    /// 提供且样本足够时, 用线性回归预测覆盖各煤 CSR; 不提供则保持各煤录入的 CSR.
+    #[serde(default)]
+    pub csr_observations: Option<Vec<crate::predict::CsrObservation>>,
 }
 
 fn default_truncate() -> bool {
