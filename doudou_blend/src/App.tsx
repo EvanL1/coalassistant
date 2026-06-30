@@ -27,7 +27,7 @@ function App() {
   return (
     <div className="app">
       <div className="app-content">
-        {tab === "today" && <TodayScreen />}
+        {tab === "today" && <TodayScreen onNavigate={setTab} />}
         {tab === "pool" && <CoalPoolScreen />}
         {tab === "contract" && <ContractScreen />}
         {tab === "history" && <HistoryScreen />}
