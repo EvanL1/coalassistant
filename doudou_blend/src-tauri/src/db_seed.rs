@@ -9,7 +9,7 @@
 //!   - 默认合同: 只在首次启动时插入, 避免覆盖用户对默认合同的修改
 use crate::db::DbError;
 use blend_kit::{CoalMaster, CoalMasterEntry, Confidence, DefaultContract, Direction, MasterStatus};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 const META_KEY_MASTER_VERSION: &str = "master_version";
 const META_KEY_DEFAULT_CONTRACT_SEEDED: &str = "default_contract_seeded";
@@ -39,7 +39,7 @@ pub fn seed_master(conn: &mut Connection) -> Result<SeedReport, DbError> {
     };
 
     for entry in &master.coals {
-        let r = upsert_coal(&tx, entry, &master.version)?;
+        let r = upsert_coal(&tx, entry)?;
         if r.was_insert {
             report.coals_inserted += 1;
         } else if r.was_update {
@@ -86,86 +86,109 @@ struct UpsertResult {
 fn upsert_coal(
     tx: &rusqlite::Transaction,
     entry: &CoalMasterEntry,
-    master_version: &str,
 ) -> Result<UpsertResult, DbError> {
     let status_str = status_to_str(&entry.status);
-    // 先尝试 INSERT, 失败 (主键冲突) 则 UPDATE
-    let inserted = tx.execute(
+    let (province, city) = split_region(entry.region.as_deref());
+    let p = |k: &str| entry.props.get(k).copied();
+
+    // 是否已存在 (仅用于 SeedReport 的 insert/update 统计)
+    let was_insert = tx
+        .query_row("SELECT 1 FROM mines WHERE name = ?1", params![entry.name], |_| Ok(()))
+        .optional()?
+        .is_none();
+
+    // 宽表 upsert: 新增→插入, 已存在→更新 master 字段.
+    // 用 ON CONFLICT DO UPDATE (而非 INSERT OR REPLACE): 不换 id, 不触发级联删用户数据.
+    // UPDATE 子句刻意不含 county/mine_name/lat/lng → 用户后补的位置不被每次 seed 刷成 NULL.
+    tx.execute(
         r#"
-        INSERT OR IGNORE INTO master_coals (name, region, coal_type, status, master_version, note)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        INSERT INTO mines
+            (name, coal_type, status, province, city,
+             s, a, v, g, y, petro, csr, m, fob, frt, note)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        ON CONFLICT(name) DO UPDATE SET
+            coal_type = excluded.coal_type,
+            status    = excluded.status,
+            province  = excluded.province,
+            city      = excluded.city,
+            s = excluded.s, a = excluded.a, v = excluded.v, g = excluded.g,
+            y = excluded.y, petro = excluded.petro, csr = excluded.csr, m = excluded.m,
+            fob = excluded.fob, frt = excluded.frt,
+            note = excluded.note
         "#,
         params![
             entry.name,
-            entry.region.as_deref(),
             entry.coal_type.as_deref(),
             status_str,
-            master_version,
-            entry.note.as_deref()
+            province,
+            city,
+            p("S"), p("A"), p("V"), p("G"), p("Y"), p("petro"), p("CSR"), p("M"),
+            entry.fob,
+            entry.frt,
+            entry.note.as_deref(),
         ],
     )?;
 
-    let was_insert = inserted == 1;
-    let mut was_update = false;
+    let mine_id: i64 =
+        tx.query_row("SELECT id FROM mines WHERE name = ?1", params![entry.name], |r| r.get(0))?;
 
-    if !was_insert {
-        // 已存在 - 检查是否需要更新元数据
-        let n = tx.execute(
-            r#"
-            UPDATE master_coals
-            SET region = ?2, coal_type = ?3, status = ?4, master_version = ?5, note = ?6
-            WHERE name = ?1
-              AND (region IS NOT ?2 OR coal_type IS NOT ?3 OR status IS NOT ?4 OR note IS NOT ?6)
-            "#,
-            params![
-                entry.name,
-                entry.region.as_deref(),
-                entry.coal_type.as_deref(),
-                status_str,
-                master_version,
-                entry.note.as_deref()
-            ],
-        )?;
-        was_update = n > 0;
-    }
-
-    // 写化验指标 (REPLACE 语义: master 是权威源, 字段值变了就更新)
+    // 每字段可信度 (master 权威, upsert 语义)
     let mut indicators_written = 0;
-    for (field, value) in &entry.props {
-        let confidence = entry.confidence.get(field).map(confidence_to_str);
+    for (field, conf) in &entry.confidence {
+        let Some(col) = field_to_col(field) else { continue };
         tx.execute(
             r#"
-            INSERT OR REPLACE INTO master_indicators (coal_name, field, value, confidence)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO mine_field_confidence (mine_id, field, confidence)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(mine_id, field) DO UPDATE SET confidence = excluded.confidence
             "#,
-            params![entry.name, field, value, confidence],
-        )?;
-        indicators_written += 1;
-    }
-
-    // fob/frt 也写入 master_indicators (作为字段处理, 与 schema 设计一致)
-    if let Some(fob) = entry.fob {
-        let confidence = entry.confidence.get("fob").map(confidence_to_str);
-        tx.execute(
-            "INSERT OR REPLACE INTO master_indicators (coal_name, field, value, confidence) VALUES (?1, 'fob', ?2, ?3)",
-            params![entry.name, fob, confidence],
-        )?;
-        indicators_written += 1;
-    }
-    if let Some(frt) = entry.frt {
-        let confidence = entry.confidence.get("frt").map(confidence_to_str);
-        tx.execute(
-            "INSERT OR REPLACE INTO master_indicators (coal_name, field, value, confidence) VALUES (?1, 'frt', ?2, ?3)",
-            params![entry.name, frt, confidence],
+            params![mine_id, col, confidence_to_str(conf)],
         )?;
         indicators_written += 1;
     }
 
     Ok(UpsertResult {
         was_insert,
-        was_update,
+        was_update: !was_insert,
         indicators_written,
     })
+}
+
+/// master 字段名 (大写 S/A/.../petro/CSR/M + fob/frt) → mines 列名 (小写).
+fn field_to_col(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "S" => "s",
+        "A" => "a",
+        "V" => "v",
+        "G" => "g",
+        "Y" => "y",
+        "petro" => "petro",
+        "CSR" => "csr",
+        "M" => "m",
+        "fob" => "fob",
+        "frt" => "frt",
+        _ => return None,
+    })
+}
+
+/// 把 master 的 region ("山西吕梁") 拆成 (province, city).
+/// 匹配不到已知省名时, 整串作为 city, province 留空.
+fn split_region(region: Option<&str>) -> (Option<String>, Option<String>) {
+    const PROVINCES: &[&str] = &[
+        "内蒙古", "黑龙江", "山西", "陕西", "河北", "河南", "山东", "宁夏",
+        "新疆", "甘肃", "青海", "贵州", "云南", "四川", "安徽", "辽宁", "吉林", "重庆",
+    ];
+    let r = match region {
+        Some(r) if !r.is_empty() => r,
+        _ => return (None, None),
+    };
+    for prov in PROVINCES {
+        if let Some(rest) = r.strip_prefix(prov) {
+            let city = rest.trim();
+            return (Some((*prov).to_string()), (!city.is_empty()).then(|| city.to_string()));
+        }
+    }
+    (None, Some(r.to_string()))
 }
 
 fn insert_default_contract(

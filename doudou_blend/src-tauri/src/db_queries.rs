@@ -41,7 +41,14 @@ pub struct IndicatorView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoalView {
     pub name: String,
+    /// 兼容旧前端: province + city 合成 (如 "山西吕梁")
     pub region: Option<String>,
+    pub province: Option<String>,
+    pub city: Option<String>,
+    pub county: Option<String>,
+    pub mine_name: Option<String>,
+    pub lat: Option<f64>,
+    pub lng: Option<f64>,
     pub coal_type: Option<String>,
     pub status: String,
     pub note: Option<String>,
@@ -76,10 +83,12 @@ pub struct ContractView {
 // ============================================================
 
 /// 列出所有煤. status 可过滤 (None = 全部).
+/// mines 元数据列 (顺序与 map_coal_meta 对应)
+const COAL_META_COLS: &str =
+    "name, province, city, county, mine_name, lat, lng, coal_type, status, note";
+
 pub fn list_coals(conn: &Connection, status: Option<&str>) -> Result<Vec<CoalView>, DbError> {
-    let mut sql = String::from(
-        "SELECT name, region, coal_type, status, note FROM master_coals",
-    );
+    let mut sql = format!("SELECT {COAL_META_COLS} FROM mines");
     if status.is_some() {
         sql.push_str(" WHERE status = ?1");
     }
@@ -93,17 +102,16 @@ pub fn list_coals(conn: &Connection, status: Option<&str>) -> Result<Vec<CoalVie
     };
 
     let mut out = Vec::with_capacity(rows.len());
-    for (name, region, coal_type, status, note) in rows {
-        let view = build_coal_view(conn, name, region, coal_type, status, note)?;
-        out.push(view);
+    for meta in rows {
+        out.push(build_coal_view(conn, meta)?);
     }
     Ok(out)
 }
 
 pub fn get_coal(conn: &Connection, name: &str) -> Result<CoalView, DbError> {
-    let row = conn
+    let meta = conn
         .query_row(
-            "SELECT name, region, coal_type, status, note FROM master_coals WHERE name = ?1",
+            &format!("SELECT {COAL_META_COLS} FROM mines WHERE name = ?1"),
             params![name],
             map_coal_meta,
         )
@@ -111,49 +119,89 @@ pub fn get_coal(conn: &Connection, name: &str) -> Result<CoalView, DbError> {
             rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(format!("煤 '{}' 不存在", name)),
             _ => DbError::Sqlite(e),
         })?;
-    let (n, region, coal_type, status, note) = row;
-    build_coal_view(conn, n, region, coal_type, status, note)
+    build_coal_view(conn, meta)
 }
 
-fn map_coal_meta(
-    row: &rusqlite::Row,
-) -> rusqlite::Result<(String, Option<String>, Option<String>, String, Option<String>)> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-}
-
-fn build_coal_view(
-    conn: &Connection,
+/// mines 表的元数据行 (不含指标值; 指标在 build_coal_view 里单独读).
+struct CoalMeta {
     name: String,
-    region: Option<String>,
+    province: Option<String>,
+    city: Option<String>,
+    county: Option<String>,
+    mine_name: Option<String>,
+    lat: Option<f64>,
+    lng: Option<f64>,
     coal_type: Option<String>,
     status: String,
     note: Option<String>,
-) -> Result<CoalView, DbError> {
+}
+
+fn map_coal_meta(row: &rusqlite::Row) -> rusqlite::Result<CoalMeta> {
+    Ok(CoalMeta {
+        name: row.get(0)?,
+        province: row.get(1)?,
+        city: row.get(2)?,
+        county: row.get(3)?,
+        mine_name: row.get(4)?,
+        lat: row.get(5)?,
+        lng: row.get(6)?,
+        coal_type: row.get(7)?,
+        status: row.get(8)?,
+        note: row.get(9)?,
+    })
+}
+
+fn build_coal_view(conn: &Connection, meta: CoalMeta) -> Result<CoalView, DbError> {
+    // (mines 列名, 前端 fields key) —— 前端约定指标大写, petro/fob/frt 小写
+    const COLS: [(&str, &str); 10] = [
+        ("s", "S"), ("a", "A"), ("v", "V"), ("g", "G"), ("y", "Y"),
+        ("petro", "petro"), ("csr", "CSR"), ("m", "M"), ("fob", "fob"), ("frt", "frt"),
+    ];
     let mut fields: HashMap<String, FieldValue> = HashMap::new();
 
-    // 1. 先取 master_indicators 作底
-    let mut stmt = conn.prepare(
-        "SELECT field, value, confidence FROM master_indicators WHERE coal_name = ?1",
+    // 1. master 底: mines 那一行的指标 + 价格列
+    let vals: [Option<f64>; 10] = conn.query_row(
+        "SELECT s, a, v, g, y, petro, csr, m, fob, frt FROM mines WHERE name = ?1",
+        params![meta.name],
+        |r| {
+            Ok([
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
+                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
+            ])
+        },
     )?;
-    for row in stmt.query_map(params![name], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?, row.get::<_, Option<String>>(2)?))
-    })? {
-        let (field, value, conf) = row?;
-        fields.insert(
-            field,
-            FieldValue {
-                value,
-                source: FieldSource::Master,
-                confidence: conf,
-            },
-        );
+
+    // 可信度: mine_field_confidence (列名小写 → confidence)
+    let mut conf_map: HashMap<String, String> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT field, confidence FROM mine_field_confidence
+             WHERE mine_id = (SELECT id FROM mines WHERE name = ?1)",
+        )?;
+        for row in stmt.query_map(params![meta.name], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (col, conf) = row?;
+            conf_map.insert(col, conf);
+        }
+    }
+
+    for (i, (col, key)) in COLS.iter().enumerate() {
+        if let Some(value) = vals[i] {
+            fields.insert(
+                (*key).to_string(),
+                FieldValue {
+                    value,
+                    source: FieldSource::Master,
+                    confidence: conf_map.get(*col).cloned(),
+                },
+            );
+        }
     }
 
     // 2. 应用 user_overrides
-    let mut stmt = conn.prepare(
-        "SELECT field, value FROM user_overrides WHERE coal_name = ?1",
-    )?;
-    for row in stmt.query_map(params![name], |row| {
+    let mut stmt = conn.prepare("SELECT field, value FROM user_overrides WHERE coal_name = ?1")?;
+    for row in stmt.query_map(params![meta.name], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
     })? {
         let (field, value) = row?;
@@ -172,7 +220,7 @@ fn build_coal_view(
         .query_row(
             "SELECT enabled, today_fob, today_frt, price_updated_at, note
              FROM user_coal_prefs WHERE coal_name = ?1",
-            params![name],
+            params![meta.name],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)? != 0,
@@ -185,43 +233,50 @@ fn build_coal_view(
         )
         .ok();
 
-    let (enabled, today_fob, today_frt, price_updated_at, user_note) = match prefs {
-        Some(p) => p,
-        None => (false, None, None, None, None),
-    };
+    let (enabled, today_fob, today_frt, price_updated_at, user_note) =
+        prefs.unwrap_or((false, None, None, None, None));
 
     if let Some(fob) = today_fob {
         fields.insert(
             "fob".into(),
-            FieldValue {
-                value: fob,
-                source: FieldSource::TodayPrice,
-                confidence: Some("high".into()),
-            },
+            FieldValue { value: fob, source: FieldSource::TodayPrice, confidence: Some("high".into()) },
         );
     }
     if let Some(frt) = today_frt {
         fields.insert(
             "frt".into(),
-            FieldValue {
-                value: frt,
-                source: FieldSource::TodayPrice,
-                confidence: Some("high".into()),
-            },
+            FieldValue { value: frt, source: FieldSource::TodayPrice, confidence: Some("high".into()) },
         );
     }
 
+    let region = synth_region(meta.province.as_deref(), meta.city.as_deref());
     Ok(CoalView {
-        name,
+        name: meta.name,
         region,
-        coal_type,
-        status,
-        note,
+        province: meta.province,
+        city: meta.city,
+        county: meta.county,
+        mine_name: meta.mine_name,
+        lat: meta.lat,
+        lng: meta.lng,
+        coal_type: meta.coal_type,
+        status: meta.status,
+        note: meta.note,
         fields,
         enabled,
         price_updated_at,
         user_note,
     })
+}
+
+/// province + city 合成旧式 region 字符串, 兼容前端.
+fn synth_region(province: Option<&str>, city: Option<&str>) -> Option<String> {
+    match (province, city) {
+        (Some(p), Some(c)) => Some(format!("{p}{c}")),
+        (Some(p), None) => Some(p.to_string()),
+        (None, Some(c)) => Some(c.to_string()),
+        (None, None) => None,
+    }
 }
 
 // ============================================================

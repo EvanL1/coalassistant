@@ -42,7 +42,7 @@ fn solve_blend(input_json: String) -> String {
 #[tauri::command]
 fn db_status(state: tauri::State<AppState>) -> Result<DbStatus, DbError> {
     let conn = state.conn.lock().unwrap();
-    let total_coals: i64 = conn.query_row("SELECT COUNT(*) FROM master_coals", [], |r| r.get(0))?;
+    let total_coals: i64 = conn.query_row("SELECT COUNT(*) FROM mines", [], |r| r.get(0))?;
     let enabled_coals: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM user_coal_prefs WHERE enabled = 1",

@@ -64,7 +64,7 @@ mod tests {
         for name in &["临北", "古交浮精", "豹子沟", "大佛寺"] {
             let status: String = conn
                 .query_row(
-                    "SELECT status FROM master_coals WHERE name = ?1",
+                    "SELECT status FROM mines WHERE name = ?1",
                     params![name],
                     |row| row.get(0),
                 )
@@ -72,19 +72,31 @@ mod tests {
             assert_eq!(status, "verified", "{} 状态应为 verified", name);
         }
 
-        // 验证临北的 10 个字段都写入 master_indicators
-        let linbei_field_count: i64 = conn
+        // 验证临北的指标写进 mines 宽表 + 生成列 cif + region 拆成省/市
+        let (s, fob, frt, cif, province, city): (
+            Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<String>, Option<String>,
+        ) = conn
             .query_row(
-                "SELECT COUNT(*) FROM master_indicators WHERE coal_name = ?1",
+                "SELECT s, fob, frt, cif, province, city FROM mines WHERE name = ?1",
+                params!["临北"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(s, Some(2.0), "临北 S 应为 2.0");
+        assert_eq!(cif, Some(fob.unwrap() + frt.unwrap()), "cif 生成列应等于 fob+frt");
+        assert_eq!(province.as_deref(), Some("山西"), "临北 region 应拆出省=山西");
+        assert_eq!(city.as_deref(), Some("吕梁"), "临北 region 应拆出市=吕梁");
+
+        // 可信度写入 mine_field_confidence
+        let conf_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mine_field_confidence
+                 WHERE mine_id = (SELECT id FROM mines WHERE name = ?1)",
                 params!["临北"],
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(
-            linbei_field_count >= 10,
-            "临北字段数 {} < 10",
-            linbei_field_count
-        );
+        assert!(conf_count >= 8, "临北可信度字段数 {} < 8", conf_count);
 
         // 验证默认合同已 seed
         let contract_count: i64 = conn
@@ -105,7 +117,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2.0");
+        assert_eq!(version, "2.2");
     }
 
     /// 幂等: 二次调用 open_and_init 不应重复插入合同, 不破坏数据.
@@ -119,7 +131,7 @@ mod tests {
 
         // 模拟用户修改: 给临北加一个 user_override
         {
-            let mut conn = rusqlite::Connection::open(&path).unwrap();
+            let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute(
                 "INSERT INTO user_overrides (coal_name, field, value, updated_at) VALUES ('临北', 'S', 1.95, '2026-05-15')",
                 [],

@@ -14,24 +14,62 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 -- ============================================================
--- Master 层: 煤种字典 (只读, 由 blend_kit master JSON 同步)
+-- Master 层: 煤源字典 (只读, 由 blend_kit master JSON 同步)
+-- 宽表: 一行一个煤源, 8 项指标各占一列, 严格 CHECK 约束.
 -- ============================================================
-CREATE TABLE IF NOT EXISTS master_coals (
-    name           TEXT PRIMARY KEY,         -- 煤名 (作为天然主键)
-    region         TEXT,
-    coal_type      TEXT,
-    status         TEXT NOT NULL,            -- verified/active/draft/incomplete/archived
-    master_version TEXT NOT NULL,            -- 写入时的 master JSON 版本
-    note           TEXT
+CREATE TABLE IF NOT EXISTS mines (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL UNIQUE,                  -- 煤名 (唯一键)
+    coal_type   TEXT,                                     -- 煤种
+    status      TEXT    NOT NULL DEFAULT 'incomplete'
+                CHECK (status IN ('verified','active','draft','incomplete','archived')),
+
+    -- 位置 (province/city 由 master region 拆分; county/mine_name/经纬度 后补, seed 不覆盖)
+    province    TEXT,
+    city        TEXT,
+    county      TEXT,
+    mine_name   TEXT,
+    lat         REAL    CHECK (lat BETWEEN -90  AND 90),
+    lng         REAL    CHECK (lng BETWEEN -180 AND 180),
+
+    -- 煤质指标 (8 项, 缺测为 NULL)
+    s           REAL    CHECK (s     BETWEEN 0 AND 100),  -- 硫 %
+    a           REAL    CHECK (a     BETWEEN 0 AND 100),  -- 灰 %
+    v           REAL    CHECK (v     BETWEEN 0 AND 100),  -- 挥发 %
+    g           REAL    CHECK (g     BETWEEN 0 AND 100),  -- 粘结指数 G
+    y           REAL    CHECK (y     BETWEEN 0 AND 100),  -- 胶质层厚度 mm
+    petro       REAL    CHECK (petro >= 0),               -- 岩相
+    csr         REAL    CHECK (csr   BETWEEN 0 AND 100),  -- 焦炭反应后强度 %
+    m           REAL    CHECK (m     BETWEEN 0 AND 100),  -- 水分 %
+
+    -- 价格 (元/吨)
+    fob         REAL    CHECK (fob >= 0),                 -- 出厂价
+    frt         REAL    CHECK (frt >= 0),                 -- 运费
+    cif         REAL    GENERATED ALWAYS AS (fob + frt) VIRTUAL,  -- 到厂价 = 派生
+
+    note        TEXT,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS master_indicators (
-    coal_name    TEXT NOT NULL REFERENCES master_coals(name) ON DELETE CASCADE,
-    field        TEXT NOT NULL,              -- S/A/V/G/Y/petro/CSR/M/fob/frt
-    value        REAL NOT NULL,
-    confidence   TEXT,                       -- high/medium/low (可选)
-    PRIMARY KEY (coal_name, field)
+CREATE INDEX IF NOT EXISTS idx_mines_status ON mines(status);
+CREATE INDEX IF NOT EXISTS idx_mines_region ON mines(province, city);
+
+-- 每字段可信度 (稀疏: 只记录有可信度标注的字段)
+CREATE TABLE IF NOT EXISTS mine_field_confidence (
+    mine_id     INTEGER NOT NULL REFERENCES mines(id) ON DELETE CASCADE,
+    field       TEXT    NOT NULL
+                CHECK (field IN ('s','a','v','g','y','petro','csr','m','fob','frt')),
+    confidence  TEXT    NOT NULL CHECK (confidence IN ('high','medium','low')),
+    PRIMARY KEY (mine_id, field)
 );
+
+-- updated_at 自动维护
+CREATE TRIGGER IF NOT EXISTS trg_mines_updated
+AFTER UPDATE ON mines
+BEGIN
+    UPDATE mines SET updated_at = datetime('now') WHERE id = NEW.id;
+END;
 
 -- ============================================================
 -- User 层: 用户私有数据 (override + 启用状态)
@@ -39,7 +77,7 @@ CREATE TABLE IF NOT EXISTS master_indicators (
 -- 用户对单个字段的 override.
 -- master 升级时不会动这张表, 用户的改动得以保留.
 CREATE TABLE IF NOT EXISTS user_overrides (
-    coal_name    TEXT NOT NULL REFERENCES master_coals(name) ON DELETE CASCADE,
+    coal_name    TEXT NOT NULL REFERENCES mines(name) ON DELETE CASCADE,
     field        TEXT NOT NULL,
     value        REAL NOT NULL,
     updated_at   TEXT NOT NULL,              -- ISO8601
@@ -48,7 +86,7 @@ CREATE TABLE IF NOT EXISTS user_overrides (
 
 -- 用户对煤的偏好: 是否启用 / 今日价格 / 备注
 CREATE TABLE IF NOT EXISTS user_coal_prefs (
-    coal_name        TEXT PRIMARY KEY REFERENCES master_coals(name) ON DELETE CASCADE,
+    coal_name        TEXT PRIMARY KEY REFERENCES mines(name) ON DELETE CASCADE,
     enabled          INTEGER NOT NULL DEFAULT 0,      -- 0/1
     today_fob        REAL,                            -- 今日出厂价 (null = 用 master 默认)
     today_frt        REAL,                            -- 今日运费
