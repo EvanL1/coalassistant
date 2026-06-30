@@ -105,7 +105,6 @@ npx @tauri-apps/cli android init && npx @tauri-apps/cli android build --apk --ta
 - `release.yml` (push a `v*.*.*` tag): builds Android APK (arm64 + armv7) and macOS universal DMG, attaches to
   a published GitHub Release. To cut a release: `git tag v0.1.0 && git push origin v0.1.0`.
 - `deploy-web.yml` (push to `main`): builds WASM → Vite bundle → GitHub Pages at `/coalassistant/` base path.
-  `wrangler.jsonc` also exists for an alternate Cloudflare Workers static deploy.
 
 ## Conventions
 
