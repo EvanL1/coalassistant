@@ -99,6 +99,29 @@ export interface BlendResult {
   warnings: string[];
 }
 
+/** 混合后 6 项指标 (CSR 回归自变量 X). */
+export interface MixedIndicators {
+  s: number;
+  a: number;
+  v: number;
+  g: number;
+  y: number;
+  m: number;
+}
+
+/** 历史方案 (跨后端统一形状). mixed/csr_measured 支撑「回填实测焦质」. */
+export interface HistoryRecord {
+  id: string;
+  occurred_at: string;
+  contract_name: string;
+  cost_cif: number;
+  recipe: Record<string, number>;
+  /** 混合后 6 项指标 (回归 X); null = 旧记录无此数据, 不提供回填入口. */
+  mixed: MixedIndicators | null;
+  /** 回填的实测 CSR (回归 y); null = 未回填. */
+  csr_measured: number | null;
+}
+
 // ===== Master schema =====
 
 export type CoalStatus = "verified" | "active" | "draft" | "incomplete" | "archived";

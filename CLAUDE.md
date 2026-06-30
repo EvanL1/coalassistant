@@ -33,8 +33,12 @@ runtimes. Don't add typed cross-boundary APIs; extend the JSON request/result sh
 
 **Dual backend, picked at runtime.** `doudou_blend/src/backend.ts` detects the `__TAURI_INTERNALS__` global:
 present → route to Tauri IPC; absent → load the WASM module directly. Both expose the *same async* interface
-(`solveJson` / `getMasterJson` / `getVersion`), so screen code never branches on runtime. When adding a backend
-capability, add it to **both** `makeTauriBackend` and `makeWasmBackend`.
+(`solveJson` / `getMasterJson` / `getVersion`, plus blend history: `saveHistory` / `listHistory` /
+`setMeasuredCsr` / `clearHistory`), so screen code never branches on runtime. When adding a backend
+capability, add it to **both** `makeTauriBackend` and `makeWasmBackend`. History persistence runs through this
+seam too — native → SQLite `blend_history`, web → `localStorage` — and both normalize to a uniform
+`HistoryRecord` DTO (the TS adapter parses the stored `result_json` to derive recipe + the 6 mixed indicators;
+the Rust side stays dumb, storing an opaque blob + the `csr_measured` column).
 
 **Data flow inside the core** (`blend_kit_rs/src/`):
 `model.rs` (Coal/Spec/BlendRequest/BlendResult types, 8-indicator constant) →
@@ -43,11 +47,26 @@ computes slack + `binding` flags) →
 result is post-processed into three business views: cost breakdown, physical orders, indicator check.
 `seed.rs` loads the embedded master DB + status state machine; `predict.rs` is optional CSR regression.
 
+**Frontend screens** (`doudou_blend/src/screens/`): 今日 `TodayScreen` (solve + cost/recipe/8-indicator view,
+real purchase-qty input, export orders, save-to-history, input-summary panel), 煤池 `CoalPoolScreen`
+(enable/hide + price + assay overrides), 合同 `ContractScreen` (quality specs), 历史 `HistoryScreen` (saved
+blends + measured-CSR backfill), 我的 `MeScreen`. Tabs mount/unmount on switch (`App.tsx`
+`{tab === ... && <Screen/>}`), so each screen reloads its data on entry — relevant for async backend reads.
+
 **Master vs. user data split.** `coal_master.json` (embedded in `blend_kit_rs/data/`, served read-only) is the
 canonical coal set and is never mutated. User edits (enable/hide, price overrides, assay overrides) persist
 separately: `localStorage` on web (`doudou_blend/src/storage.ts`) and SQLite tables `user_coal_prefs` /
 `user_overrides` on native (`doudou_blend/src-tauri/src/db_*.rs`). The SQLite DB self-seeds idempotently on
 first open, keyed by `meta.master_version`.
+
+**Blend history & the CSR data loop.** Saved blends persist to `blend_history` (native SQLite) / `localStorage`
+(web) via the backend seam above, keeping the full `BlendResult` JSON. The History screen lets the user backfill
+the lab-measured coke CSR onto a past blend — pairing that blend's mixed indicators (regression **X**, recovered
+from the stored result) with the measured CSR (regression **y**) into a `CsrObservation`. This is the
+data-collection half of the loop; **the observations are not yet fed into `solve_json`** (deferred until enough
+accumulate), at which point `predict.rs`'s gated regression activates. Schema changes to `blend_history` use the
+idempotent `add_column_if_missing` helper in `db.rs` — there is **no migration framework**: fresh installs get
+columns from `SCHEMA_V1`'s `CREATE TABLE`, existing DBs get them via guarded `ALTER TABLE`.
 
 ## Build & test commands
 

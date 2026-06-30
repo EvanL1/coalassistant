@@ -58,9 +58,4 @@ __pycache__/
 .env.local
 *.pem
 *.key
-
-# wrangler files
-.wrangler
-.dev.vars*
-!.dev.vars.example
 !.env.example
