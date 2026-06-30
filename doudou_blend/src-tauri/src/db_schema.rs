@@ -122,9 +122,11 @@ CREATE TABLE IF NOT EXISTS blend_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at     TEXT NOT NULL,                    -- ISO8601 时间戳
     contract_id     INTEGER REFERENCES contracts(id),
+    contract_name   TEXT,                             -- 合同名快照 (web 端用名字, 不走 contract_id 外键)
     total_quantity  REAL,
     cost_cif        REAL NOT NULL,
-    result_json     TEXT NOT NULL,                    -- 完整 BlendResult JSON, 便于追溯
+    result_json     TEXT NOT NULL,                    -- 完整 BlendResult JSON, 混合后指标(回归 X)即在此
+    csr_measured    REAL,                             -- 回填的实测焦炭 CSR (回归 y); NULL = 未回填
     note            TEXT
 );
 

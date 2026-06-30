@@ -10,7 +10,7 @@
  *   - 重置 = 清空 localStorage 对应 key
  */
 
-import type { Spec, MasterCoalEntry } from "./types";
+import type { Spec, MasterCoalEntry, BlendResult } from "./types";
 
 const KEY_COAL_PREFS = "doudou_blend.coal_prefs.v1";
 const KEY_CONTRACT = "doudou_blend.contract.v1";
@@ -44,6 +44,10 @@ export interface HistoryEntry {
   recipe: Record<string, number>;
   contract_name: string;
   note?: string;
+  /** 完整结果 (含混合后指标, 回归 X), 采集后留存; 旧记录无此字段. */
+  result?: BlendResult;
+  /** 回填的实测焦炭 CSR (回归 y); undefined = 未回填. */
+  csr_measured?: number;
 }
 
 // ============================================================
@@ -173,6 +177,17 @@ export function appendHistory(entry: Omit<HistoryEntry, "id" | "occurred_at">): 
 
 export function clearHistory(): void {
   localStorage.removeItem(KEY_HISTORY);
+  window.dispatchEvent(new CustomEvent("doudou:history_changed"));
+}
+
+/** 回填某条历史的实测 CSR. id 不存在则静默忽略. */
+export function setMeasuredCsrLocal(id: string, csrMeasured: number): void {
+  const all = getHistory();
+  if (!all.some((e) => e.id === id)) return;
+  const updated = all.map((e) =>
+    e.id === id ? { ...e, csr_measured: csrMeasured } : e,
+  );
+  localStorage.setItem(KEY_HISTORY, JSON.stringify(updated));
   window.dispatchEvent(new CustomEvent("doudou:history_changed"));
 }
 

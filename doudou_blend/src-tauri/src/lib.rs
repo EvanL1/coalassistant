@@ -11,7 +11,7 @@ mod db_seed;
 use std::sync::Mutex;
 
 use db::DbError;
-use db_queries::{CoalView, ContractView};
+use db_queries::{CoalView, ContractView, HistoryRecord};
 use rusqlite::Connection;
 use serde::Serialize;
 use tauri::Manager;
@@ -137,6 +137,52 @@ fn get_active_contract(state: tauri::State<AppState>) -> Result<ContractView, Db
     db_queries::get_active_contract(&conn)
 }
 
+// ============================================================
+// 历史方案 commands (采集 + 回填实测 CSR)
+// ============================================================
+
+#[tauri::command]
+fn save_history(
+    state: tauri::State<AppState>,
+    occurred_at: String,
+    contract_name: String,
+    cost_cif: f64,
+    total_quantity: Option<f64>,
+    result_json: String,
+) -> Result<i64, DbError> {
+    let mut conn = state.conn.lock().unwrap();
+    db_queries::save_history(
+        &mut conn,
+        &occurred_at,
+        &contract_name,
+        cost_cif,
+        total_quantity,
+        &result_json,
+    )
+}
+
+#[tauri::command]
+fn list_history(state: tauri::State<AppState>) -> Result<Vec<HistoryRecord>, DbError> {
+    let conn = state.conn.lock().unwrap();
+    db_queries::list_history(&conn)
+}
+
+#[tauri::command]
+fn set_measured_csr(
+    state: tauri::State<AppState>,
+    id: i64,
+    csr_measured: f64,
+) -> Result<(), DbError> {
+    let mut conn = state.conn.lock().unwrap();
+    db_queries::set_measured_csr(&mut conn, id, csr_measured)
+}
+
+#[tauri::command]
+fn clear_history(state: tauri::State<AppState>) -> Result<(), DbError> {
+    let mut conn = state.conn.lock().unwrap();
+    db_queries::clear_history(&mut conn)
+}
+
 #[derive(Debug, Serialize)]
 struct DbStatus {
     master_version: Option<String>,
@@ -178,6 +224,10 @@ pub fn run() {
             set_enabled,
             list_contracts,
             get_active_contract,
+            save_history,
+            list_history,
+            set_measured_csr,
+            clear_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

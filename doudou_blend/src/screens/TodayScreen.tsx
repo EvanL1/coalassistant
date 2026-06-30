@@ -21,7 +21,6 @@ import type {
 } from "../types";
 import type { TabId } from "../TabBar";
 import {
-  appendHistory,
   getCoalPrefs,
   getQuantity,
   getUserContract,
@@ -228,15 +227,11 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
     }
   }
 
-  function saveToHistory() {
+  async function saveToHistory() {
     if (state.status !== "ok" || !state.result?.cost || !state.result.ok) return;
-    const recipe: Record<string, number> = {};
-    for (const o of state.result.orders) recipe[o.coal] = o.ratio;
-    appendHistory({
-      cost_cif: state.result.cost.cif_per_ton,
-      recipe,
-      contract_name: state.contractName || "",
-    });
+    const backend = await getBackend();
+    // 存完整 result: 混合后指标(回归 X)随之留存, 供「历史」页回填实测 CSR.
+    await backend.saveHistory(state.result, state.contractName || "", getQuantity());
     setSaveFlag(true);
     setTimeout(() => setSaveFlag(false), 2000);
   }
@@ -535,7 +530,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </button>
         <button
           className="btn btn-primary"
-          onClick={saveToHistory}
+          onClick={() => void saveToHistory()}
           style={{ gridColumn: "1 / -1" }}
         >
           {saveFlag ? "✓ 已保存" : "保存方案"}

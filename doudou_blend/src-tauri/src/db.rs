@@ -44,6 +44,39 @@ pub fn open_and_init(path: &Path) -> Result<Connection, DbError> {
 
 fn init_schema(conn: &mut Connection) -> Result<(), DbError> {
     conn.execute_batch(db_schema::SCHEMA_V1)?;
+    migrate_blend_history(conn)?;
+    Ok(())
+}
+
+/// 幂等迁移: 给已有老库的 blend_history 补上后加的列.
+/// 全新安装时 SCHEMA_V1 的 CREATE TABLE 已含这些列, 这里检测到存在即跳过.
+/// 不引入迁移框架 (沿用 schema 的 IF NOT EXISTS 思路).
+fn migrate_blend_history(conn: &Connection) -> Result<(), DbError> {
+    add_column_if_missing(conn, "blend_history", "contract_name", "TEXT")?;
+    add_column_if_missing(conn, "blend_history", "csr_measured", "REAL")?;
+    Ok(())
+}
+
+/// 列不存在才 ALTER TABLE ADD COLUMN. table/column 是内部常量, 非用户输入.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl_type: &str,
+) -> Result<(), DbError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    // PRAGMA table_info 第 1 列 (索引 1) 是列名
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<String>, _>>()?
+        .iter()
+        .any(|c| c == column);
+    if !exists {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {decl_type}"),
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -170,5 +203,93 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM contracts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(contract_count, 1, "幂等性: 不应重复插入合同");
+    }
+
+    /// 采集 + 回填往返: save → list → set_measured_csr → list.
+    #[test]
+    fn test_history_save_list_backfill_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.db");
+        let mut conn = open_and_init(&path).unwrap();
+
+        let id = crate::db_queries::save_history(
+            &mut conn,
+            "2026-06-30T10:00:00.000Z",
+            "默认合同",
+            1234.5,
+            Some(5000.0),
+            r#"{"ok":true,"indicator_check":[]}"#,
+        )
+        .unwrap();
+        assert!(id > 0, "save_history 应返回正的行 id");
+
+        let list = crate::db_queries::list_history(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].contract_name, "默认合同");
+        assert_eq!(list[0].cost_cif, 1234.5);
+        assert_eq!(list[0].csr_measured, None, "未回填时 csr_measured 应为 None");
+
+        crate::db_queries::set_measured_csr(&mut conn, id, 65.3).unwrap();
+        let list = crate::db_queries::list_history(&conn).unwrap();
+        assert_eq!(list[0].csr_measured, Some(65.3), "回填后应读到实测值");
+
+        // 不存在的 id → NotFound
+        assert!(
+            crate::db_queries::set_measured_csr(&mut conn, 9999, 60.0).is_err(),
+            "回填不存在的 id 应报错"
+        );
+
+        // 清空
+        crate::db_queries::clear_history(&mut conn).unwrap();
+        assert_eq!(crate::db_queries::list_history(&conn).unwrap().len(), 0, "清空后应为空");
+    }
+
+    /// 迁移幂等: 老库 (无 contract_name/csr_measured 列) 经 open_and_init 补列, 二次调用不报错.
+    #[test]
+    fn test_blend_history_migration_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("old.db");
+
+        // 模拟老库: 只建旧版 blend_history (缺后加的两列)
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"CREATE TABLE blend_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    occurred_at TEXT NOT NULL,
+                    contract_id INTEGER,
+                    total_quantity REAL,
+                    cost_cif REAL NOT NULL,
+                    result_json TEXT NOT NULL,
+                    note TEXT
+                );"#,
+            )
+            .unwrap();
+        }
+
+        // 两次 open_and_init 都不报错 (迁移幂等)
+        let _ = open_and_init(&path).expect("第一次迁移失败");
+        let conn = open_and_init(&path).expect("第二次迁移失败");
+
+        // 新列已补上
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(blend_history)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert!(cols.contains(&"csr_measured".to_string()), "应补 csr_measured 列");
+        assert!(cols.contains(&"contract_name".to_string()), "应补 contract_name 列");
+
+        // 迁移后写入/读取正常
+        let mut conn = conn;
+        let id = crate::db_queries::save_history(
+            &mut conn, "2026-06-30T11:00:00.000Z", "老库合同", 999.0, None, "{}",
+        )
+        .unwrap();
+        crate::db_queries::set_measured_csr(&mut conn, id, 62.0).unwrap();
+        let list = crate::db_queries::list_history(&conn).unwrap();
+        assert_eq!(list[0].csr_measured, Some(62.0));
     }
 }

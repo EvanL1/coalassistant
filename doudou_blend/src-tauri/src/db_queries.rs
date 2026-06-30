@@ -416,6 +416,82 @@ pub fn get_active_contract(conn: &Connection) -> Result<ContractView, DbError> {
 }
 
 // ============================================================
+// 历史方案 (采集 + 回填实测 CSR)
+// ============================================================
+
+/// 一条历史方案记录. result_json 内含混合后指标(回归 X), csr_measured 是回填的实测 CSR(回归 y).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryRecord {
+    pub id: i64,
+    pub occurred_at: String,
+    pub contract_name: String,
+    pub cost_cif: f64,
+    pub result_json: String,
+    pub csr_measured: Option<f64>,
+}
+
+/// 保存一次配煤方案, 返回新行 id. occurred_at 由前端给 (ISO8601, 两端统一).
+pub fn save_history(
+    conn: &mut Connection,
+    occurred_at: &str,
+    contract_name: &str,
+    cost_cif: f64,
+    total_quantity: Option<f64>,
+    result_json: &str,
+) -> Result<i64, DbError> {
+    conn.execute(
+        r#"
+        INSERT INTO blend_history (occurred_at, contract_name, total_quantity, cost_cif, result_json)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![occurred_at, contract_name, total_quantity, cost_cif, result_json],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 列出历史方案, 倒序 (最新在前).
+pub fn list_history(conn: &Connection) -> Result<Vec<HistoryRecord>, DbError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, occurred_at, contract_name, cost_cif, result_json, csr_measured
+        FROM blend_history
+        ORDER BY occurred_at DESC, id DESC
+        "#,
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(HistoryRecord {
+                id: row.get(0)?,
+                occurred_at: row.get(1)?,
+                contract_name: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                cost_cif: row.get(3)?,
+                result_json: row.get(4)?,
+                csr_measured: row.get(5)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// 清空所有历史方案.
+pub fn clear_history(conn: &mut Connection) -> Result<(), DbError> {
+    conn.execute("DELETE FROM blend_history", [])?;
+    Ok(())
+}
+
+/// 回填某条记录的实测 CSR. id 不存在 → NotFound.
+pub fn set_measured_csr(conn: &mut Connection, id: i64, csr_measured: f64) -> Result<(), DbError> {
+    let n = conn.execute(
+        "UPDATE blend_history SET csr_measured = ?2 WHERE id = ?1",
+        params![id, csr_measured],
+    )?;
+    if n == 0 {
+        return Err(DbError::NotFound(format!("blend_history id={id}")));
+    }
+    Ok(())
+}
+
+// ============================================================
 // 工具
 // ============================================================
 
