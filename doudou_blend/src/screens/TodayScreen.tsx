@@ -8,7 +8,7 @@
  *
  * 求解后展示成本、配方、8 项指标, 并支持保存到历史.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { getBackend } from "../backend";
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
@@ -19,19 +19,91 @@ import type {
   MasterCoalEntry,
   Spec,
 } from "../types";
+import type { TabId } from "../TabBar";
 import {
   appendHistory,
   getCoalPrefs,
+  getQuantity,
   getUserContract,
   getUserCoals,
+  setQuantity,
   type CoalPrefs,
 } from "../storage";
 
 const RECIPE_COLORS = ["#0a5fff", "#7c3aed", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#8b5cf6"];
 
+/** 输入摘要里的可点击链接 (跳合同/煤池). */
+const summaryLink: CSSProperties = {
+  background: "none",
+  border: "none",
+  padding: 0,
+  cursor: "pointer",
+  color: "var(--c-primary)",
+  fontWeight: 600,
+  fontSize: 12,
+};
+
 function formatPrice(n: number): { int: string; dec: string } {
   const [intPart, decPart] = n.toFixed(2).split(".");
   return { int: intPart, dec: decPart };
+}
+
+/** 把求解结果格式化成可复制的采购清单文本 (纯函数). */
+function buildOrderText(
+  result: BlendResult,
+  contractName: string,
+  isoDate: string,
+  quantity: number,
+): string {
+  const cost = result.cost;
+  const total = result.indicator_check.length;
+  const passing = result.indicator_check.filter(
+    (ic) => ic.slack == null || ic.slack >= -0.01,
+  ).length;
+  const yuan = (n: number) => `¥${Math.round(n).toLocaleString("zh-CN")}`;
+
+  const lines: string[] = [];
+  lines.push(`【豆哥配煤】${isoDate}`);
+  lines.push(`合同: ${contractName || "默认合同"} | 总量 ${quantity} 吨`);
+  if (cost) {
+    lines.push(`到厂价 ${cost.cif_per_ton.toFixed(2)} 元/吨 | 达标 ${passing}/${total}`);
+  }
+  lines.push("──────────────────");
+  for (const o of [...result.orders].sort((a, b) => b.ratio - a.ratio)) {
+    const pct = `${(o.ratio * 100).toFixed(1)}%`;
+    const tons = o.tons != null ? `${Math.round(o.tons)}吨` : "-";
+    const amt = o.cif_amount != null ? `  ${yuan(o.cif_amount)}` : "";
+    lines.push(`${o.coal}  ${pct}  ${tons}${amt}`);
+  }
+  if (cost?.total_cif != null) {
+    lines.push(`总额 ${yuan(cost.total_cif)}`);
+  }
+  return lines.join("\n");
+}
+
+/** 复制到剪贴板. 优先 Clipboard API, 不可用时回退临时 textarea (兼容老 webview). */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 落到下面的兜底
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 /** 应用 user_overrides 到 master 煤上, 返回 LP 用的 Coal. */
@@ -73,11 +145,14 @@ interface SolveState {
   error?: string;
 }
 
-export function TodayScreen() {
+export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   const [state, setState] = useState<SolveState>({ status: "loading" });
   const [saveFlag, setSaveFlag] = useState(false);
   // 重算反馈: idle / running / done. running 时按钮显示"重算中...", done 时显示"✓ 已重算" 1.5s
   const [recompute, setRecompute] = useState<"idle" | "running" | "done">("idle");
+  // 采购吨数输入 (字符串以便编辑); 导出反馈文案
+  const [qtyInput, setQtyInput] = useState(() => String(getQuantity()));
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
 
   useEffect(() => {
     void runSolve(true);
@@ -129,7 +204,7 @@ export function TodayScreen() {
       const request: BlendRequest = {
         coals,
         specs,
-        total_quantity: 3700,
+        total_quantity: getQuantity(),
         truncate_decimal: true,
       };
 
@@ -164,6 +239,29 @@ export function TodayScreen() {
     });
     setSaveFlag(true);
     setTimeout(() => setSaveFlag(false), 2000);
+  }
+
+  /** 提交采购吨数: 合法则持久化并重算, 非法则回退上次值. */
+  function commitQty() {
+    const n = Number(qtyInput);
+    if (Number.isFinite(n) && n > 0) {
+      setQuantity(n);
+      setQtyInput(String(n));
+      void runSolve(false);
+    } else {
+      setQtyInput(String(getQuantity()));
+    }
+  }
+
+  /** 导出: 把当前方案复制成采购清单文本. */
+  async function exportOrder() {
+    if (state.status !== "ok" || !state.result?.ok) return;
+    const d = new Date();
+    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const text = buildOrderText(state.result, state.contractName ?? "", iso, getQuantity());
+    const ok = await copyText(text);
+    setExportMsg(ok ? "✓ 已复制清单" : "复制失败");
+    setTimeout(() => setExportMsg(null), 2000);
   }
 
   if (state.status === "loading") {
@@ -237,6 +335,50 @@ export function TodayScreen() {
           <h1 className="page-title">今日配煤</h1>
         </div>
         <div className="contract-chip">{contractName || "默认合同"}</div>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 12,
+          color: "var(--c-text-3)",
+          marginBottom: 12,
+        }}
+      >
+        <span>基于</span>
+        <button onClick={() => onNavigate("contract")} style={summaryLink}>
+          {contractName || "默认合同"} ▸
+        </button>
+        <span>·</span>
+        <button onClick={() => onNavigate("pool")} style={summaryLink}>
+          启用 {enabledCount} 种煤 ▸
+        </button>
+        <span>· 采购</span>
+        <input
+          type="number"
+          inputMode="numeric"
+          value={qtyInput}
+          onChange={(e) => setQtyInput(e.target.value)}
+          onBlur={commitQty}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+          aria-label="采购总吨数"
+          style={{
+            width: 64,
+            padding: "2px 6px",
+            borderRadius: 6,
+            border: "1px solid var(--c-border, #d1d5db)",
+            fontSize: 12,
+            textAlign: "right",
+            color: "var(--c-text-1, #111)",
+            background: "var(--c-card, #fff)",
+          }}
+        />
+        <span>吨</span>
       </div>
 
       <div className="cost-card">
@@ -388,7 +530,14 @@ export function TodayScreen() {
             ? "✓ 已重算"
             : "重新计算"}
         </button>
-        <button className="btn btn-primary" onClick={saveToHistory}>
+        <button className="btn btn-secondary" onClick={exportOrder}>
+          {exportMsg ?? "导出订单"}
+        </button>
+        <button
+          className="btn btn-primary"
+          onClick={saveToHistory}
+          style={{ gridColumn: "1 / -1" }}
+        >
           {saveFlag ? "✓ 已保存" : "保存方案"}
         </button>
       </div>

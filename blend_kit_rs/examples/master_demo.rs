@@ -63,6 +63,7 @@ fn main() {
         specs: master.default_contract.specs.clone(),
         total_quantity: Some(3700.0),
         truncate_decimal: true,
+        csr_observations: None,
     };
     let r = solve(&req);
 

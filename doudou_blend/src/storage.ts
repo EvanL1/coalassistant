@@ -121,6 +121,29 @@ export function clearUserContract(): void {
 }
 
 // ============================================================
+// 采购总量 (只缩放实物订单, 不影响配方/单价/可行性)
+// ============================================================
+
+const KEY_QUANTITY = "doudou_blend.quantity.v1";
+const DEFAULT_QUANTITY = 3700;
+
+/** 采购总吨数. 缺失/非法时回退默认 3700. */
+export function getQuantity(): number {
+  try {
+    const raw = localStorage.getItem(KEY_QUANTITY);
+    if (raw == null) return DEFAULT_QUANTITY;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_QUANTITY;
+  } catch {
+    return DEFAULT_QUANTITY;
+  }
+}
+
+export function setQuantity(n: number): void {
+  localStorage.setItem(KEY_QUANTITY, String(n));
+}
+
+// ============================================================
 // 历史方案
 // ============================================================
 

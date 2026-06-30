@@ -31,6 +31,7 @@ fn main() {
         specs,
         total_quantity: Some(3700.0),
         truncate_decimal: true,
+        csr_observations: None,
     };
 
     println!("===== 豆哥配煤 Rust 核心 =====");

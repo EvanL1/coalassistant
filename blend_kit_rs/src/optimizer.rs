@@ -8,26 +8,33 @@
 //!            Σ ind_i · x_i ≥ min  (下限约束)
 //!            x_i ≥ 0
 //!
-//! 8 项指标全部按线性加权处理. 不做派生指标预测, 不做 σ(Ro) 迭代.
-//! 如需上面这些, 在调用前对 Coal.props 进行预计算即可.
+//! 8 项指标默认按线性加权处理. CSR 可选: 请求带历史观测时, 先用线性回归预测覆盖
+//! 各煤 CSR 再建 LP (见 `apply_csr_prediction`); 不做 σ(Ro) 迭代.
+//! 如需其他派生指标, 在调用前对 Coal.props 进行预计算即可.
 use crate::model::*;
+use crate::predict::{CsrObservation, CsrPredictor};
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::*;
 use std::collections::HashSet;
 
 const EPS_TRUNCATE: f64 = 0.0999;
 const BINDING_TOL: f64 = 0.05;
+/// CSR 回归拟合质量门槛: R² 低于此值视为不可信, 回退录入 CSR.
+/// 0.6 = 至少解释 60% 方差; 偏保守, 想更严就调高 (如 0.8).
+const MIN_CSR_R2: f64 = 0.6;
 
 /// 主求解函数.
 pub fn solve(req: &BlendRequest) -> BlendResult {
     let active_specs: Vec<&Spec> = req.specs.iter().filter(|s| s.enabled).collect();
     let eps = if req.truncate_decimal { EPS_TRUNCATE } else { 0.0 };
 
+    // 可选 CSR 预测: 有历史观测就拟合线性回归覆盖各煤 CSR (拟合失败时附警告并回退).
+    let (coals, mut warnings) = apply_csr_prediction(&req.coals, req.csr_observations.as_deref());
+
     // 容错: 剔除缺关键指标的煤
     let required: HashSet<String> = active_specs.iter().map(|s| s.indicator.clone()).collect();
-    let mut warnings = Vec::new();
     let mut kept: Vec<&Coal> = Vec::new();
-    for c in &req.coals {
+    for c in &coals {
         let missing: Vec<&String> = required.iter().filter(|k| !c.has(k)).collect();
         if missing.is_empty() {
             kept.push(c);
@@ -166,6 +173,45 @@ pub fn solve(req: &BlendRequest) -> BlendResult {
         indicator_check,
         warnings,
     }
+}
+
+/// 可选 CSR 预测预处理.
+///
+/// 提供历史观测、样本足够且拟合 R² ≥ `MIN_CSR_R2` 时, 用预测值覆盖每只煤的 CSR;
+/// 6 项自变量 (S/A/V/G/Y/M) 缺任意一项的煤保留原 CSR 并逐煤点名警告.
+/// 观测缺失或为空 (None / Some([])) → 原样返回;
+/// 样本不足 / 矩阵奇异 / R² 不足 → 原样返回并附警告 (不静默吞掉).
+fn apply_csr_prediction(
+    coals: &[Coal],
+    observations: Option<&[CsrObservation]>,
+) -> (Vec<Coal>, Vec<String>) {
+    let obs = match observations {
+        Some(o) if !o.is_empty() => o,
+        _ => return (coals.to_vec(), Vec::new()),
+    };
+    let predictor = match CsrPredictor::fit(obs) {
+        Ok(p) if p.r_squared >= MIN_CSR_R2 => p,
+        Ok(p) => {
+            let msg = format!("CSR 预测跳过: R²={:.3} < {:.2}, 拟合质量不足", p.r_squared, MIN_CSR_R2);
+            return (coals.to_vec(), vec![msg]);
+        }
+        Err(e) => return (coals.to_vec(), vec![format!("CSR 预测跳过: {}", e)]),
+    };
+    let mut warnings = Vec::new();
+    let out = coals
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            match predictor.predict_coal(&c) {
+                Some(csr) => {
+                    c.props.insert("CSR".into(), csr);
+                }
+                None => warnings.push(format!("{}: 缺输入指标, CSR 保留录入值", c.name)),
+            }
+            c
+        })
+        .collect();
+    (out, warnings)
 }
 
 /// 计算单项指标的余量和是否 binding.
