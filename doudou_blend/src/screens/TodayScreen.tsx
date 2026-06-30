@@ -6,7 +6,7 @@
  *   - 合同: user_contract ?? master.default_contract
  *   - 默认: master verified 的 4 主力煤启用, 其他停用
  *
- * 求解后展示成本、配方、8 项指标、binding 谈判方向, 并支持保存到历史.
+ * 求解后展示成本、配方、8 项指标, 并支持保存到历史.
  */
 import { useEffect, useState } from "react";
 import { getBackend } from "../backend";
@@ -228,7 +228,6 @@ export function TodayScreen() {
   const dateStr = `${today.getFullYear()} 年 ${today.getMonth() + 1} 月 ${today.getDate()} 日`;
 
   const sortedRecipe = [...result.orders].sort((a, b) => b.ratio - a.ratio);
-  const binding = result.indicator_check.filter((ic) => ic.binding);
 
   return (
     <>
@@ -360,18 +359,6 @@ export function TodayScreen() {
           })}
         </div>
       </div>
-
-      {binding.length > 0 && (
-        <div className="binding-list">
-          <div className="binding-list-title">谈判方向 (binding 顶格)</div>
-          {binding.map((ic) => (
-            <div key={ic.indicator}>
-              {ic.label_zh} 顶格 → 找{ic.max != null ? "更低" : "更高"}
-              {ic.label_zh}的煤源, 或谈宽合同
-            </div>
-          ))}
-        </div>
-      )}
 
       {result.warnings.length > 0 && (
         <div
