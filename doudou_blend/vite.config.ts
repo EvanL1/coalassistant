@@ -28,5 +28,10 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+    // 4. 放行 doudou_blend 之外的文件: blend-kit-wasm 是 file:../blend_kit_wasm/pkg
+    //    依赖, 其 .wasm 在本目录外, 默认不在 dev server 白名单里 (404 → WASM 编译失败)
+    fs: {
+      allow: [".", ".."],
+    },
   },
 }));
