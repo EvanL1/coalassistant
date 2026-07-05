@@ -7,10 +7,7 @@ fn main() {
     let master = CoalMaster::load_embedded().expect("master 加载失败");
     println!("版本: {} (更新于 {})", master.version, master.updated_at);
     println!("总煤种: {}", master.coals.len());
-    println!(
-        "  verified:   {} (生产可用)",
-        master.verified().count()
-    );
+    println!("  verified:   {} (生产可用)", master.verified().count());
     println!(
         "  active:     {} (部分数据)",
         master.by_status(MasterStatus::Active).count()
@@ -30,19 +27,20 @@ fn main() {
     println!();
 
     println!("===== 主力煤池 (4 verified, 完整 10 字段) =====");
-    let coals: Vec<_> = master
-        .verified()
-        .filter_map(|e| {
-            println!(
+    let coals: Vec<_> =
+        master
+            .verified()
+            .filter_map(|e| {
+                println!(
                 "  {:10} S={:.2} A={:.1} V={:.1} G={:.0} Y={:.0} CSR={:.0} M={:.1} ¥{:.0}+{:.0}",
                 e.name,
                 e.props["S"], e.props["A"], e.props["V"], e.props["G"],
                 e.props["Y"], e.props["CSR"], e.props["M"],
                 e.fob.unwrap(), e.frt.unwrap()
             );
-            e.to_coal(None, None)
-        })
-        .collect();
+                e.to_coal(None, None)
+            })
+            .collect();
     println!();
 
     println!("===== 默认合同 (master 自带) =====");
@@ -121,10 +119,12 @@ fn main() {
         println!();
         println!("谈判方向 (binding):");
         for ic in &binding {
-            println!("  {} 顶格 → 找{}{}的煤源, 或谈宽合同",
+            println!(
+                "  {} 顶格 → 找{}{}的煤源, 或谈宽合同",
                 ic.label_zh,
                 if ic.max.is_some() { "更低" } else { "更高" },
-                ic.label_zh);
+                ic.label_zh
+            );
         }
     }
 }

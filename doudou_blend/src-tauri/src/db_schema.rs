@@ -127,6 +127,13 @@ CREATE TABLE IF NOT EXISTS blend_history (
     cost_cif        REAL NOT NULL,
     result_json     TEXT NOT NULL,                    -- 完整 BlendResult JSON, 混合后指标(回归 X)即在此
     csr_measured    REAL,                             -- 回填的实测焦炭 CSR (回归 y); NULL = 未回填
+    -- 混煤实测化验回填 (调研 2026-07-04: 化验单 6 项一并采集, 供 G 修正模型/信任对照)
+    s_measured      REAL,
+    a_measured      REAL,
+    v_measured      REAL,
+    g_measured      REAL,
+    y_measured      REAL,
+    m_measured      REAL,
     note            TEXT
 );
 

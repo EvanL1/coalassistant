@@ -1,11 +1,25 @@
 /**
  * 屏 4 - 历史方案
  * 列出历史方案 (后端: native SQLite / web localStorage), 倒序展示.
- * 支持回填实测焦炭 CSR —— 数据闭环第一步: 把「配比 + 混合后指标」配上事后实测 CSR.
+ * 支持回填混煤实测化验 (CSR + S/A/V/G/Y/M) —— 数据闭环: 把「配比 + 预测指标」
+ * 配上事后化验单, 既是信任对照 (预测 vs 实测), 也是 G 修正/CSR 回归的样本.
  */
 import { useEffect, useState, type CSSProperties } from "react";
 import { getBackend } from "../backend";
-import type { HistoryRecord } from "../types";
+import type { HistoryRecord, MeasuredQuality } from "../types";
+
+/** 回填字段定义: [MeasuredQuality 键, 显示标签, HistoryRecord 列]. */
+const MEASURED_FIELDS = [
+  ["csr", "CSR", "csr_measured"],
+  ["g", "粘结G", "g_measured"],
+  ["y", "胶质Y", "y_measured"],
+  ["s", "硫S", "s_measured"],
+  ["a", "灰A", "a_measured"],
+  ["v", "挥发V", "v_measured"],
+  ["m", "水分M", "m_measured"],
+] as const;
+
+type MeasuredKey = (typeof MEASURED_FIELDS)[number][0];
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -122,7 +136,17 @@ const miniSave: CSSProperties = {
   cursor: "pointer",
 };
 
-/** 单条历史卡片 + 内联回填实测 CSR. */
+/** 从记录构造编辑表单初值: 已回填的值转字符串, 未回填为空. */
+function inputsFromEntry(entry: HistoryRecord): Record<MeasuredKey, string> {
+  const out = {} as Record<MeasuredKey, string>;
+  for (const [key, , col] of MEASURED_FIELDS) {
+    const v = entry[col];
+    out[key] = v != null ? String(v) : "";
+  }
+  return out;
+}
+
+/** 单条历史卡片 + 内联回填混煤实测化验 (7 项均可选, 至少填一项). */
 function HistoryCard({
   entry,
   onSaved,
@@ -131,31 +155,40 @@ function HistoryCard({
   onSaved: () => void | Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
-  const [input, setInput] = useState(
-    entry.csr_measured != null ? String(entry.csr_measured) : "",
+  const [inputs, setInputs] = useState<Record<MeasuredKey, string>>(() =>
+    inputsFromEntry(entry),
   );
   const [err, setErr] = useState<string | null>(null);
 
   // 列表刷新后, 非编辑态同步外部最新值 (避免 useState 初值过期).
   useEffect(() => {
-    if (!editing) {
-      setInput(entry.csr_measured != null ? String(entry.csr_measured) : "");
-    }
-  }, [entry.csr_measured, editing]);
+    if (!editing) setInputs(inputsFromEntry(entry));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry, editing]);
+
+  const filled = MEASURED_FIELDS.filter(([key]) => inputs[key].trim() !== "");
 
   async function save() {
-    const v = Number(input);
-    if (!Number.isFinite(v) || v <= 0) {
-      setErr("请输入正数");
+    if (filled.length === 0) {
+      setErr("至少填一项");
       return;
     }
-    if (v > 100) {
-      setErr("CSR 量程应在 0~100");
-      return;
+    const measured: MeasuredQuality = {};
+    for (const [key, label] of filled) {
+      const v = Number(inputs[key]);
+      if (!Number.isFinite(v) || v <= 0) {
+        setErr(`${label} 请输入正数`);
+        return;
+      }
+      if (v > 100) {
+        setErr(`${label} 量程应在 0~100`);
+        return;
+      }
+      measured[key] = v;
     }
     try {
       const backend = await getBackend();
-      await backend.setMeasuredCsr(entry.id, v);
+      await backend.setMeasuredQuality(entry.id, measured);
       setEditing(false);
       setErr(null);
       await onSaved();
@@ -163,6 +196,8 @@ function HistoryCard({
       setErr("保存失败，请重试");
     }
   }
+
+  const savedValues = MEASURED_FIELDS.filter(([, , col]) => entry[col] != null);
 
   return (
     <div className="card">
@@ -187,50 +222,73 @@ function HistoryCard({
       </div>
       <div style={{ fontSize: 12, color: "var(--c-text-2)" }}>{recipeBrief(entry.recipe)}</div>
 
-      {/* 回填实测 CSR: 仅对有混合指标 (回归 X) 的记录开放 */}
+      {/* 回填混煤实测化验: 仅对有混合指标 (回归 X) 的记录开放 */}
       {entry.mixed != null && (
         <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--c-border)" }}>
           {editing ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <input
-                type="number"
-                inputMode="decimal"
-                value={input}
-                placeholder="实测 CSR"
-                autoFocus
-                style={miniInput}
-                onChange={(e) => {
-                  setInput(e.target.value);
-                  setErr(null);
-                }}
-              />
-              <button style={miniSave} onClick={() => void save()}>
-                保存
-              </button>
-              <button
-                style={linkBtn}
-                onClick={() => {
-                  setEditing(false);
-                  setErr(null);
+            <div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))",
+                  gap: 8,
                 }}
               >
-                取消
-              </button>
-              {err && <span style={{ fontSize: 12, color: "var(--c-danger)" }}>{err}</span>}
+                {MEASURED_FIELDS.map(([key, label]) => (
+                  <label key={key} style={{ fontSize: 11, color: "var(--c-text-2)" }}>
+                    {label}
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      value={inputs[key]}
+                      placeholder="—"
+                      style={{ ...miniInput, width: "100%", marginTop: 2 }}
+                      onChange={(e) => {
+                        setInputs({ ...inputs, [key]: e.target.value });
+                        setErr(null);
+                      }}
+                    />
+                  </label>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 6 }}>
+                留空 = 保持原值（不会清除已录数据）
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                <button style={miniSave} onClick={() => void save()}>
+                  保存
+                </button>
+                <button
+                  style={linkBtn}
+                  onClick={() => {
+                    setEditing(false);
+                    setErr(null);
+                  }}
+                >
+                  取消
+                </button>
+                {err && <span style={{ fontSize: 12, color: "var(--c-danger)" }}>{err}</span>}
+              </div>
             </div>
-          ) : entry.csr_measured != null ? (
-            <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ color: "var(--c-text-2)" }}>实测 CSR</span>
-              <span style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                {entry.csr_measured.toFixed(1)}
-              </span>
+          ) : savedValues.length > 0 ? (
+            <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ color: "var(--c-text-2)" }}>实测</span>
+              {savedValues.map(([key, label, col]) => (
+                <span key={key} style={{ fontVariantNumeric: "tabular-nums" }}>
+                  {label}{" "}
+                  <span style={{ fontWeight: 700 }}>
+                    {/* 硫等小量纲值 (<10) 保留两位小数, 0.65 显示成 0.7 会误导数据对照 */}
+                    {entry[col]!.toFixed(entry[col]! < 10 ? 2 : 1)}
+                  </span>
+                </span>
+              ))}
               <button style={linkBtn} onClick={() => setEditing(true)}>
                 ✎ 改
               </button>
             </div>
           ) : (
             <button style={linkBtn} onClick={() => setEditing(true)}>
-              + 录入实测CSR
+              + 录入实测化验
             </button>
           )}
         </div>

@@ -53,6 +53,10 @@ pub struct Coal {
     pub fob: f64,
     /// 运费 (FRT), 元/吨.
     pub frt: f64,
+    /// 可选煤岩数据 (MT/T 507 化验单: 反射率直方图 + 镜质组含量).
+    /// 提供时: 混煤 σ 走直方图精确计算; props 缺 petro 标量时自动用直方图 σ 补齐.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub petrography: Option<crate::petrography::Petrography>,
 }
 
 impl Coal {
@@ -94,6 +98,11 @@ pub struct Spec {
     pub max: Option<f64>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// 安全余量: LP 内部把上限收紧 margin、下限抬高 margin, 输出展示仍用合同原界限.
+    /// 用途: 兜住"LP 解必然贴边 + G 值加权系统性高估实测 ~11%"的双重风险
+    /// (调研 2026-07-04 §2). None = 不收紧.
+    #[serde(default)]
+    pub margin: Option<f64>,
 }
 
 fn default_enabled() -> bool {
@@ -108,6 +117,7 @@ impl Spec {
             min: None,
             max: Some(max),
             enabled: true,
+            margin: None,
         }
     }
     pub fn lower(indicator: &str, min: f64) -> Self {
@@ -117,6 +127,7 @@ impl Spec {
             min: Some(min),
             max: None,
             enabled: true,
+            margin: None,
         }
     }
     pub fn range(indicator: &str, min: f64, max: f64) -> Self {
@@ -126,6 +137,7 @@ impl Spec {
             min: Some(min),
             max: Some(max),
             enabled: true,
+            margin: None,
         }
     }
 }
@@ -196,6 +208,25 @@ pub struct IndicatorCheck {
     pub binding: bool,
 }
 
+/// 岩相校验 (视图 C 补充): 按直方图合成精确计算的混煤反射率分布指标.
+/// 只有参配煤全部带煤岩数据时才产出; 与 indicator_check 里的线性代理值 (Σx·σ_j) 不同,
+/// 这里的 sigma 含 μ 离散贡献 (全方差定律), 是可对照化验单的真实值.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PetrographyCheck {
+    /// 混煤反射率均值.
+    pub mean: f64,
+    /// 混煤反射率标准差 (精确值).
+    pub sigma: f64,
+    /// 合同 σ 上限 (petro spec 的 max). 无约束时 None.
+    pub sigma_max: Option<f64>,
+    /// σ 是否满足上限. 无约束时 None.
+    pub sigma_ok: Option<bool>,
+    /// 主焦区间 (1.2~1.5) 凹口. None = 无凹口.
+    pub notch: Option<crate::petrography::Notch>,
+    /// 线性代理收紧迭代次数 (0 = 一次通过).
+    pub refine_iterations: usize,
+}
+
 /// 完整求解结果.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlendResult {
@@ -209,6 +240,9 @@ pub struct BlendResult {
     pub orders: Vec<OrderItem>,
     /// 视图 C (按 INDICATORS 顺序).
     pub indicator_check: Vec<IndicatorCheck>,
+    /// 岩相精确校验. 参配煤缺煤岩数据时为 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub petrography_check: Option<PetrographyCheck>,
     /// 容错过程中的警告.
     pub warnings: Vec<String>,
 }
@@ -222,6 +256,7 @@ impl BlendResult {
             cost: None,
             orders: Vec::new(),
             indicator_check: Vec::new(),
+            petrography_check: None,
             warnings,
         }
     }

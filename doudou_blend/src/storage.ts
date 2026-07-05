@@ -10,7 +10,7 @@
  *   - 重置 = 清空 localStorage 对应 key
  */
 
-import type { Spec, MasterCoalEntry, BlendResult } from "./types";
+import type { Spec, MasterCoalEntry, BlendResult, MeasuredQuality } from "./types";
 
 const KEY_COAL_PREFS = "doudou_blend.coal_prefs.v1";
 const KEY_CONTRACT = "doudou_blend.contract.v1";
@@ -48,6 +48,13 @@ export interface HistoryEntry {
   result?: BlendResult;
   /** 回填的实测焦炭 CSR (回归 y); undefined = 未回填. */
   csr_measured?: number;
+  /** 混煤实测化验回填 (信任对照 + G 修正模型样本); undefined = 未回填. */
+  s_measured?: number;
+  a_measured?: number;
+  v_measured?: number;
+  g_measured?: number;
+  y_measured?: number;
+  m_measured?: number;
 }
 
 // ============================================================
@@ -180,13 +187,22 @@ export function clearHistory(): void {
   window.dispatchEvent(new CustomEvent("doudou:history_changed"));
 }
 
-/** 回填某条历史的实测 CSR. id 不存在则静默忽略. */
-export function setMeasuredCsrLocal(id: string, csrMeasured: number): void {
+/** 回填某条历史的混煤实测化验 (部分字段, 只更新提供的项). id 不存在则静默忽略. */
+export function setMeasuredQualityLocal(id: string, m: MeasuredQuality): void {
   const all = getHistory();
   if (!all.some((e) => e.id === id)) return;
-  const updated = all.map((e) =>
-    e.id === id ? { ...e, csr_measured: csrMeasured } : e,
-  );
+  const updated = all.map((e) => {
+    if (e.id !== id) return e;
+    const next = { ...e };
+    if (m.s != null) next.s_measured = m.s;
+    if (m.a != null) next.a_measured = m.a;
+    if (m.v != null) next.v_measured = m.v;
+    if (m.g != null) next.g_measured = m.g;
+    if (m.y != null) next.y_measured = m.y;
+    if (m.m != null) next.m_measured = m.m;
+    if (m.csr != null) next.csr_measured = m.csr;
+    return next;
+  });
   localStorage.setItem(KEY_HISTORY, JSON.stringify(updated));
   window.dispatchEvent(new CustomEvent("doudou:history_changed"));
 }

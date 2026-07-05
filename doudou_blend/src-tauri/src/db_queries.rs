@@ -96,9 +96,11 @@ pub fn list_coals(conn: &Connection, status: Option<&str>) -> Result<Vec<CoalVie
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = if let Some(s) = status {
-        stmt.query_map(params![s], map_coal_meta)?.collect::<Result<Vec<_>, _>>()?
+        stmt.query_map(params![s], map_coal_meta)?
+            .collect::<Result<Vec<_>, _>>()?
     } else {
-        stmt.query_map([], map_coal_meta)?.collect::<Result<Vec<_>, _>>()?
+        stmt.query_map([], map_coal_meta)?
+            .collect::<Result<Vec<_>, _>>()?
     };
 
     let mut out = Vec::with_capacity(rows.len());
@@ -116,7 +118,9 @@ pub fn get_coal(conn: &Connection, name: &str) -> Result<CoalView, DbError> {
             map_coal_meta,
         )
         .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(format!("煤 '{}' 不存在", name)),
+            rusqlite::Error::QueryReturnedNoRows => {
+                DbError::NotFound(format!("煤 '{}' 不存在", name))
+            }
             _ => DbError::Sqlite(e),
         })?;
     build_coal_view(conn, meta)
@@ -154,8 +158,16 @@ fn map_coal_meta(row: &rusqlite::Row) -> rusqlite::Result<CoalMeta> {
 fn build_coal_view(conn: &Connection, meta: CoalMeta) -> Result<CoalView, DbError> {
     // (mines 列名, 前端 fields key) —— 前端约定指标大写, petro/fob/frt 小写
     const COLS: [(&str, &str); 10] = [
-        ("s", "S"), ("a", "A"), ("v", "V"), ("g", "G"), ("y", "Y"),
-        ("petro", "petro"), ("csr", "CSR"), ("m", "M"), ("fob", "fob"), ("frt", "frt"),
+        ("s", "S"),
+        ("a", "A"),
+        ("v", "V"),
+        ("g", "G"),
+        ("y", "Y"),
+        ("petro", "petro"),
+        ("csr", "CSR"),
+        ("m", "M"),
+        ("fob", "fob"),
+        ("frt", "frt"),
     ];
     let mut fields: HashMap<String, FieldValue> = HashMap::new();
 
@@ -165,8 +177,16 @@ fn build_coal_view(conn: &Connection, meta: CoalMeta) -> Result<CoalView, DbErro
         params![meta.name],
         |r| {
             Ok([
-                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
             ])
         },
     )?;
@@ -216,7 +236,13 @@ fn build_coal_view(conn: &Connection, meta: CoalMeta) -> Result<CoalView, DbErro
     }
 
     // 3. 应用今日特价 (today_fob/today_frt)
-    let prefs: Option<(bool, Option<f64>, Option<f64>, Option<String>, Option<String>)> = conn
+    let prefs: Option<(
+        bool,
+        Option<f64>,
+        Option<f64>,
+        Option<String>,
+        Option<String>,
+    )> = conn
         .query_row(
             "SELECT enabled, today_fob, today_frt, price_updated_at, note
              FROM user_coal_prefs WHERE coal_name = ?1",
@@ -239,13 +265,21 @@ fn build_coal_view(conn: &Connection, meta: CoalMeta) -> Result<CoalView, DbErro
     if let Some(fob) = today_fob {
         fields.insert(
             "fob".into(),
-            FieldValue { value: fob, source: FieldSource::TodayPrice, confidence: Some("high".into()) },
+            FieldValue {
+                value: fob,
+                source: FieldSource::TodayPrice,
+                confidence: Some("high".into()),
+            },
         );
     }
     if let Some(frt) = today_frt {
         fields.insert(
             "frt".into(),
-            FieldValue { value: frt, source: FieldSource::TodayPrice, confidence: Some("high".into()) },
+            FieldValue {
+                value: frt,
+                source: FieldSource::TodayPrice,
+                confidence: Some("high".into()),
+            },
         );
     }
 
@@ -350,9 +384,8 @@ pub fn set_enabled(conn: &mut Connection, coal_name: &str, enabled: bool) -> Res
 // ============================================================
 
 pub fn list_contracts(conn: &Connection) -> Result<Vec<ContractView>, DbError> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, is_default, is_active, created_at FROM contracts ORDER BY id",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, is_default, is_active, created_at FROM contracts ORDER BY id")?;
     let contracts: Vec<(i64, String, bool, bool, String)> = stmt
         .query_map([], |row| {
             Ok((
@@ -412,14 +445,22 @@ pub fn get_active_contract(conn: &Connection) -> Result<ContractView, DbError> {
             _ => DbError::Sqlite(e),
         })?;
     let specs = list_specs(conn, id)?;
-    Ok(ContractView { id, name, is_default, is_active, created_at, specs })
+    Ok(ContractView {
+        id,
+        name,
+        is_default,
+        is_active,
+        created_at,
+        specs,
+    })
 }
 
 // ============================================================
 // 历史方案 (采集 + 回填实测 CSR)
 // ============================================================
 
-/// 一条历史方案记录. result_json 内含混合后指标(回归 X), csr_measured 是回填的实测 CSR(回归 y).
+/// 一条历史方案记录. result_json 内含混合后指标(回归 X), csr_measured 是回填的实测 CSR(回归 y);
+/// s/a/v/g/y/m_measured 是混煤实测化验回填 (信任对照 + G 修正模型样本).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryRecord {
     pub id: i64,
@@ -428,6 +469,24 @@ pub struct HistoryRecord {
     pub cost_cif: f64,
     pub result_json: String,
     pub csr_measured: Option<f64>,
+    pub s_measured: Option<f64>,
+    pub a_measured: Option<f64>,
+    pub v_measured: Option<f64>,
+    pub g_measured: Option<f64>,
+    pub y_measured: Option<f64>,
+    pub m_measured: Option<f64>,
+}
+
+/// 回填的混煤实测化验值. None = 本次不更新该项 (不清除已有值).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MeasuredQuality {
+    pub s: Option<f64>,
+    pub a: Option<f64>,
+    pub v: Option<f64>,
+    pub g: Option<f64>,
+    pub y: Option<f64>,
+    pub m: Option<f64>,
+    pub csr: Option<f64>,
 }
 
 /// 保存一次配煤方案, 返回新行 id. occurred_at 由前端给 (ISO8601, 两端统一).
@@ -453,7 +512,8 @@ pub fn save_history(
 pub fn list_history(conn: &Connection) -> Result<Vec<HistoryRecord>, DbError> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, occurred_at, contract_name, cost_cif, result_json, csr_measured
+        SELECT id, occurred_at, contract_name, cost_cif, result_json, csr_measured,
+               s_measured, a_measured, v_measured, g_measured, y_measured, m_measured
         FROM blend_history
         ORDER BY occurred_at DESC, id DESC
         "#,
@@ -467,6 +527,12 @@ pub fn list_history(conn: &Connection) -> Result<Vec<HistoryRecord>, DbError> {
                 cost_cif: row.get(3)?,
                 result_json: row.get(4)?,
                 csr_measured: row.get(5)?,
+                s_measured: row.get(6)?,
+                a_measured: row.get(7)?,
+                v_measured: row.get(8)?,
+                g_measured: row.get(9)?,
+                y_measured: row.get(10)?,
+                m_measured: row.get(11)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -481,9 +547,36 @@ pub fn clear_history(conn: &mut Connection) -> Result<(), DbError> {
 
 /// 回填某条记录的实测 CSR. id 不存在 → NotFound.
 pub fn set_measured_csr(conn: &mut Connection, id: i64, csr_measured: f64) -> Result<(), DbError> {
+    set_measured_quality(
+        conn,
+        id,
+        &MeasuredQuality {
+            csr: Some(csr_measured),
+            ..Default::default()
+        },
+    )
+}
+
+/// 回填某条记录的混煤实测化验 (部分字段). COALESCE 语义: 只更新提供的项,
+/// 未提供的保留已有值 (不清除). id 不存在 → NotFound.
+pub fn set_measured_quality(
+    conn: &mut Connection,
+    id: i64,
+    m: &MeasuredQuality,
+) -> Result<(), DbError> {
     let n = conn.execute(
-        "UPDATE blend_history SET csr_measured = ?2 WHERE id = ?1",
-        params![id, csr_measured],
+        r#"
+        UPDATE blend_history SET
+            s_measured   = COALESCE(?2, s_measured),
+            a_measured   = COALESCE(?3, a_measured),
+            v_measured   = COALESCE(?4, v_measured),
+            g_measured   = COALESCE(?5, g_measured),
+            y_measured   = COALESCE(?6, y_measured),
+            m_measured   = COALESCE(?7, m_measured),
+            csr_measured = COALESCE(?8, csr_measured)
+        WHERE id = ?1
+        "#,
+        params![id, m.s, m.a, m.v, m.g, m.y, m.m, m.csr],
     )?;
     if n == 0 {
         return Err(DbError::NotFound(format!("blend_history id={id}")));

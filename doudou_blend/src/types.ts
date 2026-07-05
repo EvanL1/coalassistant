@@ -32,6 +32,16 @@ export interface Spec {
   min?: number | null;
   max?: number | null;
   enabled?: boolean;
+  /** 安全余量: LP 内部上限收紧/下限抬高 margin, 展示仍用合同原界限. */
+  margin?: number | null;
+}
+
+/** 单煤煤岩数据 (MT/T 507 化验单: 反射率直方图 + 镜质组含量). */
+export interface Petrography {
+  /** [bin 中值 R(%), 频率] 列表, 频率可未归一化. */
+  hist: [number, number][];
+  /** 镜质组体积含量 (%), 混合权重修正用. */
+  vitrinite_pct: number;
 }
 
 export interface Coal {
@@ -39,6 +49,8 @@ export interface Coal {
   props: Partial<Record<string, number>>;
   fob: number;
   frt: number;
+  /** 可选煤岩数据; 提供时混煤 σ 走直方图精确计算. */
+  petrography?: Petrography | null;
 }
 
 /** 单次历史配煤观测: 混合后的 6 项指标 + 实测 CSR. 用于线性回归预测 CSR. */
@@ -89,6 +101,22 @@ export interface IndicatorCheck {
   binding: boolean;
 }
 
+/** 岩相凹口检测结果. */
+export interface Notch {
+  r: number;
+  depth_ratio: number;
+}
+
+/** 岩相精确校验 (直方图合成 + 全方差定律), 与线性代理值不同. */
+export interface PetrographyCheck {
+  mean: number;
+  sigma: number;
+  sigma_max?: number | null;
+  sigma_ok?: boolean | null;
+  notch?: Notch | null;
+  refine_iterations: number;
+}
+
 export interface BlendResult {
   ok: boolean;
   reason?: string | null;
@@ -96,6 +124,8 @@ export interface BlendResult {
   cost?: CostBreakdown | null;
   orders: OrderItem[];
   indicator_check: IndicatorCheck[];
+  /** 参配煤缺煤岩数据时无此字段. */
+  petrography_check?: PetrographyCheck | null;
   warnings: string[];
 }
 
@@ -109,7 +139,18 @@ export interface MixedIndicators {
   m: number;
 }
 
-/** 历史方案 (跨后端统一形状). mixed/csr_measured 支撑「回填实测焦质」. */
+/** 回填的混煤实测化验值. 缺省/null = 本次不更新该项. */
+export interface MeasuredQuality {
+  s?: number | null;
+  a?: number | null;
+  v?: number | null;
+  g?: number | null;
+  y?: number | null;
+  m?: number | null;
+  csr?: number | null;
+}
+
+/** 历史方案 (跨后端统一形状). mixed/实测各列支撑「回填实测焦质」数据闭环. */
 export interface HistoryRecord {
   id: string;
   occurred_at: string;
@@ -120,6 +161,13 @@ export interface HistoryRecord {
   mixed: MixedIndicators | null;
   /** 回填的实测 CSR (回归 y); null = 未回填. */
   csr_measured: number | null;
+  /** 混煤实测化验回填 (信任对照 + G 修正模型样本); null = 未回填. */
+  s_measured: number | null;
+  a_measured: number | null;
+  v_measured: number | null;
+  g_measured: number | null;
+  y_measured: number | null;
+  m_measured: number | null;
 }
 
 // ===== Master schema =====

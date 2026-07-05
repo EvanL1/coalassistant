@@ -8,7 +8,9 @@
 //!       * master 删除的煤 → 暂不处理 (避免误删用户引用)
 //!   - 默认合同: 只在首次启动时插入, 避免覆盖用户对默认合同的修改
 use crate::db::DbError;
-use blend_kit::{CoalMaster, CoalMasterEntry, Confidence, DefaultContract, Direction, MasterStatus};
+use blend_kit::{
+    CoalMaster, CoalMasterEntry, Confidence, DefaultContract, Direction, MasterStatus,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 
 const META_KEY_MASTER_VERSION: &str = "master_version";
@@ -93,7 +95,11 @@ fn upsert_coal(
 
     // 是否已存在 (仅用于 SeedReport 的 insert/update 统计)
     let was_insert = tx
-        .query_row("SELECT 1 FROM mines WHERE name = ?1", params![entry.name], |_| Ok(()))
+        .query_row(
+            "SELECT 1 FROM mines WHERE name = ?1",
+            params![entry.name],
+            |_| Ok(()),
+        )
         .optional()?
         .is_none();
 
@@ -122,20 +128,32 @@ fn upsert_coal(
             status_str,
             province,
             city,
-            p("S"), p("A"), p("V"), p("G"), p("Y"), p("petro"), p("CSR"), p("M"),
+            p("S"),
+            p("A"),
+            p("V"),
+            p("G"),
+            p("Y"),
+            p("petro"),
+            p("CSR"),
+            p("M"),
             entry.fob,
             entry.frt,
             entry.note.as_deref(),
         ],
     )?;
 
-    let mine_id: i64 =
-        tx.query_row("SELECT id FROM mines WHERE name = ?1", params![entry.name], |r| r.get(0))?;
+    let mine_id: i64 = tx.query_row(
+        "SELECT id FROM mines WHERE name = ?1",
+        params![entry.name],
+        |r| r.get(0),
+    )?;
 
     // 每字段可信度 (master 权威, upsert 语义)
     let mut indicators_written = 0;
     for (field, conf) in &entry.confidence {
-        let Some(col) = field_to_col(field) else { continue };
+        let Some(col) = field_to_col(field) else {
+            continue;
+        };
         tx.execute(
             r#"
             INSERT INTO mine_field_confidence (mine_id, field, confidence)
@@ -175,8 +193,24 @@ fn field_to_col(field: &str) -> Option<&'static str> {
 /// 匹配不到已知省名时, 整串作为 city, province 留空.
 fn split_region(region: Option<&str>) -> (Option<String>, Option<String>) {
     const PROVINCES: &[&str] = &[
-        "内蒙古", "黑龙江", "山西", "陕西", "河北", "河南", "山东", "宁夏",
-        "新疆", "甘肃", "青海", "贵州", "云南", "四川", "安徽", "辽宁", "吉林", "重庆",
+        "内蒙古",
+        "黑龙江",
+        "山西",
+        "陕西",
+        "河北",
+        "河南",
+        "山东",
+        "宁夏",
+        "新疆",
+        "甘肃",
+        "青海",
+        "贵州",
+        "云南",
+        "四川",
+        "安徽",
+        "辽宁",
+        "吉林",
+        "重庆",
     ];
     let r = match region {
         Some(r) if !r.is_empty() => r,
@@ -185,7 +219,10 @@ fn split_region(region: Option<&str>) -> (Option<String>, Option<String>) {
     for prov in PROVINCES {
         if let Some(rest) = r.strip_prefix(prov) {
             let city = rest.trim();
-            return (Some((*prov).to_string()), (!city.is_empty()).then(|| city.to_string()));
+            return (
+                Some((*prov).to_string()),
+                (!city.is_empty()).then(|| city.to_string()),
+            );
         }
     }
     (None, Some(r.to_string()))

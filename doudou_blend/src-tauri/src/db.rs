@@ -54,6 +54,17 @@ fn init_schema(conn: &mut Connection) -> Result<(), DbError> {
 fn migrate_blend_history(conn: &Connection) -> Result<(), DbError> {
     add_column_if_missing(conn, "blend_history", "contract_name", "TEXT")?;
     add_column_if_missing(conn, "blend_history", "csr_measured", "REAL")?;
+    // 混煤实测化验回填扩项 (调研 2026-07-04 阶段 0)
+    for col in [
+        "s_measured",
+        "a_measured",
+        "v_measured",
+        "g_measured",
+        "y_measured",
+        "m_measured",
+    ] {
+        add_column_if_missing(conn, "blend_history", col, "REAL")?;
+    }
     Ok(())
 }
 
@@ -107,17 +118,39 @@ mod tests {
 
         // 验证临北的指标写进 mines 宽表 + 生成列 cif + region 拆成省/市
         let (s, fob, frt, cif, province, city): (
-            Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<String>, Option<String>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<String>,
+            Option<String>,
         ) = conn
             .query_row(
                 "SELECT s, fob, frt, cif, province, city FROM mines WHERE name = ?1",
                 params!["临北"],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(s, Some(2.0), "临北 S 应为 2.0");
-        assert_eq!(cif, Some(fob.unwrap() + frt.unwrap()), "cif 生成列应等于 fob+frt");
-        assert_eq!(province.as_deref(), Some("山西"), "临北 region 应拆出省=山西");
+        assert_eq!(
+            cif,
+            Some(fob.unwrap() + frt.unwrap()),
+            "cif 生成列应等于 fob+frt"
+        );
+        assert_eq!(
+            province.as_deref(),
+            Some("山西"),
+            "临北 region 应拆出省=山西"
+        );
         assert_eq!(city.as_deref(), Some("吕梁"), "临北 region 应拆出市=吕梁");
 
         // 可信度写入 mine_field_confidence
@@ -172,7 +205,8 @@ mod tests {
             conn.execute(
                 "UPDATE contracts SET name = '用户自定义合同 A' WHERE is_default = 1",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // 第二次 open_and_init
@@ -227,7 +261,10 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].contract_name, "默认合同");
         assert_eq!(list[0].cost_cif, 1234.5);
-        assert_eq!(list[0].csr_measured, None, "未回填时 csr_measured 应为 None");
+        assert_eq!(
+            list[0].csr_measured, None,
+            "未回填时 csr_measured 应为 None"
+        );
 
         crate::db_queries::set_measured_csr(&mut conn, id, 65.3).unwrap();
         let list = crate::db_queries::list_history(&conn).unwrap();
@@ -241,7 +278,11 @@ mod tests {
 
         // 清空
         crate::db_queries::clear_history(&mut conn).unwrap();
-        assert_eq!(crate::db_queries::list_history(&conn).unwrap().len(), 0, "清空后应为空");
+        assert_eq!(
+            crate::db_queries::list_history(&conn).unwrap().len(),
+            0,
+            "清空后应为空"
+        );
     }
 
     /// 迁移幂等: 老库 (无 contract_name/csr_measured 列) 经 open_and_init 补列, 二次调用不报错.
@@ -279,17 +320,97 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
-        assert!(cols.contains(&"csr_measured".to_string()), "应补 csr_measured 列");
-        assert!(cols.contains(&"contract_name".to_string()), "应补 contract_name 列");
+        assert!(
+            cols.contains(&"csr_measured".to_string()),
+            "应补 csr_measured 列"
+        );
+        assert!(
+            cols.contains(&"contract_name".to_string()),
+            "应补 contract_name 列"
+        );
+        // 回填扩项 (调研 2026-07-04 阶段 0): 混煤实测 6 项一并落列
+        for c in [
+            "s_measured",
+            "a_measured",
+            "v_measured",
+            "g_measured",
+            "y_measured",
+            "m_measured",
+        ] {
+            assert!(cols.contains(&c.to_string()), "应补 {c} 列");
+        }
 
         // 迁移后写入/读取正常
         let mut conn = conn;
         let id = crate::db_queries::save_history(
-            &mut conn, "2026-06-30T11:00:00.000Z", "老库合同", 999.0, None, "{}",
+            &mut conn,
+            "2026-06-30T11:00:00.000Z",
+            "老库合同",
+            999.0,
+            None,
+            "{}",
         )
         .unwrap();
         crate::db_queries::set_measured_csr(&mut conn, id, 62.0).unwrap();
         let list = crate::db_queries::list_history(&conn).unwrap();
         assert_eq!(list[0].csr_measured, Some(62.0));
+    }
+
+    /// 回填实测化验: 部分字段回填 → 只更新提供的列; 二次回填不覆盖已有值.
+    #[test]
+    fn test_measured_quality_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let mut conn = open_and_init(&tmp.path().join("t.db")).unwrap();
+        let id = crate::db_queries::save_history(
+            &mut conn,
+            "2026-07-05T10:00:00.000Z",
+            "合同A",
+            1287.5,
+            None,
+            "{}",
+        )
+        .unwrap();
+
+        // 第一次: 只回填 G + CSR
+        crate::db_queries::set_measured_quality(
+            &mut conn,
+            id,
+            &crate::db_queries::MeasuredQuality {
+                g: Some(85.0),
+                csr: Some(62.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rows = crate::db_queries::list_history(&conn).unwrap();
+        assert_eq!(rows[0].g_measured, Some(85.0));
+        assert_eq!(rows[0].csr_measured, Some(62.0));
+        assert_eq!(rows[0].y_measured, None);
+
+        // 第二次: 只回填 Y → G/CSR 保持不变
+        crate::db_queries::set_measured_quality(
+            &mut conn,
+            id,
+            &crate::db_queries::MeasuredQuality {
+                y: Some(16.5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rows = crate::db_queries::list_history(&conn).unwrap();
+        assert_eq!(rows[0].g_measured, Some(85.0));
+        assert_eq!(rows[0].y_measured, Some(16.5));
+        assert_eq!(rows[0].csr_measured, Some(62.0));
+
+        // id 不存在 → NotFound
+        let err = crate::db_queries::set_measured_quality(
+            &mut conn,
+            9999,
+            &crate::db_queries::MeasuredQuality {
+                s: Some(0.8),
+                ..Default::default()
+            },
+        );
+        assert!(err.is_err(), "不存在的 id 应报错");
     }
 }

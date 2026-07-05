@@ -89,10 +89,7 @@ impl CoalMaster {
         self.coals.iter().find(|c| c.name == name)
     }
 
-    pub fn by_status<'a>(
-        &'a self,
-        status: MasterStatus,
-    ) -> impl Iterator<Item = &'a CoalMasterEntry> {
+    pub fn by_status(&self, status: MasterStatus) -> impl Iterator<Item = &CoalMasterEntry> {
         self.coals.iter().filter(move |c| c.status == status)
     }
 
@@ -104,7 +101,9 @@ impl CoalMaster {
 impl CoalMasterEntry {
     /// 是否有 S/A/V/G 基础四项.
     pub fn has_basic(&self) -> bool {
-        ["S", "A", "V", "G"].iter().all(|k| self.props.contains_key(*k))
+        ["S", "A", "V", "G"]
+            .iter()
+            .all(|k| self.props.contains_key(*k))
     }
 
     /// 是否有完整 8 项化验指标 (含 Y/petro/CSR/M).
@@ -122,7 +121,11 @@ impl CoalMasterEntry {
     /// 转换成 LP 用的 Coal.
     /// - 用 master 内的 fob/frt (若有)
     /// - 否则要求调用者传入 (fob_override, frt_override)
-    pub fn to_coal(&self, fob_override: Option<f64>, frt_override: Option<f64>) -> Option<crate::Coal> {
+    pub fn to_coal(
+        &self,
+        fob_override: Option<f64>,
+        frt_override: Option<f64>,
+    ) -> Option<crate::Coal> {
         if !self.has_basic() {
             return None;
         }
@@ -133,6 +136,7 @@ impl CoalMasterEntry {
             props: self.props.clone(),
             fob,
             frt,
+            petrography: None, // master 数据尚无煤岩直方图字段
         })
     }
 
@@ -164,7 +168,12 @@ mod tests {
         let master = CoalMaster::load_embedded().unwrap();
         for name in &["临北", "古交浮精", "豹子沟", "大佛寺"] {
             let entry = master.find(name).expect(name);
-            assert_eq!(entry.status, MasterStatus::Verified, "{} 应为 verified", name);
+            assert_eq!(
+                entry.status,
+                MasterStatus::Verified,
+                "{} 应为 verified",
+                name
+            );
             assert!(entry.is_production_ready(), "{} 应有完整 10 字段", name);
             assert!(entry.has_full_indicators(), "{} 应有 8 项指标", name);
         }
@@ -243,7 +252,11 @@ mod tests {
         let draft = master.by_status(MasterStatus::Draft).count();
         let incomplete = master.by_status(MasterStatus::Incomplete).count();
         let archived = master.by_status(MasterStatus::Archived).count();
-        assert_eq!(verified, 4, "verified 应正好 4 种 (主力煤): 实际 {}", verified);
+        assert_eq!(
+            verified, 4,
+            "verified 应正好 4 种 (主力煤): 实际 {}",
+            verified
+        );
         assert!(active >= 50, "active 应 ≥ 50");
         assert!(draft >= 2, "draft 应包含沙曲/贺西等");
         assert!(incomplete >= 5);

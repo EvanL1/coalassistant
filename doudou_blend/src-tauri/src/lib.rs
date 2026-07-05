@@ -178,6 +178,16 @@ fn set_measured_csr(
 }
 
 #[tauri::command]
+fn set_measured_quality(
+    state: tauri::State<AppState>,
+    id: i64,
+    measured: db_queries::MeasuredQuality,
+) -> Result<(), DbError> {
+    let mut conn = state.conn.lock().unwrap();
+    db_queries::set_measured_quality(&mut conn, id, &measured)
+}
+
+#[tauri::command]
 fn clear_history(state: tauri::State<AppState>) -> Result<(), DbError> {
     let mut conn = state.conn.lock().unwrap();
     db_queries::clear_history(&mut conn)
@@ -201,10 +211,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let app_data = app
-                .path()
-                .app_data_dir()
-                .expect("app_data_dir 不可用");
+            let app_data = app.path().app_data_dir().expect("app_data_dir 不可用");
             let db_path = app_data.join("doudou_blend.db");
             let conn = db::open_and_init(&db_path).expect("数据库初始化失败");
             app.manage(AppState {
@@ -227,6 +234,7 @@ pub fn run() {
             save_history,
             list_history,
             set_measured_csr,
+            set_measured_quality,
             clear_history,
         ])
         .run(tauri::generate_context!())

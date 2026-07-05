@@ -7,8 +7,8 @@
  *   - WASM 模块只初始化一次, 后续调用零开销
  */
 
-import { appendHistory, clearHistory as clearLocalHistory, getHistory, setMeasuredCsrLocal } from './storage';
-import type { BlendResult, HistoryRecord, MixedIndicators } from './types';
+import { appendHistory, clearHistory as clearLocalHistory, getHistory, setMeasuredQualityLocal } from './storage';
+import type { BlendResult, HistoryRecord, MeasuredQuality, MixedIndicators } from './types';
 
 type BackendKind = 'tauri' | 'wasm';
 
@@ -21,8 +21,8 @@ interface Backend {
   saveHistory: (result: BlendResult, contractName: string, quantity: number | null) => Promise<void>;
   /** 列出历史方案 (跨后端统一形状, 倒序). */
   listHistory: () => Promise<HistoryRecord[]>;
-  /** 回填: 给某条历史录入实测 CSR (回归 y). */
-  setMeasuredCsr: (id: string, csrMeasured: number) => Promise<void>;
+  /** 回填: 给某条历史录入混煤实测化验 (部分字段, 只更新提供的项). */
+  setMeasuredQuality: (id: string, measured: MeasuredQuality) => Promise<void>;
   /** 清空所有历史方案. */
   clearHistory: () => Promise<void>;
 }
@@ -79,6 +79,12 @@ async function makeTauriBackend(): Promise<Backend> {
         cost_cif: number;
         result_json: string;
         csr_measured: number | null;
+        s_measured: number | null;
+        a_measured: number | null;
+        v_measured: number | null;
+        g_measured: number | null;
+        y_measured: number | null;
+        m_measured: number | null;
       }>>('list_history');
       return rows.map((r) => {
         let recipe: Record<string, number> = {};
@@ -98,11 +104,17 @@ async function makeTauriBackend(): Promise<Backend> {
           recipe,
           mixed,
           csr_measured: r.csr_measured ?? null,
+          s_measured: r.s_measured ?? null,
+          a_measured: r.a_measured ?? null,
+          v_measured: r.v_measured ?? null,
+          g_measured: r.g_measured ?? null,
+          y_measured: r.y_measured ?? null,
+          m_measured: r.m_measured ?? null,
         };
       });
     },
-    setMeasuredCsr: async (id, csrMeasured) => {
-      await invoke('set_measured_csr', { id: Number(id), csrMeasured });
+    setMeasuredQuality: async (id, measured) => {
+      await invoke('set_measured_quality', { id: Number(id), measured });
     },
     clearHistory: async () => {
       await invoke('clear_history');
@@ -144,10 +156,16 @@ async function makeWasmBackend(): Promise<Backend> {
           recipe: e.recipe ?? {},
           mixed,
           csr_measured: e.csr_measured ?? null,
+          s_measured: e.s_measured ?? null,
+          a_measured: e.a_measured ?? null,
+          v_measured: e.v_measured ?? null,
+          g_measured: e.g_measured ?? null,
+          y_measured: e.y_measured ?? null,
+          m_measured: e.m_measured ?? null,
         };
       }),
-    setMeasuredCsr: async (id, csrMeasured) => {
-      setMeasuredCsrLocal(id, csrMeasured);
+    setMeasuredQuality: async (id, measured) => {
+      setMeasuredQualityLocal(id, measured);
     },
     clearHistory: async () => {
       clearLocalHistory();

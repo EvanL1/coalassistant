@@ -40,17 +40,14 @@ impl CsrPredictor {
     pub fn fit(observations: &[CsrObservation]) -> Result<Self, String> {
         let n = observations.len();
         if n < 7 {
-            return Err(format!(
-                "样本数不足: 需要至少 7 个观测, 实际 {}",
-                n
-            ));
+            return Err(format!("样本数不足: 需要至少 7 个观测, 实际 {}", n));
         }
 
         // 构造设计矩阵 X (n×7) 和目标向量 y (n).
         // 列顺序: [1, S, A, V, G, Y, M]
         const P: usize = 7;
         let mut xt_x = [[0f64; P]; P]; // XᵀX, 7×7
-        let mut xt_y = [0f64; P];      // Xᵀy, 7
+        let mut xt_y = [0f64; P]; // Xᵀy, 7
 
         for obs in observations {
             let row = [1.0, obs.s, obs.a, obs.v, obs.g, obs.y, obs.m];
@@ -75,13 +72,7 @@ impl CsrPredictor {
         gauss_jordan(&mut aug)?;
 
         let beta = [
-            aug[0][P],
-            aug[1][P],
-            aug[2][P],
-            aug[3][P],
-            aug[4][P],
-            aug[5][P],
-            aug[6][P],
+            aug[0][P], aug[1][P], aug[2][P], aug[3][P], aug[4][P], aug[5][P], aug[6][P],
         ];
 
         // 计算 R².
@@ -153,8 +144,8 @@ fn gauss_jordan(aug: &mut [[f64; 8]; 7]) -> Result<(), String> {
     const N: usize = 7;
     for col in 0..N {
         // 选列最大主元 (部分主元).
-        let pivot_row = (col..N)
-            .max_by(|&a, &b| aug[a][col].abs().partial_cmp(&aug[b][col].abs()).unwrap());
+        let pivot_row =
+            (col..N).max_by(|&a, &b| aug[a][col].abs().partial_cmp(&aug[b][col].abs()).unwrap());
         let pivot_row = pivot_row.unwrap();
         if aug[pivot_row][col].abs() < 1e-12 {
             return Err("矩阵奇异: 自变量之间存在完全共线性".into());
@@ -162,17 +153,21 @@ fn gauss_jordan(aug: &mut [[f64; 8]; 7]) -> Result<(), String> {
         aug.swap(col, pivot_row);
 
         let pivot = aug[col][col];
-        for j in col..=N {
-            aug[col][j] /= pivot;
+        for v in aug[col][col..=N].iter_mut() {
+            *v /= pivot;
         }
 
-        for row in 0..N {
+        let pivot_row_vals = aug[col]; // [f64; 8] 是 Copy, 复制后避免行间借用冲突
+        for (row, row_vals) in aug.iter_mut().enumerate() {
             if row == col {
                 continue;
             }
-            let factor = aug[row][col];
-            for j in col..=N {
-                aug[row][j] -= factor * aug[col][j];
+            let factor = row_vals[col];
+            for (v, &p) in row_vals[col..=N]
+                .iter_mut()
+                .zip(pivot_row_vals[col..=N].iter())
+            {
+                *v -= factor * p;
             }
         }
     }
@@ -203,7 +198,15 @@ mod tests {
                 let y = 10.0 + (t * 1.7).sin().abs() * 9.0;
                 let m = 8.0 + ((t * 0.3 + 0.5).cos().abs()) * 3.0;
                 let csr = 30.0 + 1.0 * s + 0.5 * a + 0.8 * v + 0.3 * g + 0.6 * y + 0.4 * m;
-                CsrObservation { s, a, v, g, y, m, csr_measured: csr }
+                CsrObservation {
+                    s,
+                    a,
+                    v,
+                    g,
+                    y,
+                    m,
+                    csr_measured: csr,
+                }
             })
             .collect()
     }
