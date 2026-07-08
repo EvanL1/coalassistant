@@ -45,9 +45,11 @@ export function IndexTicker() {
   const last = closes[closes.length - 1];
   const prev = closes[closes.length - 2];
   const pct = ((last - prev) / prev) * 100;
-  const up = pct >= 0;
-  // 国内习惯: 红涨绿跌
-  const color = up ? "var(--c-danger)" : "var(--c-success)";
+  const flat = pct === 0;
+  const up = pct > 0;
+  // 国内习惯: 红涨绿跌; 平盘中性灰
+  const color = flat ? "var(--c-text-3)" : up ? "var(--c-danger)" : "var(--c-success)";
+  const arrow = flat ? "" : up ? "▲+" : "▼";
   const lastDate = kline.points[kline.points.length - 1].date.slice(5); // MM-DD
 
   return (
@@ -66,8 +68,8 @@ export function IndexTicker() {
         {last.toFixed(1)}
       </span>
       <span style={{ color, fontWeight: 600 }}>
-        {up ? "▲+" : "▼"}
-        {pct.toFixed(2)}%
+        {arrow}
+        {Math.abs(pct).toFixed(2)}%
       </span>
       {kline.stale && <span style={{ fontSize: 10 }}>({lastDate})</span>}
       <span style={{ marginLeft: "auto", display: "flex" }}>
