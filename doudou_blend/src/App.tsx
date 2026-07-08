@@ -8,6 +8,7 @@ import { HistoryScreen } from "./screens/HistoryScreen";
 import { MeScreen } from "./screens/MeScreen";
 import { LoginScreen } from "./LoginScreen";
 import { isLoggedIn } from "./storage";
+import { IndexTicker } from "./IndexTicker";
 
 function App() {
   const [tab, setTab] = useState<TabId>("today");
@@ -27,7 +28,12 @@ function App() {
   return (
     <div className="app">
       <div className="app-content">
-        {tab === "today" && <TodayScreen onNavigate={setTab} />}
+        {tab === "today" && (
+          <>
+            <IndexTicker />
+            <TodayScreen onNavigate={setTab} />
+          </>
+        )}
         {tab === "pool" && <CoalPoolScreen />}
         {tab === "contract" && <ContractScreen />}
         {tab === "history" && <HistoryScreen />}
