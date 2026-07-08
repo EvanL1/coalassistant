@@ -42,7 +42,7 @@
 - sparkline：内联 SVG `<polyline>`，近 30 点，不引图表库
 - `stale` 时价格旁灰字标最后数据日期（MM-DD）
 - 无数据（离线且无缓存）→ 返回 `null`，整条不渲染
-- 挂载点：`TodayScreen` 顶部第一行
+- 挂载点：today tab 顶部第一行（实现挂在 `App.tsx` 的 today 分支：`TodayScreen` 有 loading/error/不可行/成功 4 个 return 分支，挂 App 层一处改动即可让窄条在所有状态下可见）
 
 ## 不做（YAGNI）
 
