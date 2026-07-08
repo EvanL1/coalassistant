@@ -31,7 +31,7 @@
 ### `src/index_quote.ts`（数据层，纯 TS，无 React）
 
 - `fetchJmKline(): Promise<JmKline | null>`，`JmKline = { points: { date: string; close: number }[], fetchedAt: string, stale: boolean }`
-- localStorage 缓存 key `doudou_jm_kline`；缓存 10 分钟内直接返回不发请求（今日屏每次切 tab 重挂载，避免反复打接口）
+- localStorage 缓存 key `doudou_blend.jm_kline.v1`（实现时按 `storage.ts` 现有 `doudou_blend.<name>.v1` 惯例定名，替代草稿里的 `doudou_jm_kline`）；缓存 10 分钟内直接返回不发请求（今日屏每次切 tab 重挂载，避免反复打接口）
 - fetch 失败 → 返回缓存并 `stale: true`；无缓存 → 返回 `null`
 - 响应解析独立成纯函数（无 IO），为将来补测留口
 
