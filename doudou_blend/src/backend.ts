@@ -55,12 +55,7 @@ async function makeTauriBackend(): Promise<Backend> {
   return {
     kind: 'tauri',
     solveJson: async (input) => invoke<string>('solve_blend', { inputJson: input }),
-    getMasterJson: async () => {
-      // Tauri 端目前没暴露 master JSON. 退化方案: 直接从前端 fetch 静态 JSON.
-      // 后续可以加 get_master_json command.
-      const resp = await fetch('/coal_master.json');
-      return resp.text();
-    },
+    getMasterJson: async () => invoke<string>('get_master_json'),
     getVersion: async () => invoke<string>('version'),
     saveHistory: async (result, contractName, quantity) => {
       await invoke('save_history', {

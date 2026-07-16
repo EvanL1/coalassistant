@@ -81,8 +81,8 @@ pub struct CoalMaster {
 impl CoalMaster {
     /// 加载嵌入到二进制中的 master JSON.
     pub fn load_embedded() -> Result<Self, String> {
-        let json = include_str!("../data/coal_master.json");
-        serde_json::from_str(json).map_err(|e| format!("master JSON 解析失败: {}", e))
+        serde_json::from_str(crate::master_json())
+            .map_err(|e| format!("master JSON 解析失败: {}", e))
     }
 
     pub fn find(&self, name: &str) -> Option<&CoalMasterEntry> {

@@ -116,14 +116,11 @@ npx @tauri-apps/cli android init && npx @tauri-apps/cli android build --apk --ta
   `"blend-kit-wasm": "file:../blend_kit_wasm/pkg"`, and that `pkg/` directory is gitignored. Even Tauri builds
   (which use IPC, not WASM, at runtime) fail to resolve the TypeScript import until `pkg/` exists. This is the
   #1 source of "fresh checkout won't build". Every CI job builds WASM first for exactly this reason.
-- **`doudou_blend/public/coal_master.json` is a hand-synced copy of `blend_kit_rs/data/coal_master.json`.**
-  The Tauri backend has no `get_master_json` command, so `makeTauriBackend` falls back to fetching the static
-  `/coal_master.json`. If you edit master data, update **both** files (they must stay byte-identical), or the
-  native app's coal pool silently diverges from the solver's embedded data.
-- **`doudou_blend/src/types.ts` is a hand-maintained mirror of the Rust schema.** Change a struct in
-  `blend_kit_rs/src/model.rs` (or its serde shape) and you must update `types.ts` to match — there is no
-  codegen for the app data types. The 8-indicator list `["S","A","V","G","Y","petro","CSR","M"]` and its
-  ordering are duplicated in both `model.rs` (`INDICATORS`) and `types.ts` (`INDICATOR_ORDER`).
+- **`blend_kit_rs/data/coal_master.json` is the only Master source.** `blend_kit::master_json()` serves the
+  same embedded bytes to the WASM wrapper, Tauri IPC, and SQLite seed. Do not add a frontend static copy.
+- **`doudou_blend/src/types.ts` mirrors the Rust schema.** Change a shared Rust struct, serde field, enum, or
+  indicator ordering together with its TypeScript definition. Run `npm run check:consistency` from
+  `doudou_blend/`; CI compares shared fields, enum values, indicator order, versions, documentation, and license.
 - **`blend_kit_wasm` disables `wasm-opt`** (bundled version is too old for Rust 1.82+ bulk-memory). Don't
   re-enable it. Size is already controlled via `opt-level="z"` + LTO.
 - **`Direction::Upper` ignores `spec.min`; `Direction::Lower` ignores `spec.max`** by design — only `Range`

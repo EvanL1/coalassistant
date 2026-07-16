@@ -3,7 +3,7 @@
  *
  * 入口: 煤池界面右上 + 按钮
  * 字段: 煤名 (必填) / 产地 / 煤类
- * 校验: 实时查重 (master 73 种 + 用户已新增), trim + 全角空格 + 大小写无关
+ * 校验: 实时查重 (Master + 用户已新增), trim + 全角空格 + 大小写无关
  * 新煤 status 默认 = "draft", 化验值留空, 后续在 CoalEditor 里补.
  */
 import { useEffect, useMemo, useState } from "react";

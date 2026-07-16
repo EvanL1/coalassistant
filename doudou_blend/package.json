@@ -2,8 +2,10 @@
   "name": "doudou_blend",
   "private": true,
   "version": "0.1.1",
+  "license": "MIT",
   "type": "module",
   "scripts": {
+    "check:consistency": "node ../scripts/check_repository_consistency.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

@@ -35,6 +35,11 @@ fn solve_blend(input_json: String) -> String {
     blend_kit::solve_json(&input_json)
 }
 
+#[tauri::command]
+fn get_master_json() -> String {
+    blend_kit::master_json().to_string()
+}
+
 // ============================================================
 // 数据库相关 commands
 // ============================================================
@@ -222,6 +227,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             version,
             solve_blend,
+            get_master_json,
             db_status,
             list_coals,
             get_coal,

@@ -16,6 +16,13 @@ pub use seed::{CoalMaster, CoalMasterEntry, Confidence, DefaultContract, MasterS
 pub use model::*;
 pub use optimizer::solve;
 
+/// 返回编译进核心 crate 的 Master JSON 原文.
+///
+/// WASM、Tauri 和 SQLite seed 都必须通过这个入口读取，避免维护静态副本.
+pub fn master_json() -> &'static str {
+    include_str!("../data/coal_master.json")
+}
+
 /// JSON in/out 入口 (前端通过此函数调用).
 pub fn solve_json(input_json: &str) -> String {
     let result = match serde_json::from_str::<BlendRequest>(input_json) {

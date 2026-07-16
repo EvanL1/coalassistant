@@ -56,7 +56,7 @@ export function CoalPoolScreen() {
     };
   }, []);
 
-  // master 73 种 + 用户新增的合并展示, 用户新增的排前 (新的更容易找到)
+  // Master + 用户新增的合并展示, 用户新增的排前 (新的更容易找到)
   const allCoals = useMemo<MasterCoalEntry[]>(
     () => (master ? [...userCoals, ...master.coals] : []),
     [master, userCoals],

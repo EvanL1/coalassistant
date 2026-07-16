@@ -211,7 +211,7 @@ export function setMeasuredQualityLocal(id: string, m: MeasuredQuality): void {
 // 用户新增的煤种
 // ============================================================
 //
-// master 73 种煤是只读 (嵌入 WASM), 用户新增的煤暂存这里.
+// Master 煤种是只读 (嵌入核心 crate), 用户新增的煤暂存这里.
 // 新增时仅录煤名/产地/煤类, 化验值后续在 CoalEditor 里补 (status=draft).
 // 注: 当前不参与求解, 等用户在 CoalEditor 补全化验值并启用后, 后续接求解器再说.
 

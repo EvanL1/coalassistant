@@ -3,6 +3,7 @@ name = "blend_kit"
 version = "0.1.1"
 edition = "2021"
 description = "豆哥配煤 - 配煤优化核心算法 (Rust)"
+license = "MIT"
 
 [lib]
 name = "blend_kit"

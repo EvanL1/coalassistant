@@ -25,13 +25,11 @@ pub fn solve_json(input_json: &str) -> String {
     blend_kit::solve_json(input_json)
 }
 
-/// 返回嵌入的 master 数据库 JSON.
-/// 前端首次启动时调用, 显示 73+ 煤种 + 默认合同.
+/// 返回核心 crate 嵌入的 Master 数据库 JSON.
 #[wasm_bindgen(js_name = getMasterJson)]
 pub fn get_master_json() -> String {
     init_panic_hook();
-    // 直接读嵌入的 master JSON 原文 (避免反序列化再序列化的开销)
-    include_str!("../../blend_kit_rs/data/coal_master.json").to_string()
+    blend_kit::master_json().to_string()
 }
 
 /// 返回 crate 版本, 给前端做版本检查用.
