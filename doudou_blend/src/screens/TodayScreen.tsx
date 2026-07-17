@@ -16,7 +16,11 @@ import type {
   BlendRequest,
   BlendResult,
   Coal,
+  EvaluationMethod,
+  EvaluationStatus,
+  IndicatorCheck,
   MasterCoalEntry,
+  QualityStatus,
   Spec,
 } from "../types";
 import type { TabId } from "../TabBar";
@@ -47,6 +51,52 @@ function formatPrice(n: number): { int: string; dec: string } {
   return { int: intPart, dec: decPart };
 }
 
+const QUALITY_STATUS_LABEL: Record<QualityStatus, string> = {
+  Verified: "已验证",
+  Estimated: "估算",
+  NeedsReview: "需复核",
+};
+
+const EVALUATION_STATUS_LABEL: Record<EvaluationStatus, string> = {
+  Pass: "通过",
+  TolerancePass: "容差通过",
+  Unverified: "未验证",
+  Fail: "未通过",
+};
+
+const EVALUATION_METHOD_LABEL: Record<EvaluationMethod, string> = {
+  Linear: "线性加权",
+  ProvisionalLinear: "暂行线性",
+  AffineCalibration: "仿射校准",
+  Histogram: "直方图复验",
+  Moments: "统计矩复验",
+  Regression: "回归预测",
+  Unavailable: "无法评估",
+};
+
+function legacyEvaluationStatus(check: IndicatorCheck): EvaluationStatus {
+  return check.slack != null && check.slack < -0.01 ? "Fail" : "Pass";
+}
+
+function evaluationStatus(check: IndicatorCheck): EvaluationStatus {
+  return check.status ?? legacyEvaluationStatus(check);
+}
+
+function isIndicatorPassing(check: IndicatorCheck): boolean {
+  const status = evaluationStatus(check);
+  return status !== "Fail" && check.method !== "Unavailable";
+}
+
+function isContractIndicator(check: IndicatorCheck): boolean {
+  return check.min != null || check.max != null;
+}
+
+function formatIndicatorValue(value: number): string {
+  return value
+    .toFixed(4)
+    .replace(/\.?0+$/, "");
+}
+
 /** 把求解结果格式化成可复制的采购清单文本 (纯函数). */
 function buildOrderText(
   result: BlendResult,
@@ -55,17 +105,19 @@ function buildOrderText(
   quantity: number,
 ): string {
   const cost = result.cost;
-  const total = result.indicator_check.length;
-  const passing = result.indicator_check.filter(
-    (ic) => ic.slack == null || ic.slack >= -0.01,
-  ).length;
+  const contractChecks = result.indicator_check.filter(isContractIndicator);
+  const total = contractChecks.length;
+  const passing = contractChecks.filter(isIndicatorPassing).length;
   const yuan = (n: number) => `¥${Math.round(n).toLocaleString("zh-CN")}`;
 
   const lines: string[] = [];
   lines.push(`【豆哥配煤】${isoDate}`);
   lines.push(`合同: ${contractName || "默认合同"} | 总量 ${quantity} 吨`);
   if (cost) {
-    lines.push(`到厂价 ${cost.cif_per_ton.toFixed(2)} 元/吨 | 达标 ${passing}/${total}`);
+    const quality = QUALITY_STATUS_LABEL[result.quality_status ?? "Estimated"];
+    lines.push(
+      `到厂价 ${cost.cif_per_ton.toFixed(2)} 元/吨 | 数值界内 ${passing}/${total} | 质量 ${quality}`,
+    );
   }
   lines.push("──────────────────");
   for (const o of [...result.orders].sort((a, b) => b.ratio - a.ratio)) {
@@ -116,11 +168,15 @@ function applyOverrides(coal: MasterCoalEntry, prefs: CoalPrefs): Coal | null {
   // 合并 props: master + override
   const props: Record<string, number> = {};
   for (const [k, v] of Object.entries(coal.props)) {
-    if (v != null) props[k] = v;
+    if (v != null) {
+      props[k] = v;
+    }
   }
   if (pref?.props_override) {
     for (const [k, v] of Object.entries(pref.props_override)) {
-      if (v != null) props[k] = v;
+      if (v != null) {
+        props[k] = v;
+      }
     }
   }
 
@@ -172,7 +228,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
     if (initial) setState({ status: "loading" });
     else setRecompute("running");
     try {
-      const master = await loadMaster();
+      const [master, backend] = await Promise.all([loadMaster(), getBackend()]);
       const prefs = getCoalPrefs();
       const userContract = getUserContract();
       const userCoals = getUserCoals();
@@ -207,7 +263,6 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         truncate_decimal: true,
       };
 
-      const backend = await getBackend();
       const json = await backend.solveJson(JSON.stringify(request));
       const result: BlendResult = JSON.parse(json);
       setState({
@@ -230,7 +285,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   async function saveToHistory() {
     if (state.status !== "ok" || !state.result?.cost || !state.result.ok) return;
     const backend = await getBackend();
-    // 存完整 result: 混合后指标(回归 X)随之留存, 供「历史」页回填实测 CSR.
+    // 保存完整结果，供历史页展示和后续复核。
     await backend.saveHistory(state.result, state.contractName || "", getQuantity());
     setSaveFlag(true);
     setTimeout(() => setSaveFlag(false), 2000);
@@ -313,10 +368,10 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
 
   const cost = result.cost!;
   const { int: costInt, dec: costDec } = formatPrice(cost.cif_per_ton);
-  const totalIndicators = result.indicator_check.length;
-  const passing = result.indicator_check.filter(
-    (ic) => ic.slack == null || ic.slack >= -0.01
-  ).length;
+  const contractChecks = result.indicator_check.filter(isContractIndicator);
+  const totalIndicators = contractChecks.length;
+  const passing = contractChecks.filter(isIndicatorPassing).length;
+  const qualityStatus = result.quality_status ?? "Estimated";
   const today = new Date();
   const dateStr = `${today.getFullYear()} 年 ${today.getMonth() + 1} 月 ${today.getDate()} 日`;
 
@@ -385,7 +440,10 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </div>
         <div className="cost-meta">
           <span className="badge">
-            {passing}/{totalIndicators} 项达标
+            {passing}/{totalIndicators} 项数值界内
+          </span>
+          <span className="badge">
+            质量：{QUALITY_STATUS_LABEL[qualityStatus]}
           </span>
           <span style={{ opacity: 0.85 }}>
             {enabledCount} 种煤可选
@@ -457,7 +515,10 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         >
           <span>混合指标</span>
           <span style={{ fontSize: 11, color: "var(--c-text-3)" }}>
-            vs {contractName}
+            {QUALITY_STATUS_LABEL[qualityStatus]}
+            {result.evaluation_iterations != null
+              ? ` · ${result.evaluation_iterations} 轮评估`
+              : ""}
           </span>
         </div>
         <div className="indicator-grid">
@@ -475,10 +536,24 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
                 </div>
               );
             }
-            const violated = ic.slack != null && ic.slack < -0.01;
+            const status = evaluationStatus(ic);
+            const violated = status === "Fail";
+            const unverified = status === "Unverified";
             const className = `indicator-cell ${
-              ic.binding ? "binding" : violated ? "violated" : ""
+              violated
+                ? "violated"
+                : unverified
+                  ? "unverified"
+                  : ic.binding
+                    ? "binding"
+                    : ""
             }`;
+            const rawValue = ic.evaluated_value ?? ic.value;
+            const judgedValue = ic.judged_value ?? rawValue;
+            const proxyValue = ic.proxy_value;
+            const method = ic.method ?? "Linear";
+            const unavailable =
+              method === "Unavailable" && ic.evaluated_value == null;
             let rangeStr = "—";
             if (ic.min != null && ic.max != null)
               rangeStr = `${ic.min}-${ic.max}`;
@@ -487,9 +562,36 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             return (
               <div key={key} className={className}>
                 <div className="indicator-label">{label}</div>
-                <div className="indicator-value">{ic.value.toFixed(2)}</div>
+                <div className="indicator-value-row">
+                  <div className="indicator-value">
+                    {unavailable ? "—" : formatIndicatorValue(judgedValue)}
+                  </div>
+                  <span
+                    className={`evaluation-pill evaluation-${status.toLowerCase()}`}
+                  >
+                    {EVALUATION_STATUS_LABEL[status]}
+                  </span>
+                </div>
                 <div className="indicator-meta">
-                  {rangeStr} {ic.binding ? "★ 顶格" : violated ? "✗" : "✓"}
+                  {unavailable
+                    ? "缺少可用指标或评估输入"
+                    : `原始 ${formatIndicatorValue(rawValue)} · 判定 ${formatIndicatorValue(judgedValue)}`}
+                </div>
+                <div className="indicator-meta">
+                  {rangeStr}
+                  {ic.binding && !violated ? " · ★ 顶格" : ""}
+                  {ic.uncertainty != null
+                    ? ` · ±${formatIndicatorValue(ic.uncertainty)}`
+                    : ""}
+                </div>
+                <div className="indicator-meta indicator-method">
+                  {EVALUATION_METHOD_LABEL[method]}
+                  {proxyValue != null &&
+                  Math.abs(proxyValue - rawValue) > 0.000001
+                    ? ` · 代理 ${formatIndicatorValue(proxyValue)}`
+                    : ""}
+                  {ic.model?.version ? ` · ${ic.model.version}` : ""}
+                  {ic.model?.in_domain === false ? " · 训练域外" : ""}
                 </div>
               </div>
             );

@@ -1,6 +1,23 @@
 /** 跟 blend_kit_rs schema 对齐的 TypeScript 类型. */
 
 export type IndicatorKey = "S" | "A" | "V" | "G" | "Y" | "petro" | "CSR" | "M";
+export type AcceptanceMode = "Raw" | "Truncate" | "Round";
+export type Enforcement = "Hard" | "Soft" | "Advisory";
+export type EvaluationMethod =
+  | "Linear"
+  | "ProvisionalLinear"
+  | "AffineCalibration"
+  | "Histogram"
+  | "Moments"
+  | "Regression"
+  | "Unavailable";
+export type EvaluationStatus =
+  | "Pass"
+  | "TolerancePass"
+  | "Unverified"
+  | "Fail";
+export type QualityStatus = "Verified" | "Estimated" | "NeedsReview";
+export type ModelKind = "GAffine" | "CsrRidge";
 
 export const INDICATOR_LABEL: Record<string, string> = {
   S: "硫",
@@ -26,6 +43,12 @@ export const INDICATOR_ORDER: IndicatorKey[] = [
 
 export type Direction = "Upper" | "Lower" | "Range";
 
+export interface AcceptanceRule {
+  mode: AcceptanceMode;
+  decimals?: number | null;
+  tolerance: number;
+}
+
 export interface Spec {
   indicator: string;
   direction: Direction;
@@ -34,14 +57,20 @@ export interface Spec {
   enabled?: boolean;
   /** 安全余量: LP 内部上限收紧/下限抬高 margin, 展示仍用合同原界限. */
   margin?: number | null;
+  acceptance?: AcceptanceRule | null;
+  enforcement?: Enforcement;
 }
 
 /** 单煤煤岩数据 (MT/T 507 化验单: 反射率直方图 + 镜质组含量). */
 export interface Petrography {
   /** [bin 中值 R(%), 频率] 列表, 频率可未归一化. */
-  hist: [number, number][];
+  hist?: [number, number][];
   /** 镜质组体积含量 (%), 混合权重修正用. */
   vitrinite_pct: number;
+  /** 没有直方图时可提供平均反射率. */
+  mean?: number | null;
+  /** 没有直方图时可提供反射率标准差. */
+  std_dev?: number | null;
 }
 
 export interface Coal {
@@ -53,15 +82,15 @@ export interface Coal {
   petrography?: Petrography | null;
 }
 
-/** 单次历史配煤观测: 混合后的 6 项指标 + 实测 CSR. 用于线性回归预测 CSR. */
-export interface CsrObservation {
-  s: number;
-  a: number;
-  v: number;
-  g: number;
-  y: number;
-  m: number;
-  csr_measured: number;
+/** 本次指标评估实际采用的模型摘要. */
+export interface ModelSummary {
+  version: string;
+  kind: ModelKind;
+  sample_count: number;
+  cv_mae: number;
+  p90_abs_error: number;
+  bias: number;
+  in_domain: boolean;
 }
 
 export interface BlendRequest {
@@ -69,8 +98,6 @@ export interface BlendRequest {
   specs: Spec[];
   total_quantity?: number | null;
   truncate_decimal?: boolean;
-  /** 可选: 提供历史观测时, 用回归预测覆盖各煤 CSR. */
-  csr_observations?: CsrObservation[] | null;
 }
 
 export interface CostBreakdown {
@@ -99,6 +126,14 @@ export interface IndicatorCheck {
   max?: number | null;
   slack?: number | null;
   binding: boolean;
+  proxy_value?: number | null;
+  evaluated_value?: number | null;
+  judged_value?: number | null;
+  uncertainty?: number | null;
+  /** 旧历史结果可能缺失；界面按线性/传统 slack 兼容显示. */
+  method?: EvaluationMethod;
+  status?: EvaluationStatus;
+  model?: ModelSummary | null;
 }
 
 /** 岩相凹口检测结果. */
@@ -127,6 +162,9 @@ export interface BlendResult {
   /** 参配煤缺煤岩数据时无此字段. */
   petrography_check?: PetrographyCheck | null;
   warnings: string[];
+  /** 以下字段由混合质量引擎写入；旧历史结果可能缺失. */
+  quality_status?: QualityStatus;
+  evaluation_iterations?: number;
 }
 
 /** 混合后 6 项指标 (CSR 回归自变量 X). */

@@ -1,6 +1,6 @@
 //! 用 master 数据库的 4 种 verified 主力煤 + 默认合同跑配煤求解.
 //! 这是 APP 首次启动后的"out-of-the-box"场景.
-use blend_kit::{solve, BlendRequest, CoalMaster, MasterStatus};
+use blend_kit::{solve, BlendRequest, CoalMaster, Enforcement, EvaluationStatus, MasterStatus};
 
 fn main() {
     println!("===== 加载 master =====");
@@ -52,7 +52,12 @@ fn main() {
             (None, Some(hi)) => format!("≤ {}", hi),
             (None, None) => "无约束".into(),
         };
-        println!("  {} {}", s.indicator, constraint);
+        let enforcement = match s.enforcement {
+            Enforcement::Hard => "Hard",
+            Enforcement::Soft => "Soft",
+            Enforcement::Advisory => "Advisory",
+        };
+        println!("  {} {} [{}]", s.indicator, constraint, enforcement);
     }
     println!();
 
@@ -61,7 +66,6 @@ fn main() {
         specs: master.default_contract.specs.clone(),
         total_quantity: Some(3700.0),
         truncate_decimal: true,
-        csr_observations: None,
     };
     let r = solve(&req);
 
@@ -101,12 +105,12 @@ fn main() {
             (None, Some(hi)) => format!("≤{}", hi),
             (None, None) => "—".into(),
         };
-        let status = if ic.binding {
-            "★ 顶格"
-        } else if ic.slack.map(|s| s < -1e-6).unwrap_or(false) {
-            "✗ 违反"
-        } else {
-            "✓"
+        let status = match ic.status {
+            EvaluationStatus::Fail => "✗ 违反",
+            EvaluationStatus::Unverified => "△ 未验证",
+            EvaluationStatus::TolerancePass => "≈ 判定通过",
+            EvaluationStatus::Pass if ic.binding => "★ 顶格",
+            EvaluationStatus::Pass => "✓",
         };
         println!(
             "  {:10} {:>7.3}  {:>10}  {}",

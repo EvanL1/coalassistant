@@ -1,6 +1,6 @@
 //! 豆哥配煤 - 8 煤 + 8 指标完整场景 demo.
 //! 跑你昨晚验证的架构: FOB/FRT 拆分 + 三视图输出.
-use blend_kit::{coal_from_tuple, label_zh, solve, BlendRequest, Spec};
+use blend_kit::{coal_from_tuple, label_zh, solve, BlendRequest, EvaluationStatus, Spec};
 use std::time::Instant;
 
 fn main() {
@@ -55,7 +55,6 @@ fn main() {
         specs,
         total_quantity: Some(3700.0),
         truncate_decimal: true,
-        csr_observations: None,
     };
 
     println!("===== 豆哥配煤 Rust 核心 =====");
@@ -120,8 +119,8 @@ fn main() {
     // 视图 C: 指标体检 (附 binding 标记)
     println!("─── 视图 C · 指标体检 (质检/销售) ───");
     println!(
-        "  {:<10} {:>8} {:>14} {:>10} {}",
-        "指标", "实际值", "范围", "余量", "状态"
+        "  {:<10} {:>8} {:>14} {:>10} 状态",
+        "指标", "实际值", "范围", "余量"
     );
     for ic in &r.indicator_check {
         let range = match (ic.min, ic.max) {
@@ -130,12 +129,12 @@ fn main() {
             (None, Some(hi)) => format!("≤{:.1}", hi),
             (None, None) => "—".into(),
         };
-        let status = if ic.binding {
-            "★ binding (顶格)"
-        } else if ic.slack.map(|s| s < -1e-6).unwrap_or(false) {
-            "✗ 违反"
-        } else {
-            "✓"
+        let status = match ic.status {
+            EvaluationStatus::Fail => "✗ 违反",
+            EvaluationStatus::Unverified => "△ 未验证",
+            EvaluationStatus::TolerancePass => "≈ 判定通过",
+            EvaluationStatus::Pass if ic.binding => "★ binding (顶格)",
+            EvaluationStatus::Pass => "✓",
         };
         let slack_str = ic
             .slack

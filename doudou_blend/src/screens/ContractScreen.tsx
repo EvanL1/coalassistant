@@ -11,7 +11,30 @@ import {
   clearUserContract,
 } from "../storage";
 import { INDICATOR_LABEL } from "../types";
-import type { CoalMaster, Spec } from "../types";
+import type {
+  AcceptanceMode,
+  CoalMaster,
+  Enforcement,
+  Spec,
+} from "../types";
+
+const ACCEPTANCE_OPTIONS: ReadonlyArray<{
+  value: AcceptanceMode;
+  label: string;
+}> = [
+  { value: "Raw", label: "按原值" },
+  { value: "Truncate", label: "截断判定" },
+  { value: "Round", label: "四舍五入" },
+];
+
+const ENFORCEMENT_OPTIONS: ReadonlyArray<{
+  value: Enforcement;
+  label: string;
+}> = [
+  { value: "Hard", label: "硬约束" },
+  { value: "Soft", label: "软约束" },
+  { value: "Advisory", label: "仅提示" },
+];
 
 interface FormSpec {
   indicator: string;
@@ -19,27 +42,64 @@ interface FormSpec {
   min: string;
   max: string;
   enabled: boolean;
+  margin: string;
+  acceptanceMode: AcceptanceMode;
+  decimals: string;
+  tolerance: string;
+  enforcement: Enforcement;
 }
 
 function specToForm(s: Spec): FormSpec {
+  const legacyAcceptance: AcceptanceMode =
+    s.indicator === "petro" ? "Raw" : "Truncate";
   return {
     indicator: s.indicator,
     direction: s.direction,
     min: s.min != null ? String(s.min) : "",
     max: s.max != null ? String(s.max) : "",
     enabled: s.enabled !== false,
+    margin: s.margin != null ? String(s.margin) : "",
+    acceptanceMode: s.acceptance?.mode ?? legacyAcceptance,
+    decimals:
+      s.acceptance?.decimals != null
+        ? String(s.acceptance.decimals)
+        : legacyAcceptance === "Raw"
+          ? ""
+          : "1",
+    tolerance:
+      s.acceptance?.tolerance != null ? String(s.acceptance.tolerance) : "",
+    enforcement: s.enforcement ?? "Hard",
   };
 }
 
+function optionalNumber(value: string): number | null {
+  if (value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function formToSpec(f: FormSpec): Spec {
-  const min = f.min.trim() === "" ? null : parseFloat(f.min);
-  const max = f.max.trim() === "" ? null : parseFloat(f.max);
+  const min = optionalNumber(f.min);
+  const max = optionalNumber(f.max);
+  const margin = optionalNumber(f.margin);
+  const decimals = optionalNumber(f.decimals);
+  const tolerance = optionalNumber(f.tolerance);
   return {
     indicator: f.indicator,
     direction: f.direction,
-    min: Number.isFinite(min) ? min : null,
-    max: Number.isFinite(max) ? max : null,
+    min,
+    max,
     enabled: f.enabled,
+    margin: margin == null ? null : Math.max(0, margin),
+    acceptance: {
+      mode: f.acceptanceMode,
+      decimals:
+        f.acceptanceMode === "Raw"
+          ? null
+          : Math.min(6, Math.max(0, Math.trunc(decimals ?? 1))),
+      tolerance: Math.max(0, tolerance ?? 0),
+    },
+    enforcement: f.enforcement,
   };
 }
 
@@ -121,7 +181,7 @@ export function ContractScreen() {
           padding: "0 4px",
         }}
       >
-        提示: 改完合同后回到「今日」tab, 点重新计算就会用新合同求解
+        提示: 截断/四舍五入决定边界值如何判定；约束安全余量用于主动收紧求解边界。
       </div>
     </>
   );
@@ -137,6 +197,13 @@ function SpecRow({
   isLast: boolean;
 }) {
   const label = INDICATOR_LABEL[spec.indicator] || spec.indicator;
+  const enforcementLabel =
+    ENFORCEMENT_OPTIONS.find((option) => option.value === spec.enforcement)
+      ?.label ?? spec.enforcement;
+  const acceptanceLabel =
+    ACCEPTANCE_OPTIONS.find(
+      (option) => option.value === spec.acceptanceMode,
+    )?.label ?? spec.acceptanceMode;
 
   return (
     <div
@@ -210,6 +277,83 @@ function SpecRow({
           />
         )}
       </div>
+
+      <details style={{ marginTop: 8 }}>
+        <summary
+          style={{
+            cursor: "pointer",
+            color: "var(--c-text-3)",
+            fontSize: 10,
+          }}
+        >
+          判定设置 · {enforcementLabel} · {acceptanceLabel}
+        </summary>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 8,
+            marginTop: 8,
+            paddingTop: 8,
+            borderTop: "1px dashed var(--c-border)",
+          }}
+        >
+          <SelectInput
+            label="约束级别"
+            value={spec.enforcement}
+            disabled={!spec.enabled}
+            options={ENFORCEMENT_OPTIONS}
+            onChange={(v) => onChange({ enforcement: v as Enforcement })}
+          />
+          <SelectInput
+            label="判定方式"
+            value={spec.acceptanceMode}
+            disabled={!spec.enabled}
+            options={ACCEPTANCE_OPTIONS}
+            onChange={(v) =>
+              onChange({ acceptanceMode: v as AcceptanceMode })
+            }
+          />
+          <NumberInput
+            label="判定小数位"
+            value={spec.acceptanceMode === "Raw" ? "—" : spec.decimals}
+            disabled={!spec.enabled || spec.acceptanceMode === "Raw"}
+            min={0}
+            max={6}
+            step={1}
+            onChange={(v) => onChange({ decimals: v })}
+          />
+          <NumberInput
+            label="额外容差"
+            value={spec.tolerance}
+            disabled={!spec.enabled}
+            min={0}
+            step="any"
+            onChange={(v) => onChange({ tolerance: v })}
+          />
+          <NumberInput
+            label="安全余量（仅硬约束）"
+            value={spec.margin}
+            disabled={!spec.enabled || spec.enforcement !== "Hard"}
+            min={0}
+            step="any"
+            onChange={(v) => onChange({ margin: v })}
+          />
+        </div>
+        <div
+          style={{
+            marginTop: 6,
+            color: "var(--c-text-3)",
+            fontSize: 10,
+          }}
+        >
+          {spec.enforcement === "Hard"
+            ? "硬约束参与求解并决定方案可行性"
+            : spec.enforcement === "Soft"
+              ? "软约束允许输出，但会标记偏差"
+              : "仅提示项不限制最低成本方案"}
+        </div>
+      </details>
     </div>
   );
 }
@@ -218,11 +362,17 @@ function NumberInput({
   label,
   value,
   disabled,
+  min,
+  max,
+  step,
   onChange,
 }: {
   label: string;
   value: string;
   disabled?: boolean;
+  min?: number;
+  max?: number;
+  step?: number | "any";
   onChange: (v: string) => void;
 }) {
   return (
@@ -243,6 +393,9 @@ function NumberInput({
         inputMode="decimal"
         value={value === "—" ? "" : value}
         disabled={disabled}
+        min={min}
+        max={max}
+        step={step}
         placeholder={value === "—" ? "—" : "—"}
         onChange={(e) => onChange(e.target.value)}
         style={{
@@ -257,6 +410,57 @@ function NumberInput({
           padding: 0,
         }}
       />
+    </label>
+  );
+}
+
+function SelectInput({
+  label,
+  value,
+  disabled,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  disabled?: boolean;
+  options: ReadonlyArray<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label
+      style={{
+        background: "var(--c-bg)",
+        borderRadius: 8,
+        padding: "8px 10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      <span style={{ fontSize: 10, color: "var(--c-text-3)" }}>{label}</span>
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          background: "transparent",
+          border: "none",
+          outline: "none",
+          fontSize: 13,
+          fontWeight: 600,
+          fontFamily: "inherit",
+          color: "var(--c-text)",
+          padding: 0,
+        }}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
     </label>
   );
 }

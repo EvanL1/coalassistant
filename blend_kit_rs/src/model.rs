@@ -85,11 +85,54 @@ pub enum Direction {
     Range,
 }
 
+/// 合同值采用的报告判定方式.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AcceptanceMode {
+    #[default]
+    Raw,
+    Truncate,
+    Round,
+}
+
+/// 业务判定规则. `tolerance` 是合同允许的向外偏差，不是模型安全余量.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcceptanceRule {
+    #[serde(default)]
+    pub mode: AcceptanceMode,
+    #[serde(default)]
+    pub decimals: Option<u8>,
+    #[serde(default)]
+    pub tolerance: f64,
+}
+
+impl Default for AcceptanceRule {
+    fn default() -> Self {
+        Self {
+            mode: AcceptanceMode::Raw,
+            decimals: None,
+            tolerance: 0.0,
+        }
+    }
+}
+
+/// 约束在优化中的执行强度.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Enforcement {
+    /// 进入 LP；无法满足时不返回配方.
+    #[default]
+    Hard,
+    /// 不阻断求解，但超界会将总体质量状态降为 NeedsReview.
+    Soft,
+    /// 只展示结果，不影响总体质量状态.
+    Advisory,
+}
+
 /// 单条合同约束.
 ///
 /// 设计:
 ///   enabled = false → LP 完全跳过此约束
-///   enabled = true 但煤池缺数据 → 自动剔除缺数据的煤, 加 warning
+///   Hard 且煤池缺输入 → 自动剔除缺输入的煤, 加 warning
+///   Soft/Advisory → 不改变候选煤池
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Spec {
     pub indicator: String,
@@ -103,6 +146,12 @@ pub struct Spec {
     /// (调研 2026-07-04 §2). None = 不收紧.
     #[serde(default)]
     pub margin: Option<f64>,
+    /// 逐指标业务判定规则. None 时兼容 `BlendRequest.truncate_decimal`.
+    #[serde(default)]
+    pub acceptance: Option<AcceptanceRule>,
+    /// Hard/Soft/Advisory. 旧请求默认为 Hard.
+    #[serde(default)]
+    pub enforcement: Enforcement,
 }
 
 fn default_enabled() -> bool {
@@ -118,6 +167,8 @@ impl Spec {
             max: Some(max),
             enabled: true,
             margin: None,
+            acceptance: None,
+            enforcement: Enforcement::Hard,
         }
     }
     pub fn lower(indicator: &str, min: f64) -> Self {
@@ -128,6 +179,8 @@ impl Spec {
             max: None,
             enabled: true,
             margin: None,
+            acceptance: None,
+            enforcement: Enforcement::Hard,
         }
     }
     pub fn range(indicator: &str, min: f64, max: f64) -> Self {
@@ -138,6 +191,40 @@ impl Spec {
             max: Some(max),
             enabled: true,
             margin: None,
+            acceptance: None,
+            enforcement: Enforcement::Hard,
+        }
+    }
+}
+
+/// 一次混煤的线性 G 代理与实测 G 对照.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GObservation {
+    pub g_linear: f64,
+    pub g_measured: f64,
+}
+
+/// 可选评估器的启用门槛. 样本数只是底线，最终门控使用交叉验证误差.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelPolicy {
+    pub min_g_samples: usize,
+    pub min_csr_samples: usize,
+    pub max_g_cv_mae: f64,
+    pub max_csr_cv_mae: f64,
+    pub extrapolation_ratio: f64,
+    pub ridge_lambda: f64,
+}
+
+impl Default for ModelPolicy {
+    fn default() -> Self {
+        Self {
+            min_g_samples: 20,
+            min_csr_samples: 30,
+            max_g_cv_mae: 4.0,
+            max_csr_cv_mae: 5.0,
+            extrapolation_ratio: 0.1,
+            ridge_lambda: 1e-3,
         }
     }
 }
@@ -152,10 +239,6 @@ pub struct BlendRequest {
     /// 是否启用一位小数截断规则.
     #[serde(default = "default_truncate")]
     pub truncate_decimal: bool,
-    /// 可选: 历史 [混合指标 → 实测 CSR] 观测.
-    /// 提供且样本足够时, 用线性回归预测覆盖各煤 CSR; 不提供则保持各煤录入的 CSR.
-    #[serde(default)]
-    pub csr_observations: Option<Vec<crate::predict::CsrObservation>>,
 }
 
 fn default_truncate() -> bool {
@@ -206,11 +289,70 @@ pub struct IndicatorCheck {
     /// 是否 binding (顶格): slack 接近 0 且非负.
     /// binding 集合是谈判方向的逆向归因依据.
     pub binding: bool,
+    /// LP 使用的线性代理值.
+    pub proxy_value: Option<f64>,
+    /// 经可选评估器修正后的值. `value` 保留为同值以兼容旧调用方.
+    pub evaluated_value: Option<f64>,
+    /// 按合同截断/四舍五入规则得到的判定值.
+    pub judged_value: Option<f64>,
+    /// 模型的 P90 绝对误差；无已验证模型时为 None.
+    pub uncertainty: Option<f64>,
+    #[serde(default)]
+    pub method: EvaluationMethod,
+    #[serde(default)]
+    pub status: EvaluationStatus,
+    pub model: Option<ModelSummary>,
 }
 
-/// 岩相校验 (视图 C 补充): 按直方图合成精确计算的混煤反射率分布指标.
-/// 只有参配煤全部带煤岩数据时才产出; 与 indicator_check 里的线性代理值 (Σx·σ_j) 不同,
-/// 这里的 sigma 含 μ 离散贡献 (全方差定律), 是可对照化验单的真实值.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EvaluationMethod {
+    #[default]
+    Linear,
+    ProvisionalLinear,
+    AffineCalibration,
+    Histogram,
+    Moments,
+    Regression,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EvaluationStatus {
+    #[default]
+    Pass,
+    TolerancePass,
+    Unverified,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum QualityStatus {
+    Verified,
+    #[default]
+    Estimated,
+    NeedsReview,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ModelKind {
+    GAffine,
+    CsrRidge,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSummary {
+    pub version: String,
+    pub kind: ModelKind,
+    pub sample_count: usize,
+    pub cv_mae: f64,
+    pub p90_abs_error: f64,
+    pub bias: f64,
+    pub in_domain: bool,
+}
+
+/// 岩相校验 (视图 C 补充): 按直方图或 μ/σ 计算的混煤反射率分布指标.
+/// 只有参配煤全部带有效煤岩输入时才产出；与 indicator_check 里的线性代理值
+/// (Σx·σ_j) 不同，这里的 sigma 含 μ 离散贡献 (全方差定律).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PetrographyCheck {
     /// 混煤反射率均值.
@@ -245,6 +387,12 @@ pub struct BlendResult {
     pub petrography_check: Option<PetrographyCheck>,
     /// 容错过程中的警告.
     pub warnings: Vec<String>,
+    /// 求解成功与质量可信度分离: ok=true 仍可能是 Estimated/NeedsReview.
+    #[serde(default)]
+    pub quality_status: QualityStatus,
+    /// 求解后评估和修复的重算次数.
+    #[serde(default)]
+    pub evaluation_iterations: usize,
 }
 
 impl BlendResult {
@@ -258,6 +406,8 @@ impl BlendResult {
             indicator_check: Vec::new(),
             petrography_check: None,
             warnings,
+            quality_status: QualityStatus::NeedsReview,
+            evaluation_iterations: 0,
         }
     }
 }

@@ -35,7 +35,10 @@ const result = JSON.parse(resultJson);
 console.log('\n=== 求解结果 ===');
 console.log(`耗时: ${elapsed.toFixed(2)}ms`);
 console.log(`可行: ${result.ok}`);
-if (result.ok) {
+if (!result.ok) {
+  console.error(`失败原因: ${result.reason ?? '未知'}`);
+  process.exitCode = 1;
+} else {
   console.log(`CIF 单价: ${result.cost.cif_per_ton.toFixed(2)} 元/吨`);
   console.log(`总金额:   ${result.cost.total_cif?.toFixed(2)} 元`);
   console.log('\n配方:');

@@ -2,19 +2,21 @@
 //!
 //! 数据流程:
 //!   业务侧 4 张表 (化验/合同/煤价/物流) → 归一为 COALS + SPECS
-//!   → LP 建模 (最小化 CIF 加权和 + 8 条加权约束)
-//!   → Clarabel 求解
-//!   → 后处理为 3 个业务视图 (成本结构 / 实物订单 / 指标体检)
+//!   → 逐指标判定与可选评估器 → Clarabel 最低成本候选
+//!   → 非线性岩相复验/修复
+//!   → 3 个业务视图 (成本结构 / 实物订单 / 指标体检)
 pub mod model;
 pub mod optimizer;
 pub mod petrography;
 pub mod predict;
+mod quality;
 pub mod seed;
-pub use predict::{CsrObservation, CsrPredictor};
+pub use petrography::{Notch, Petrography};
+pub use predict::{CsrObservation, CsrPredictor, EvaluatorSet};
 pub use seed::{CoalMaster, CoalMasterEntry, Confidence, DefaultContract, MasterStatus};
 
 pub use model::*;
-pub use optimizer::solve;
+pub use optimizer::{solve, solve_with_evaluators};
 
 /// 返回编译进核心 crate 的 Master JSON 原文.
 ///
@@ -122,7 +124,6 @@ mod tests {
             specs,
             total_quantity: Some(3700.0),
             truncate_decimal: true,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok, "expected feasible: {:?}", r.reason);
@@ -165,7 +166,6 @@ mod tests {
             specs,
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -190,7 +190,6 @@ mod tests {
             specs: vec![Spec::lower("Y", 14.0)],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -221,7 +220,6 @@ mod tests {
             specs: vec![s],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -250,7 +248,6 @@ mod tests {
             specs: vec![Spec::upper("S", 3.0)], // 只对 S 加约束
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -300,7 +297,6 @@ mod tests {
             specs: vec![Spec::upper("S", 2.5)],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -357,24 +353,79 @@ mod tests {
             .value
     }
 
-    /// 提供观测时, 各煤 CSR 被回归预测覆盖. 单煤池 → 混合 CSR = 该煤预测值 ≈ 95.1
-    /// (录入值 70 应被替换). 95.1 = 30 + 2 + 3 + 17.6 + 27.9 + 10.2 + 4.4.
+    fn permissive_csr_policy() -> ModelPolicy {
+        ModelPolicy {
+            min_csr_samples: 8,
+            max_csr_cv_mae: 1.0,
+            ..ModelPolicy::default()
+        }
+    }
+
+    /// 提供通过交叉验证门控的观测时, 在混合层计算 CSR 回归值. 单煤池 →
+    /// 混合 CSR ≈ 95.1 (录入值 70 仅作为线性代理展示).
+    /// 95.1 = 30 + 2 + 3 + 17.6 + 27.9 + 10.2 + 4.4.
     #[test]
     fn test_csr_prediction_overrides_recorded() {
+        let observations = perfect_csr_obs(10);
+        let evaluators = EvaluatorSet::train(&[], &observations, &permissive_csr_policy()).unwrap();
         let req = BlendRequest {
             coals: vec![linbei()],
             specs: vec![],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: Some(perfect_csr_obs(10)),
         };
-        let r = solve(&req);
+        let r = solve_with_evaluators(&req, &evaluators);
         assert!(r.ok, "{:?}", r.reason);
         let csr = csr_value(&r);
         assert!(
             (csr - 95.1).abs() < 0.1,
             "预测 CSR 应 ≈95.1 (录入 70 被覆盖), 实际 {}",
             csr
+        );
+    }
+
+    /// CSR 的六项特征固定使用方案保存时的线性代理口径；G 校准是独立模型，
+    /// 不能让同一批 CSR 样本在训练和推断时使用不同的 G 定义.
+    #[test]
+    fn test_csr_feature_contract_is_independent_from_g_calibration() {
+        let g_observations: Vec<GObservation> = (0..20)
+            .map(|index| {
+                let g_linear = 75.0 + index as f64;
+                GObservation {
+                    g_linear,
+                    g_measured: g_linear * 0.5,
+                }
+            })
+            .collect();
+        let policy = ModelPolicy {
+            min_g_samples: 20,
+            min_csr_samples: 8,
+            max_g_cv_mae: 0.1,
+            max_csr_cv_mae: 1.0,
+            ..ModelPolicy::default()
+        };
+        let csr_observations = perfect_csr_obs(10);
+        let evaluators = EvaluatorSet::train(&g_observations, &csr_observations, &policy).unwrap();
+        let req = BlendRequest {
+            coals: vec![linbei()],
+            specs: vec![],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+
+        let result = solve_with_evaluators(&req, &evaluators);
+        assert!(result.ok, "{:?}", result.reason);
+        let g = result
+            .indicator_check
+            .iter()
+            .find(|check| check.indicator == "G")
+            .expect("应输出 G");
+        assert_eq!(g.method, EvaluationMethod::AffineCalibration);
+        assert!((g.value - 46.5).abs() < 0.1, "G 校准应生效: {}", g.value);
+        assert!(
+            (csr_value(&result) - 95.1).abs() < 0.1,
+            "CSR 应继续使用 G_linear=93 的固定特征口径，实际 {}",
+            csr_value(&result)
         );
     }
 
@@ -386,7 +437,6 @@ mod tests {
             specs: vec![],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -396,14 +446,15 @@ mod tests {
     /// 样本不足 (<7) → 拟合失败, 回退录入 CSR 并加警告, 不静默吞掉.
     #[test]
     fn test_insufficient_observations_warns_and_falls_back() {
+        let observations = perfect_csr_obs(5);
+        let evaluators = EvaluatorSet::train(&[], &observations, &ModelPolicy::default()).unwrap();
         let req = BlendRequest {
             coals: vec![linbei()],
             specs: vec![],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: Some(perfect_csr_obs(5)),
         };
-        let r = solve(&req);
+        let r = solve_with_evaluators(&req, &evaluators);
         assert!(r.ok);
         assert!((csr_value(&r) - 70.0).abs() < 1e-6, "样本不足应回退 CSR=70");
         assert!(
@@ -413,7 +464,7 @@ mod tests {
         );
     }
 
-    /// 生成线性关系极弱的观测: CSR 在 40/95 间高频交替, 平滑特征拟合不出 → R² 很低.
+    /// 生成线性关系极弱的观测: CSR 在 40/95 间高频交替, 平滑特征拟合不出.
     fn noisy_csr_obs(n: usize) -> Vec<CsrObservation> {
         (0..n)
             .map(|i| {
@@ -438,26 +489,34 @@ mod tests {
             .collect()
     }
 
-    /// 样本够但拟合质量差 (R² 低) → 不信任预测, 回退录入 CSR 并附 R² 警告.
+    /// 样本够但交叉验证误差高 → 不信任预测, 回退录入 CSR 并附 MAE 警告.
     #[test]
     fn test_low_r2_falls_back_with_warning() {
+        let observations = noisy_csr_obs(24);
+        let policy = ModelPolicy {
+            min_csr_samples: 8,
+            max_csr_cv_mae: 5.0,
+            ..ModelPolicy::default()
+        };
+        let evaluators = EvaluatorSet::train(&[], &observations, &policy).unwrap();
         let req = BlendRequest {
             coals: vec![linbei()],
             specs: vec![],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: Some(noisy_csr_obs(24)),
         };
-        let r = solve(&req);
+        let r = solve_with_evaluators(&req, &evaluators);
         assert!(r.ok);
         assert!(
             (csr_value(&r) - 70.0).abs() < 1e-6,
-            "低 R² 应回退 CSR=70, 实际 {}",
+            "高交叉验证误差应回退 CSR=70, 实际 {}",
             csr_value(&r)
         );
         assert!(
-            r.warnings.iter().any(|w| w.contains("R²")),
-            "应有 R² 不足警告: {:?}",
+            r.warnings
+                .iter()
+                .any(|w| w.contains("交叉验证") && w.contains("MAE")),
+            "应有交叉验证误差警告: {:?}",
             r.warnings
         );
     }
@@ -468,14 +527,15 @@ mod tests {
         let mut no_g = linbei();
         no_g.name = "缺G".into();
         no_g.props.remove("G"); // 缺 G 输入 → 无法预测 CSR
+        let observations = perfect_csr_obs(10);
+        let evaluators = EvaluatorSet::train(&[], &observations, &permissive_csr_policy()).unwrap();
         let req = BlendRequest {
             coals: vec![no_g],
             specs: vec![], // 无 CSR spec, 该煤不会被剔除
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: Some(perfect_csr_obs(10)),
         };
-        let r = solve(&req);
+        let r = solve_with_evaluators(&req, &evaluators);
         assert!(r.ok);
         assert!(
             (csr_value(&r) - 70.0).abs() < 1e-6,
@@ -513,7 +573,6 @@ mod tests {
             specs: vec![s],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -550,7 +609,6 @@ mod tests {
             specs: vec![g],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -589,6 +647,8 @@ mod tests {
         c.petrography = Some(Petrography {
             hist,
             vitrinite_pct: 80.0,
+            mean: None,
+            std_dev: None,
         });
         c
     }
@@ -606,7 +666,6 @@ mod tests {
             specs: vec![Spec::upper("petro", 0.15)],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -631,7 +690,6 @@ mod tests {
             specs: vec![Spec::upper("petro", 0.15)],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(
@@ -642,28 +700,32 @@ mod tests {
         assert!(r.recipe.contains_key("只有直方图"));
     }
 
-    /// 参配煤全都没有煤岩数据 (功能未启用) → 静默跳过, 不产生用户无法消除的常驻警告.
+    /// 没有煤岩明细时仍按八项中的 petro 标量求解，并标为线性代理。
     #[test]
-    fn test_petro_no_data_silent_skip() {
+    fn test_petro_no_data_is_unverified() {
         let coals = vec![coal_from_tuple(
             "无煤岩",
             (2.0, 8.0, 22.0, 90.0, 15.0, 0.10, 65.0, 8.0, 1100.0, 30.0),
         )];
+        let mut petro_spec = Spec::upper("petro", 0.15);
+        petro_spec.enforcement = Enforcement::Advisory;
         let req = BlendRequest {
             coals,
-            specs: vec![Spec::upper("petro", 0.15)],
+            specs: vec![petro_spec],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
         assert!(r.petrography_check.is_none());
-        assert!(
-            !r.warnings.iter().any(|w| w.contains("岩相")),
-            "煤岩数据未启用时不应产生常驻警告: {:?}",
-            r.warnings
-        );
+        let check = r
+            .indicator_check
+            .iter()
+            .find(|check| check.indicator == "petro")
+            .expect("应保留岩相指标状态");
+        assert_eq!(check.method, EvaluationMethod::ProvisionalLinear);
+        assert_eq!(check.status, EvaluationStatus::Unverified);
+        assert!(r.warnings.is_empty());
     }
 
     /// 部分参配煤有煤岩数据、部分没有 → 跳过校验并点名警告 (不静默).
@@ -680,13 +742,14 @@ mod tests {
                 (2.0, 8.5, 23.0, 100.0, 16.0, 0.05, 66.0, 7.5, 1100.0, 30.0),
             ),
         ];
+        let mut petro_spec = Spec::upper("petro", 0.15);
+        petro_spec.enforcement = Enforcement::Advisory;
         let req = BlendRequest {
             coals,
             // G ≥ 85 强制两煤混配, 保证"无煤岩"参配
-            specs: vec![Spec::lower("G", 85.0), Spec::upper("petro", 0.15)],
+            specs: vec![Spec::lower("G", 85.0), petro_spec],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -710,6 +773,8 @@ mod tests {
         empty_hist.petrography = Some(Petrography {
             hist: vec![],
             vitrinite_pct: 80.0,
+            mean: None,
+            std_dev: None,
         });
         let coals = vec![
             coal_with_petro(
@@ -719,12 +784,13 @@ mod tests {
             ),
             empty_hist,
         ];
+        let mut petro_spec = Spec::upper("petro", 0.15);
+        petro_spec.enforcement = Enforcement::Advisory;
         let req = BlendRequest {
             coals,
-            specs: vec![Spec::lower("G", 85.0), Spec::upper("petro", 0.15)],
+            specs: vec![Spec::lower("G", 85.0), petro_spec],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -764,7 +830,6 @@ mod tests {
             specs: vec![Spec::upper("petro", 0.25)],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -801,7 +866,6 @@ mod tests {
             specs: vec![Spec::upper("petro", 0.25)],
             total_quantity: None,
             truncate_decimal: true, // 生产路径固定 true
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -815,9 +879,45 @@ mod tests {
         assert!(check.sigma <= 0.25 + 1e-6, "σ={} 应 ≤ 0.25", check.sigma);
     }
 
-    /// 负 margin 会反向放宽约束产出违约配比 → 必须钳制为 0.
+    /// 线性代理高估低价煤的 σ 时，下界初解可能通过代理却未通过精确复核。
+    /// A 的录入代理为 0.30、直方图 σ=0.28；B 的代理与直方图 σ 均为 0.40。
+    /// 初解全选 A，精确 σ=0.28 不达下界 0.30；抬高代理下界后应引入 B 并收敛。
     #[test]
-    fn test_negative_margin_clamped() {
+    fn test_petro_lower_refine_converges() {
+        let coals = vec![
+            coal_with_petro(
+                "低离散便宜",
+                (2.0, 8.0, 22.0, 90.0, 15.0, 0.30, 65.0, 8.0, 1000.0, 30.0),
+                vec![[0.92, 1.0], [1.48, 1.0]], // μ=1.2, σ=0.28
+            ),
+            coal_with_petro(
+                "高离散贵",
+                (2.0, 8.5, 23.0, 92.0, 16.0, 0.40, 66.0, 7.5, 1100.0, 30.0),
+                vec![[0.8, 1.0], [1.6, 1.0]], // μ=1.2, σ=0.40
+            ),
+        ];
+        let req = BlendRequest {
+            coals,
+            specs: vec![Spec::lower("petro", 0.30)],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let r = solve(&req);
+        assert!(r.ok, "{:?}", r.reason);
+        let check = r.petrography_check.expect("应挂岩相校验");
+        assert_eq!(
+            check.sigma_ok,
+            Some(true),
+            "抬高代理下界后精确 σ 应达标, σ={}",
+            check.sigma
+        );
+        assert!(check.sigma >= 0.30 - 1e-6, "σ={} 应 ≥ 0.30", check.sigma);
+        assert!(check.refine_iterations >= 1, "初解低于下界，应至少修复一轮");
+    }
+
+    /// 负 margin 会反向放宽约束产出违约配比 → 必须拒绝请求.
+    #[test]
+    fn test_negative_margin_rejected() {
         let coals = vec![
             coal_from_tuple(
                 "低硫贵",
@@ -835,25 +935,20 @@ mod tests {
             specs: vec![s],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
-        assert!(r.ok);
-        let s_val = r
-            .indicator_check
-            .iter()
-            .find(|c| c.indicator == "S")
-            .unwrap()
-            .value;
+        assert!(!r.ok);
         assert!(
-            s_val <= 2.5 + 1e-6,
-            "负 margin 应被钳为 0, S={} 不得超合同上限 2.5",
-            s_val
+            r.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("安全余量")),
+            "应明确指出安全余量非法: {:?}",
+            r.reason
         );
     }
 
     /// 代理盲区场景 (单煤 σ 相同、μ 相距远, G 约束强制混配): 收紧无杠杆 →
-    /// 回退可行解 + sigma_ok=false + 明确警告, 绝不静默. 同时该分布 1.2~1.5 断档 → 凹口警告.
+    /// Hard 岩相约束必须返回不可行，不能把违约候选当作成功配方.
     #[test]
     fn test_petro_blind_proxy_reports_violation_and_notch() {
         let coals = vec![
@@ -874,21 +969,16 @@ mod tests {
             specs: vec![Spec::lower("G", 85.0), Spec::upper("petro", 0.2)],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
-        assert!(r.ok, "应回退可行解而非整体不可行: {:?}", r.reason);
-        let check = r.petrography_check.expect("应挂岩相校验");
-        assert_eq!(check.sigma_ok, Some(false), "σ={} 应报未达标", check.sigma);
+        assert!(!r.ok, "Hard 岩相违约不得返回配方");
         assert!(
-            r.warnings.iter().any(|w| w.contains("岩相")),
-            "应有岩相未达标警告: {:?}",
-            r.warnings
+            r.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("岩相")),
+            "应有岩相未达标原因: {:?}",
+            r.reason
         );
-        let notch = check
-            .notch
-            .expect("0.9/1.6 双峰混煤在 1.2~1.5 断档, 应报凹口");
-        assert!(notch.depth_ratio < 0.5);
     }
 
     /// 无 petro 约束但煤岩数据齐全 → 仍挂校验 (μ/σ/凹口信息有价值), sigma_ok=None.
@@ -904,7 +994,6 @@ mod tests {
             specs: vec![Spec::upper("S", 3.0)],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -913,22 +1002,24 @@ mod tests {
         assert_eq!(check.sigma_max, None);
     }
 
-    /// 走真实 JSON 入口, 验证 serde 能反序列化 csr_observations 并生效.
+    /// 基础 JSON 求解不读取训练样本；旧调用方残留的字段会被兼容忽略。
     #[test]
-    fn test_solve_json_accepts_csr_observations() {
+    fn test_solve_json_ignores_training_fields() {
         let req = BlendRequest {
             coals: vec![linbei()],
             specs: vec![],
             total_quantity: None,
             truncate_decimal: false,
-            csr_observations: Some(perfect_csr_obs(8)),
         };
-        let out = solve_json(&serde_json::to_string(&req).unwrap());
+        let mut input = serde_json::to_value(&req).unwrap();
+        input["csr_observations"] = serde_json::to_value(perfect_csr_obs(8)).unwrap();
+        input["model_policy"] = serde_json::to_value(permissive_csr_policy()).unwrap();
+        let out = solve_json(&input.to_string());
         let r: BlendResult = serde_json::from_str(&out).unwrap();
         assert!(r.ok);
         assert!(
-            (csr_value(&r) - 95.1).abs() < 0.1,
-            "JSON 入口预测 CSR 应 ≈95.1"
+            (csr_value(&r) - 70.0).abs() < 1e-6,
+            "基础 JSON 求解应保留录入 CSR"
         );
     }
 }

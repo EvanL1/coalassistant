@@ -13,16 +13,49 @@ use serde::{Deserialize, Serialize};
 pub struct Petrography {
     /// 镜质体反射率直方图: [bin 中值 R(%), 频率] 列表.
     /// 频率允许未归一化 (计数或百分比均可), 计算前统一归一化.
+    #[serde(default)]
     pub hist: Vec<[f64; 2]>,
     /// 镜质组体积含量 (%), 用于混合权重修正.
     pub vitrinite_pct: f64,
+    /// 化验单提供的反射率均值. 没有完整直方图时仍可用于全方差计算.
+    #[serde(default)]
+    pub mean: Option<f64>,
+    /// 化验单提供的反射率标准差.
+    #[serde(default)]
+    pub std_dev: Option<f64>,
 }
 
 impl Petrography {
-    /// 数据可用于混合计算: 镜质组含量为正且直方图有正频率.
+    /// 数据可用于混合计算: 镜质组含量为正，且有直方图或有效 μ/σ.
     /// 无效数据必须视同"缺数据"处理, 否则会静默算出只覆盖部分参配煤的"精确" σ.
     pub fn is_valid(&self) -> bool {
-        self.vitrinite_pct > 0.0 && self.hist.iter().any(|b| b[1] > 0.0)
+        self.vitrinite_pct.is_finite()
+            && self.vitrinite_pct > 0.0
+            && self.vitrinite_pct <= 100.0
+            && self.mean_std().is_some()
+    }
+
+    pub fn has_histogram(&self) -> bool {
+        !self.hist.is_empty()
+            && self.hist.iter().all(|bin| {
+                bin[0].is_finite()
+                    && (0.0..=10.0).contains(&bin[0])
+                    && bin[1].is_finite()
+                    && bin[1] >= 0.0
+            })
+            && self.hist.iter().any(|bin| bin[1] > 0.0)
+    }
+
+    pub fn mean_std(&self) -> Option<(f64, f64)> {
+        if !self.hist.is_empty() {
+            return hist_mean_std(&self.hist);
+        }
+        self.mean.zip(self.std_dev).filter(|(mean, std_dev)| {
+            mean.is_finite()
+                && (0.0..=10.0).contains(mean)
+                && std_dev.is_finite()
+                && (0.0..=10.0).contains(std_dev)
+        })
     }
 }
 
@@ -42,8 +75,18 @@ pub const NOTCH_RATIO: f64 = 0.5;
 
 /// 直方图的均值与标准差 (离散二阶矩). 空直方图或总频率为 0 → None.
 pub fn hist_mean_std(hist: &[[f64; 2]]) -> Option<(f64, f64)> {
+    if hist.is_empty()
+        || hist.iter().any(|bin| {
+            !bin[0].is_finite()
+                || !(0.0..=10.0).contains(&bin[0])
+                || !bin[1].is_finite()
+                || bin[1] < 0.0
+        })
+    {
+        return None;
+    }
     let total: f64 = hist.iter().map(|b| b[1]).sum();
-    if total <= 0.0 {
+    if !total.is_finite() || total <= 0.0 {
         return None;
     }
     let mean: f64 = hist.iter().map(|b| b[0] * b[1]).sum::<f64>() / total;
@@ -52,14 +95,23 @@ pub fn hist_mean_std(hist: &[[f64; 2]]) -> Option<(f64, f64)> {
         .map(|b| (b[0] - mean).powi(2) * b[1])
         .sum::<f64>()
         / total;
-    // 浮点误差可能产生 -1e-18 级微负
-    Some((mean, var.max(0.0).sqrt()))
+    (mean.is_finite() && var.is_finite()).then_some((mean, var.sqrt()))
 }
 
 /// 混煤直方图合成: parts = [(单煤煤岩, 质量配比 x_j)].
 /// 权重 y_j = vitrinite_pct_j·x_j / Σ(vitrinite_pct_k·x_k); 各煤直方图先归一化再加权合并.
 /// Σ(V·x) = 0 或 parts 为空 → None.
 pub fn mix_histogram(parts: &[(&Petrography, f64)]) -> Option<Vec<[f64; 2]>> {
+    if parts.is_empty()
+        || parts.iter().any(|(petrography, ratio)| {
+            !ratio.is_finite()
+                || *ratio < 0.0
+                || !petrography.is_valid()
+                || !petrography.has_histogram()
+        })
+    {
+        return None;
+    }
     let vx_total: f64 = parts.iter().map(|(p, x)| p.vitrinite_pct * x).sum();
     if vx_total <= 0.0 {
         return None;
@@ -93,10 +145,56 @@ pub fn mix_histogram(parts: &[(&Petrography, f64)]) -> Option<Vec<[f64; 2]>> {
     )
 }
 
+/// 只依赖各单煤 μ/σ/镜质组含量的全方差计算.
+///
+/// 完整直方图不是 σ 计算的必要条件；它只用于后续凹口检测。
+pub fn mix_mean_std(parts: &[(&Petrography, f64)]) -> Option<(f64, f64)> {
+    if parts.is_empty()
+        || parts.iter().any(|(petrography, ratio)| {
+            !ratio.is_finite() || *ratio < 0.0 || !petrography.is_valid()
+        })
+    {
+        return None;
+    }
+    let vx_total: f64 = parts
+        .iter()
+        .map(|(petrography, ratio)| petrography.vitrinite_pct * ratio)
+        .sum();
+    if !vx_total.is_finite() || vx_total <= 0.0 {
+        return None;
+    }
+    let mut mean = 0.0;
+    let mut second_moment = 0.0;
+    for (petrography, ratio) in parts {
+        let (coal_mean, coal_std) = petrography.mean_std()?;
+        let weight = petrography.vitrinite_pct * ratio / vx_total;
+        mean += weight * coal_mean;
+        second_moment += weight * (coal_std.powi(2) + coal_mean.powi(2));
+    }
+    let variance = second_moment - mean.powi(2);
+    if !mean.is_finite() || !variance.is_finite() || variance < -1e-10 {
+        return None;
+    }
+    let variance = variance.max(0.0);
+    Some((mean, variance.sqrt()))
+}
+
 /// 在 [lo, hi] 窗口内检测凹口.
 /// 规则: 窗口两侧 (r < lo 与 r > hi) 都存在正频率峰时, 取窗口内最低频率为谷
 /// (窗口内无 bin 视为频率 0 的完全断档), 谷 < NOTCH_RATIO × min(左峰, 右峰) 判凹口.
 pub fn detect_notch(hist: &[[f64; 2]], lo: f64, hi: f64) -> Option<Notch> {
+    if !lo.is_finite()
+        || !hi.is_finite()
+        || lo > hi
+        || hist.iter().any(|bin| {
+            !bin[0].is_finite()
+                || !(0.0..=10.0).contains(&bin[0])
+                || !bin[1].is_finite()
+                || bin[1] < 0.0
+        })
+    {
+        return None;
+    }
     let left_peak = hist
         .iter()
         .filter(|b| b[0] < lo)
@@ -114,7 +212,7 @@ pub fn detect_notch(hist: &[[f64; 2]], lo: f64, hi: f64) -> Option<Notch> {
     let valley = hist
         .iter()
         .filter(|b| b[0] >= lo && b[0] <= hi)
-        .min_by(|a, b| a[1].partial_cmp(&b[1]).unwrap())
+        .min_by(|a, b| a[1].total_cmp(&b[1]))
         .map(|b| (b[0], b[1]))
         .unwrap_or(((lo + hi) / 2.0, 0.0));
     let depth_ratio = valley.1 / left_peak.min(right_peak);
@@ -140,6 +238,8 @@ mod tests {
         Petrography {
             hist,
             vitrinite_pct,
+            mean: None,
+            std_dev: None,
         }
     }
 
@@ -166,6 +266,9 @@ mod tests {
     fn test_hist_mean_std_empty_or_zero() {
         assert!(hist_mean_std(&[]).is_none());
         assert!(hist_mean_std(&[[1.0, 0.0]]).is_none());
+        assert!(hist_mean_std(&[[1.0, -1.0]]).is_none());
+        assert!(hist_mean_std(&[[f64::NAN, 1.0]]).is_none());
+        assert!(hist_mean_std(&[[1.0, f64::INFINITY]]).is_none());
     }
 
     #[test]
@@ -207,6 +310,25 @@ mod tests {
             "混煤 σ 应 = 0.35 (μ 离散贡献), 实际 {}",
             std
         );
+    }
+
+    #[test]
+    fn test_mix_mean_std_without_histogram() {
+        let first = Petrography {
+            hist: Vec::new(),
+            vitrinite_pct: 80.0,
+            mean: Some(1.0),
+            std_dev: Some(0.1),
+        };
+        let second = Petrography {
+            hist: Vec::new(),
+            vitrinite_pct: 80.0,
+            mean: Some(2.0),
+            std_dev: Some(0.1),
+        };
+        let (mean, std_dev) = mix_mean_std(&[(&first, 0.5), (&second, 0.5)]).unwrap();
+        assert!((mean - 1.5).abs() < 1e-9);
+        assert!((std_dev - 0.509_901_951_4).abs() < 1e-9);
     }
 
     #[test]
@@ -280,6 +402,10 @@ mod tests {
             !petro(vec![[1.2, 1.0]], 0.0).is_valid(),
             "镜质组含量 0 无效"
         );
+        assert!(!petro(vec![[1.2, -1.0]], 80.0).is_valid());
+        assert!(!petro(vec![[f64::NAN, 1.0]], 80.0).is_valid());
+        assert!(!petro(vec![[1.2e20, 1.0]], 80.0).is_valid());
+        assert!(!petro(vec![[1.2, 1.0]], 101.0).is_valid());
     }
 
     #[test]

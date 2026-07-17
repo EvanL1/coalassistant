@@ -116,20 +116,20 @@ function collectSourceFiles(directory) {
 
 const rustModelSource = readRepositoryFile("blend_kit_rs/src/model.rs");
 const rustSeedSource = readRepositoryFile("blend_kit_rs/src/seed.rs");
-const rustPredictSource = readRepositoryFile("blend_kit_rs/src/predict.rs");
 const rustPetrographySource = readRepositoryFile("blend_kit_rs/src/petrography.rs");
 const typescriptSource = readRepositoryFile("doudou_blend/src/types.ts");
 
 const sharedStructs = [
   [rustModelSource, "Coal", "Coal"],
+  [rustModelSource, "AcceptanceRule", "AcceptanceRule"],
   [rustModelSource, "Spec", "Spec"],
   [rustModelSource, "BlendRequest", "BlendRequest"],
   [rustModelSource, "CostBreakdown", "CostBreakdown"],
   [rustModelSource, "OrderItem", "OrderItem"],
+  [rustModelSource, "ModelSummary", "ModelSummary"],
   [rustModelSource, "IndicatorCheck", "IndicatorCheck"],
   [rustModelSource, "PetrographyCheck", "PetrographyCheck"],
   [rustModelSource, "BlendResult", "BlendResult"],
-  [rustPredictSource, "CsrObservation", "CsrObservation"],
   [rustPetrographySource, "Petrography", "Petrography"],
   [rustPetrographySource, "Notch", "Notch"],
   [rustSeedSource, "CoalMasterEntry", "MasterCoalEntry"],
@@ -150,6 +150,20 @@ compareStringLists(
   extractRustEnumVariants(rustModelSource, "Direction"),
   extractTypescriptUnionValues(typescriptSource, "Direction"),
 );
+for (const enumName of [
+  "AcceptanceMode",
+  "Enforcement",
+  "EvaluationMethod",
+  "EvaluationStatus",
+  "QualityStatus",
+  "ModelKind",
+]) {
+  compareStringLists(
+    `${enumName} 枚举`,
+    extractRustEnumVariants(rustModelSource, enumName),
+    extractTypescriptUnionValues(typescriptSource, enumName),
+  );
+}
 compareStringLists(
   "MasterStatus/CoalStatus 枚举",
   extractRustEnumVariants(rustSeedSource, "MasterStatus").map((variant) => variant.toLowerCase()),

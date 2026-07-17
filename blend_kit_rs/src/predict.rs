@@ -1,13 +1,20 @@
 //! 可选的 CSR 预测模块.
 //!
-//! 通过历史 [混合 S/A/V/G/Y/M, 实测 CSR] 数据拟合线性回归公式:
+//! 通过历史 [六项线性代理快照, 实测 CSR] 数据拟合线性回归公式:
 //!   CSR_predicted = β₀ + β_S·S + β_A·A + β_V·V + β_G·G + β_Y·Y + β_M·M
 //!
-//! 不破坏默认 per-coal CSR 直接录入行为, 仅在业务侧主动调用时生效.
+//! 默认仍使用录入 CSR 代理；只有去重样本、LOOCV 误差与训练域均达标时，
+//! 回归值才可进入混合层约束。
 
 use serde::{Deserialize, Serialize};
 
-/// 单次历史配煤观测记录.
+use crate::{GObservation, ModelKind, ModelPolicy, ModelSummary};
+
+const CSR_ALGORITHM_VERSION: &str = "csr-ridge-standardized-loocv-v2";
+const G_ALGORITHM_VERSION: &str = "g-affine-loocv-v1";
+
+/// 单次历史配煤观测记录. 六项特征必须是保存方案时的质量加权线性代理，
+/// 不能逐字段混入事后实测值或 G 校准值。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsrObservation {
     pub s: f64,
@@ -136,6 +143,677 @@ impl CsrPredictor {
             coal.get("M")?,
         ))
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ValidatedCsrModel {
+    pub predictor: CsrPredictor,
+    pub version: String,
+    pub cv_mae: f64,
+    pub p90_abs_error: f64,
+    pub bias: f64,
+    pub training_min: [f64; 6],
+    pub training_max: [f64; 6],
+}
+
+impl ValidatedCsrModel {
+    pub fn fit(observations: &[CsrObservation], policy: &ModelPolicy) -> Result<Self, String> {
+        let unique_observations = deduplicate_csr_observations(observations);
+        let observations = unique_observations.as_slice();
+        if observations.len() < policy.min_csr_samples {
+            return Err(format!(
+                "去重后样本数不足: CSR 模型要求至少 {}, 实际 {}",
+                policy.min_csr_samples,
+                observations.len()
+            ));
+        }
+        if observations.len() < 8 {
+            return Err("样本数不足: 留一交叉验证至少需要 8 条 CSR 观测".into());
+        }
+        validate_csr_observations(observations)?;
+
+        let predictor = fit_ridge(observations, policy.ridge_lambda)?;
+        let mut residuals = Vec::with_capacity(observations.len());
+        for leave_out in 0..observations.len() {
+            let training: Vec<CsrObservation> = observations
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != leave_out)
+                .map(|(_, observation)| observation.clone())
+                .collect();
+            let fold = fit_ridge(&training, policy.ridge_lambda)?;
+            let observation = &observations[leave_out];
+            residuals.push(
+                fold.predict(
+                    observation.s,
+                    observation.a,
+                    observation.v,
+                    observation.g,
+                    observation.y,
+                    observation.m,
+                ) - observation.csr_measured,
+            );
+        }
+        let (cv_mae, p90_abs_error, bias) = residual_metrics(&residuals);
+        let (training_min, training_max) = csr_feature_range(observations);
+        let version = version_for_csr(
+            observations,
+            policy,
+            &predictor,
+            cv_mae,
+            p90_abs_error,
+            bias,
+            training_min,
+            training_max,
+        );
+        Ok(Self {
+            predictor,
+            version,
+            cv_mae,
+            p90_abs_error,
+            bias,
+            training_min,
+            training_max,
+        })
+    }
+
+    pub fn passes_gate(&self, policy: &ModelPolicy) -> bool {
+        self.cv_mae <= policy.max_csr_cv_mae
+    }
+
+    pub fn is_in_domain(&self, features: [f64; 6], expansion: f64) -> bool {
+        features
+            .iter()
+            .zip(self.training_min.iter().zip(&self.training_max))
+            .all(|(value, (minimum, maximum))| {
+                let width = (maximum - minimum).max(1e-9);
+                *value >= minimum - width * expansion && *value <= maximum + width * expansion
+            })
+    }
+
+    pub fn summary(&self, in_domain: bool) -> ModelSummary {
+        ModelSummary {
+            version: self.version.clone(),
+            kind: ModelKind::CsrRidge,
+            sample_count: self.predictor.n_samples,
+            cv_mae: self.cv_mae,
+            p90_abs_error: self.p90_abs_error,
+            bias: self.bias,
+            in_domain,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GAffinePredictor {
+    pub intercept: f64,
+    pub slope: f64,
+    pub sample_count: usize,
+}
+
+impl GAffinePredictor {
+    fn fit(observations: &[GObservation]) -> Result<Self, String> {
+        if observations.len() < 2 {
+            return Err("G 仿射模型至少需要 2 条观测".into());
+        }
+        if observations.iter().any(|observation| {
+            !observation.g_linear.is_finite() || !observation.g_measured.is_finite()
+        }) {
+            return Err("G 观测包含非法数值".into());
+        }
+        let count = observations.len() as f64;
+        let mean_x = observations
+            .iter()
+            .map(|observation| observation.g_linear)
+            .sum::<f64>()
+            / count;
+        let mean_y = observations
+            .iter()
+            .map(|observation| observation.g_measured)
+            .sum::<f64>()
+            / count;
+        let variance = observations
+            .iter()
+            .map(|observation| (observation.g_linear - mean_x).powi(2))
+            .sum::<f64>();
+        if variance <= 1e-12 {
+            return Err("G 观测的线性代理没有变化，无法校准".into());
+        }
+        let covariance = observations
+            .iter()
+            .map(|observation| (observation.g_linear - mean_x) * (observation.g_measured - mean_y))
+            .sum::<f64>();
+        let slope = covariance / variance;
+        if !slope.is_finite() || slope <= 0.0 {
+            return Err("G 校准斜率必须为正".into());
+        }
+        Ok(Self {
+            intercept: mean_y - slope * mean_x,
+            slope,
+            sample_count: observations.len(),
+        })
+    }
+
+    pub fn predict(&self, g_linear: f64) -> f64 {
+        self.intercept + self.slope * g_linear
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ValidatedGModel {
+    pub predictor: GAffinePredictor,
+    pub version: String,
+    pub cv_mae: f64,
+    pub p90_abs_error: f64,
+    pub bias: f64,
+    pub training_min: f64,
+    pub training_max: f64,
+}
+
+impl ValidatedGModel {
+    pub fn fit(observations: &[GObservation], policy: &ModelPolicy) -> Result<Self, String> {
+        let unique_observations = deduplicate_g_observations(observations);
+        let observations = unique_observations.as_slice();
+        if observations.len() < policy.min_g_samples {
+            return Err(format!(
+                "去重后样本数不足: G 模型要求至少 {}, 实际 {}",
+                policy.min_g_samples,
+                observations.len()
+            ));
+        }
+        if observations.len() < 3 {
+            return Err("样本数不足: 留一交叉验证至少需要 3 条 G 观测".into());
+        }
+        let predictor = GAffinePredictor::fit(observations)?;
+        let mut residuals = Vec::with_capacity(observations.len());
+        for leave_out in 0..observations.len() {
+            let training: Vec<GObservation> = observations
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != leave_out)
+                .map(|(_, observation)| observation.clone())
+                .collect();
+            let fold = GAffinePredictor::fit(&training)?;
+            let observation = &observations[leave_out];
+            residuals.push(fold.predict(observation.g_linear) - observation.g_measured);
+        }
+        let (cv_mae, p90_abs_error, bias) = residual_metrics(&residuals);
+        let training_min = observations
+            .iter()
+            .map(|observation| observation.g_linear)
+            .fold(f64::INFINITY, f64::min);
+        let training_max = observations
+            .iter()
+            .map(|observation| observation.g_linear)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let version = version_for_g(
+            observations,
+            policy,
+            &predictor,
+            cv_mae,
+            p90_abs_error,
+            bias,
+            training_min,
+            training_max,
+        );
+        Ok(Self {
+            predictor,
+            version,
+            cv_mae,
+            p90_abs_error,
+            bias,
+            training_min,
+            training_max,
+        })
+    }
+
+    pub fn passes_gate(&self, policy: &ModelPolicy) -> bool {
+        self.cv_mae <= policy.max_g_cv_mae
+    }
+
+    pub fn is_in_domain(&self, value: f64, expansion: f64) -> bool {
+        let width = (self.training_max - self.training_min).max(1e-9);
+        value >= self.training_min - width * expansion
+            && value <= self.training_max + width * expansion
+    }
+
+    pub fn summary(&self, in_domain: bool) -> ModelSummary {
+        ModelSummary {
+            version: self.version.clone(),
+            kind: ModelKind::GAffine,
+            sample_count: self.predictor.sample_count,
+            cv_mae: self.cv_mae,
+            p90_abs_error: self.p90_abs_error,
+            bias: self.bias,
+            in_domain,
+        }
+    }
+}
+
+/// 求解阶段可选使用的已训练评估器.
+///
+/// 训练与求解刻意分开：调用方决定样本来自哪里，并在需要时显式调用 `train`；
+/// 基础 `solve` 不读取样本，也不会在每次求解时重训。
+#[derive(Debug, Clone, Default)]
+pub struct EvaluatorSet {
+    pub(crate) g: Option<ValidatedGModel>,
+    pub(crate) csr: Option<ValidatedCsrModel>,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) extrapolation_ratio: f64,
+}
+
+impl EvaluatorSet {
+    /// 训练并门控 G/CSR 评估器。单个模型不达门槛时仅跳过该模型并保留警告。
+    pub fn train(
+        g_observations: &[GObservation],
+        csr_observations: &[CsrObservation],
+        policy: &ModelPolicy,
+    ) -> Result<Self, String> {
+        validate_model_policy(policy)?;
+        let mut evaluators = Self {
+            extrapolation_ratio: policy.extrapolation_ratio,
+            ..Self::default()
+        };
+
+        if !g_observations.is_empty() {
+            match ValidatedGModel::fit(g_observations, policy) {
+                Ok(model) if model.passes_gate(policy) => evaluators.g = Some(model),
+                Ok(model) => evaluators.warnings.push(format!(
+                    "G 校准未启用: 交叉验证 MAE={:.2} > {:.2}",
+                    model.cv_mae, policy.max_g_cv_mae
+                )),
+                Err(reason) => evaluators.warnings.push(format!("G 校准未启用: {reason}")),
+            }
+        }
+
+        if !csr_observations.is_empty() {
+            match ValidatedCsrModel::fit(csr_observations, policy) {
+                Ok(model) if model.passes_gate(policy) => evaluators.csr = Some(model),
+                Ok(model) => evaluators.warnings.push(format!(
+                    "CSR 模型未启用: 交叉验证 MAE={:.2} > {:.2}",
+                    model.cv_mae, policy.max_csr_cv_mae
+                )),
+                Err(reason) => evaluators
+                    .warnings
+                    .push(format!("CSR 模型未启用: {reason}")),
+            }
+        }
+
+        Ok(evaluators)
+    }
+}
+
+fn validate_model_policy(policy: &ModelPolicy) -> Result<(), String> {
+    if policy.min_g_samples < 3
+        || policy.min_csr_samples < 8
+        || !policy.max_g_cv_mae.is_finite()
+        || policy.max_g_cv_mae <= 0.0
+        || !policy.max_csr_cv_mae.is_finite()
+        || policy.max_csr_cv_mae <= 0.0
+        || !policy.extrapolation_ratio.is_finite()
+        || policy.extrapolation_ratio < 0.0
+        || !policy.ridge_lambda.is_finite()
+        || policy.ridge_lambda < 0.0
+    {
+        return Err("模型策略参数非法".into());
+    }
+    Ok(())
+}
+
+fn deduplicate_csr_observations(observations: &[CsrObservation]) -> Vec<CsrObservation> {
+    let mut seen = std::collections::HashSet::new();
+    let mut unique: Vec<_> = observations
+        .iter()
+        .filter(|observation| {
+            seen.insert([
+                canonical_f64_bits(observation.s),
+                canonical_f64_bits(observation.a),
+                canonical_f64_bits(observation.v),
+                canonical_f64_bits(observation.g),
+                canonical_f64_bits(observation.y),
+                canonical_f64_bits(observation.m),
+                canonical_f64_bits(observation.csr_measured),
+            ])
+        })
+        .cloned()
+        .collect();
+    unique.sort_by_key(|observation| {
+        [
+            canonical_f64_bits(observation.s),
+            canonical_f64_bits(observation.a),
+            canonical_f64_bits(observation.v),
+            canonical_f64_bits(observation.g),
+            canonical_f64_bits(observation.y),
+            canonical_f64_bits(observation.m),
+            canonical_f64_bits(observation.csr_measured),
+        ]
+    });
+    unique
+}
+
+fn deduplicate_g_observations(observations: &[GObservation]) -> Vec<GObservation> {
+    let mut seen = std::collections::HashSet::new();
+    let mut unique: Vec<_> = observations
+        .iter()
+        .filter(|observation| {
+            seen.insert([
+                canonical_f64_bits(observation.g_linear),
+                canonical_f64_bits(observation.g_measured),
+            ])
+        })
+        .cloned()
+        .collect();
+    unique.sort_by_key(|observation| {
+        [
+            canonical_f64_bits(observation.g_linear),
+            canonical_f64_bits(observation.g_measured),
+        ]
+    });
+    unique
+}
+
+fn fit_ridge(observations: &[CsrObservation], lambda: f64) -> Result<CsrPredictor, String> {
+    if observations.len() < 7 {
+        return Err(format!(
+            "样本数不足: 需要至少 7 个观测, 实际 {}",
+            observations.len()
+        ));
+    }
+    validate_csr_observations(observations)?;
+    const P: usize = 7;
+    let count = observations.len() as f64;
+    let mut means = [0.0; 6];
+    for observation in observations {
+        for (mean, value) in means.iter_mut().zip(csr_features(observation)) {
+            *mean += value / count;
+        }
+    }
+    let mut stddev = [0.0; 6];
+    for observation in observations {
+        for ((variance, value), mean) in stddev.iter_mut().zip(csr_features(observation)).zip(means)
+        {
+            *variance += (value - mean).powi(2) / count;
+        }
+    }
+    for value in &mut stddev {
+        *value = value.sqrt();
+        if *value < 1e-9 {
+            *value = 1.0;
+        }
+    }
+
+    let mut xt_x = [[0.0; P]; P];
+    let mut xt_y = [0.0; P];
+    for observation in observations {
+        let features = csr_features(observation);
+        let mut row = [0.0; P];
+        row[0] = 1.0;
+        for index in 0..6 {
+            row[index + 1] = (features[index] - means[index]) / stddev[index];
+        }
+        for row_index in 0..P {
+            xt_y[row_index] += row[row_index] * observation.csr_measured;
+            for column_index in 0..P {
+                xt_x[row_index][column_index] += row[row_index] * row[column_index];
+            }
+        }
+    }
+    for (index, diagonal) in xt_x.iter_mut().enumerate().skip(1) {
+        diagonal[index] += lambda;
+    }
+    let mut augmented = [[0.0; P + 1]; P];
+    for row in 0..P {
+        for column in 0..P {
+            augmented[row][column] = xt_x[row][column];
+        }
+        augmented[row][P] = xt_y[row];
+    }
+    gauss_jordan(&mut augmented)?;
+    let standardized = [
+        augmented[0][P],
+        augmented[1][P],
+        augmented[2][P],
+        augmented[3][P],
+        augmented[4][P],
+        augmented[5][P],
+        augmented[6][P],
+    ];
+    let mut beta = [0.0; 6];
+    for index in 0..6 {
+        beta[index] = standardized[index + 1] / stddev[index];
+    }
+    let intercept = standardized[0]
+        - beta
+            .iter()
+            .zip(means)
+            .map(|(coefficient, mean)| coefficient * mean)
+            .sum::<f64>();
+    let y_mean = observations
+        .iter()
+        .map(|observation| observation.csr_measured)
+        .sum::<f64>()
+        / count;
+    let ss_total = observations
+        .iter()
+        .map(|observation| (observation.csr_measured - y_mean).powi(2))
+        .sum::<f64>();
+    let predictor = CsrPredictor {
+        intercept,
+        beta_s: beta[0],
+        beta_a: beta[1],
+        beta_v: beta[2],
+        beta_g: beta[3],
+        beta_y: beta[4],
+        beta_m: beta[5],
+        r_squared: 0.0,
+        n_samples: observations.len(),
+    };
+    let ss_residual = observations
+        .iter()
+        .map(|observation| {
+            (predictor.predict(
+                observation.s,
+                observation.a,
+                observation.v,
+                observation.g,
+                observation.y,
+                observation.m,
+            ) - observation.csr_measured)
+                .powi(2)
+        })
+        .sum::<f64>();
+    Ok(CsrPredictor {
+        r_squared: if ss_total < 1e-12 {
+            1.0
+        } else {
+            1.0 - ss_residual / ss_total
+        },
+        ..predictor
+    })
+}
+
+fn validate_csr_observations(observations: &[CsrObservation]) -> Result<(), String> {
+    if observations.iter().any(|observation| {
+        csr_features(observation)
+            .into_iter()
+            .chain(std::iter::once(observation.csr_measured))
+            .any(|value| !value.is_finite())
+    }) {
+        return Err("CSR 观测包含非法数值".into());
+    }
+    Ok(())
+}
+
+fn csr_features(observation: &CsrObservation) -> [f64; 6] {
+    [
+        observation.s,
+        observation.a,
+        observation.v,
+        observation.g,
+        observation.y,
+        observation.m,
+    ]
+}
+
+fn csr_feature_range(observations: &[CsrObservation]) -> ([f64; 6], [f64; 6]) {
+    let mut minimum = [f64::INFINITY; 6];
+    let mut maximum = [f64::NEG_INFINITY; 6];
+    for observation in observations {
+        for (index, value) in csr_features(observation).into_iter().enumerate() {
+            minimum[index] = minimum[index].min(value);
+            maximum[index] = maximum[index].max(value);
+        }
+    }
+    (minimum, maximum)
+}
+
+fn residual_metrics(residuals: &[f64]) -> (f64, f64, f64) {
+    let count = residuals.len() as f64;
+    let cv_mae = residuals.iter().map(|residual| residual.abs()).sum::<f64>() / count;
+    let bias = residuals.iter().sum::<f64>() / count;
+    let mut absolute: Vec<f64> = residuals.iter().map(|residual| residual.abs()).collect();
+    absolute.sort_by(f64::total_cmp);
+    let p90_index = ((absolute.len() as f64 * 0.9).ceil() as usize)
+        .saturating_sub(1)
+        .min(absolute.len() - 1);
+    (cv_mae, absolute[p90_index], bias)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn version_for_csr(
+    observations: &[CsrObservation],
+    policy: &ModelPolicy,
+    predictor: &CsrPredictor,
+    cv_mae: f64,
+    p90_abs_error: f64,
+    bias: f64,
+    training_min: [f64; 6],
+    training_max: [f64; 6],
+) -> String {
+    let mut hash = FNV_OFFSET;
+    hash_str(&mut hash, CSR_ALGORITHM_VERSION);
+    hash_policy(&mut hash, policy);
+    let mut rows: Vec<[u64; 7]> = observations
+        .iter()
+        .map(|observation| {
+            [
+                canonical_f64_bits(observation.s),
+                canonical_f64_bits(observation.a),
+                canonical_f64_bits(observation.v),
+                canonical_f64_bits(observation.g),
+                canonical_f64_bits(observation.y),
+                canonical_f64_bits(observation.m),
+                canonical_f64_bits(observation.csr_measured),
+            ]
+        })
+        .collect();
+    rows.sort_unstable();
+    for row in rows {
+        for bits in row {
+            hash_u64(&mut hash, bits);
+        }
+    }
+    for value in [
+        predictor.intercept,
+        predictor.beta_s,
+        predictor.beta_a,
+        predictor.beta_v,
+        predictor.beta_g,
+        predictor.beta_y,
+        predictor.beta_m,
+        cv_mae,
+        p90_abs_error,
+        bias,
+    ]
+    .into_iter()
+    .chain(training_min)
+    .chain(training_max)
+    {
+        hash_f64(&mut hash, value);
+    }
+    format!("csr-ridge-v2-{hash:016x}")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn version_for_g(
+    observations: &[GObservation],
+    policy: &ModelPolicy,
+    predictor: &GAffinePredictor,
+    cv_mae: f64,
+    p90_abs_error: f64,
+    bias: f64,
+    training_min: f64,
+    training_max: f64,
+) -> String {
+    let mut hash = FNV_OFFSET;
+    hash_str(&mut hash, G_ALGORITHM_VERSION);
+    hash_policy(&mut hash, policy);
+    let mut rows: Vec<[u64; 2]> = observations
+        .iter()
+        .map(|observation| {
+            [
+                canonical_f64_bits(observation.g_linear),
+                canonical_f64_bits(observation.g_measured),
+            ]
+        })
+        .collect();
+    rows.sort_unstable();
+    for row in rows {
+        for bits in row {
+            hash_u64(&mut hash, bits);
+        }
+    }
+    for value in [
+        predictor.intercept,
+        predictor.slope,
+        cv_mae,
+        p90_abs_error,
+        bias,
+        training_min,
+        training_max,
+    ] {
+        hash_f64(&mut hash, value);
+    }
+    format!("g-affine-v1-{hash:016x}")
+}
+
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+fn hash_f64(hash: &mut u64, value: f64) {
+    hash_u64(hash, canonical_f64_bits(value));
+}
+
+fn canonical_f64_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    }
+}
+
+fn hash_u64(hash: &mut u64, value: u64) {
+    for byte in value.to_le_bytes() {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn hash_str(hash: &mut u64, value: &str) {
+    hash_u64(hash, value.len() as u64);
+    for byte in value.bytes() {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn hash_policy(hash: &mut u64, policy: &ModelPolicy) {
+    hash_u64(hash, policy.min_g_samples as u64);
+    hash_u64(hash, policy.min_csr_samples as u64);
+    hash_f64(hash, policy.max_g_cv_mae);
+    hash_f64(hash, policy.max_csr_cv_mae);
+    hash_f64(hash, policy.extrapolation_ratio);
+    hash_f64(hash, policy.ridge_lambda);
 }
 
 /// 对 7×8 增广矩阵做高斯-若尔当消元 (全主元), 求解 7 元线性方程组.
@@ -308,5 +986,65 @@ mod tests {
             predictor.predict_coal(&bad_coal).is_none(),
             "缺 G 指标应返回 None"
         );
+    }
+
+    #[test]
+    fn test_validated_versions_are_order_independent() {
+        let policy = ModelPolicy {
+            min_g_samples: 3,
+            min_csr_samples: 8,
+            max_g_cv_mae: 1.0,
+            max_csr_cv_mae: 1.0,
+            ..ModelPolicy::default()
+        };
+        let csr = make_obs(10);
+        let mut reversed_csr = csr.clone();
+        reversed_csr.reverse();
+        let first = ValidatedCsrModel::fit(&csr, &policy).unwrap();
+        let second = ValidatedCsrModel::fit(&reversed_csr, &policy).unwrap();
+        assert_eq!(first.version, second.version);
+
+        let g: Vec<GObservation> = (0..10)
+            .map(|index| {
+                let linear = 70.0 + f64::from(index);
+                GObservation {
+                    g_linear: linear,
+                    g_measured: 1.0 + 0.9 * linear,
+                }
+            })
+            .collect();
+        let mut reversed_g = g.clone();
+        reversed_g.reverse();
+        let first = ValidatedGModel::fit(&g, &policy).unwrap();
+        let second = ValidatedGModel::fit(&reversed_g, &policy).unwrap();
+        assert_eq!(first.version, second.version);
+    }
+
+    #[test]
+    fn test_duplicate_rows_do_not_satisfy_minimum_sample_gate() {
+        let policy = ModelPolicy {
+            min_g_samples: 3,
+            min_csr_samples: 8,
+            ..ModelPolicy::default()
+        };
+        let duplicate_csr = vec![make_obs(8)[0].clone(); 8];
+        assert!(ValidatedCsrModel::fit(&duplicate_csr, &policy).is_err());
+        let duplicate_g = vec![
+            GObservation {
+                g_linear: 80.0,
+                g_measured: 72.0,
+            };
+            3
+        ];
+        assert!(ValidatedGModel::fit(&duplicate_g, &policy).is_err());
+    }
+
+    #[test]
+    fn test_evaluator_policy_rejects_invalid_thresholds() {
+        let policy = ModelPolicy {
+            min_g_samples: 2,
+            ..ModelPolicy::default()
+        };
+        assert!(EvaluatorSet::train(&[], &[], &policy).is_err());
     }
 }

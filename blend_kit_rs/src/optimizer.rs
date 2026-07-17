@@ -1,350 +1,635 @@
-//! LP 求解器, 基于 Clarabel.
+//! 混合配煤求解器.
 //!
-//! 模型:
-//!   决策变量: x_i ∈ [0, 1], i = 1..n
-//!   目标:    min Σ cif(i) · x_i
-//!   约束:    Σ x_i = 1
-//!            Σ ind_i · x_i ≤ max  (上限约束)
-//!            Σ ind_i · x_i ≥ min  (下限约束)
-//!            x_i ≥ 0
-//!
-//! 8 项指标默认按线性加权处理. CSR 可选: 请求带历史观测时, 先用线性回归预测覆盖
-//! 各煤 CSR 再建 LP (见 `apply_csr_prediction`); 不做 σ(Ro) 迭代.
-//! 如需其他派生指标, 在调用前对 Coal.props 进行预计算即可.
+//! Clarabel LP 负责生成最低成本候选配方；每个指标由独立公式评估。G/CSR 可
+//! 显式接收已训练且通过门控的评估器，岩相在 LP 后按全方差定律复验并收紧重算。
+
 use crate::model::*;
 use crate::petrography::{self, Petrography, NOTCH_WINDOW};
-use crate::predict::{CsrObservation, CsrPredictor};
+use crate::predict::EvaluatorSet;
+use crate::quality::{
+    acceptance_rule, check_value, effective_lower, effective_upper, formula_for, validate_request,
+    MetricFormula,
+};
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-const EPS_TRUNCATE: f64 = 0.0999;
-const BINDING_TOL: f64 = 0.05;
-/// CSR 回归拟合质量门槛: R² 低于此值视为不可信, 回退录入 CSR.
-/// 0.6 = 至少解释 60% 方差; 偏保守, 想更严就调高 (如 0.8).
-const MIN_CSR_R2: f64 = 0.6;
-/// 岩相 σ 超标时线性代理收紧的最大迭代轮数.
-const MAX_PETRO_REFINE: usize = 4;
-/// 收紧步进的保守系数, 避免渐进擦边不收敛.
+const MAX_EVALUATION_ITERATIONS: usize = 4;
 const PETRO_SHRINK_SAFETY: f64 = 0.999;
-/// σ 达标判定容差.
-const PETRO_SIGMA_TOL: f64 = 1e-6;
+const SOLUTION_TOLERANCE: f64 = 1e-8;
+const OUTPUT_RATIO_TOLERANCE: f64 = 1e-5;
 
-/// 主求解函数.
+/// 基础求解入口，不读取训练样本，也不在求解期间拟合模型.
+pub fn solve(request: &BlendRequest) -> BlendResult {
+    solve_with_evaluators(request, &EvaluatorSet::default())
+}
+
+/// 使用调用方预先训练好的可选评估器求解.
 ///
-/// 岩相非线性处理 (调研 2026-07-04 §5 阶段一方案):
-/// LP 的 petro 约束是线性代理 (Σx·σ_j), 会系统性低估混煤真实 σ (μ 离散贡献).
-/// 参配煤全带煤岩直方图时, 求解后按全方差定律精确复验 σ; 超标则按违约比收紧
-/// 代理上限重解 (最多 MAX_PETRO_REFINE 轮). 代理无杠杆 (收紧至不可行) 时回退
-/// 最后可行解并显式警告 —— 违约永不静默, 但也不把合同层面可行的方案变成不可行.
-/// 可靠的自动满足需阶段二信赖域 SLP, 见调研文档.
-pub fn solve(req: &BlendRequest) -> BlendResult {
-    let active_specs: Vec<&Spec> = req.specs.iter().filter(|s| s.enabled).collect();
-    let eps = if req.truncate_decimal {
-        EPS_TRUNCATE
-    } else {
-        0.0
-    };
+/// `ok` 只表示是否得到配方；可信度由 `quality_status` 表示。
+pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) -> BlendResult {
+    if let Err(reason) = validate_request(request) {
+        return BlendResult::infeasible(&reason, Vec::new());
+    }
 
-    // 可选 CSR 预测: 有历史观测就拟合线性回归覆盖各煤 CSR (拟合失败时附警告并回退).
-    let (mut coals, mut warnings) =
-        apply_csr_prediction(&req.coals, req.csr_observations.as_deref());
+    let mut warnings = evaluators.warnings.clone();
+    if evaluators.csr.is_some() {
+        for coal in &request.coals {
+            let missing: Vec<&str> = ["S", "A", "V", "G", "Y", "M"]
+                .into_iter()
+                .filter(|indicator| !coal.has(indicator))
+                .collect();
+            if !missing.is_empty() {
+                warnings.push(format!(
+                    "{}: 缺输入指标 {}，本次 CSR 回退录入代理值",
+                    coal.name,
+                    missing
+                        .into_iter()
+                        .map(label_zh)
+                        .collect::<Vec<_>>()
+                        .join("/")
+                ));
+            }
+        }
+    }
+    let active_specs: Vec<&Spec> = request.specs.iter().filter(|spec| spec.enabled).collect();
+    let mut coals = request.coals.clone();
 
-    // 煤岩补齐: 有直方图但缺 petro 标量的煤, 用单煤直方图 σ 补上,
-    // 让带煤岩数据的煤不因缺标量被剔除.
-    for c in &mut coals {
-        if !c.has("petro") {
-            if let Some(p) = &c.petrography {
-                if let Some((_, std)) = petrography::hist_mean_std(&p.hist) {
-                    c.props.insert("petro".into(), std);
-                }
+    // 有 μ/σ 或直方图时，用单煤真实 σ 补齐 LP 代理字段。
+    for coal in &mut coals {
+        if !coal.has("petro") {
+            if let Some((_, std_dev)) = coal.petrography.as_ref().and_then(Petrography::mean_std) {
+                coal.props.insert("petro".into(), std_dev);
             }
         }
     }
 
-    // 容错: 剔除缺关键指标的煤
-    let required: HashSet<String> = active_specs.iter().map(|s| s.indicator.clone()).collect();
-    let mut kept: Vec<&Coal> = Vec::new();
-    for c in &coals {
-        let missing: Vec<&String> = required.iter().filter(|k| !c.has(k)).collect();
+    // 只有 Hard 约束会剔除缺字段煤；Soft/Advisory 不能改变候选煤池。
+    let mut required: HashSet<String> = active_specs
+        .iter()
+        .filter(|spec| spec.enforcement == Enforcement::Hard)
+        .map(|spec| spec.indicator.clone())
+        .collect();
+    if evaluators.csr.is_some() && required.remove("CSR") {
+        required.extend(["S", "A", "V", "G", "Y", "M"].into_iter().map(String::from));
+    }
+
+    let mut kept = Vec::new();
+    for coal in &coals {
+        let missing: Vec<&String> = required
+            .iter()
+            .filter(|indicator| !coal.has(indicator))
+            .collect();
         if missing.is_empty() {
-            kept.push(c);
+            kept.push(coal);
         } else {
             warnings.push(format!(
                 "剔除 {}: 缺指标 {}",
-                c.name,
+                coal.name,
                 missing
                     .iter()
-                    .map(|k| label_zh(k))
+                    .map(|indicator| label_zh(indicator))
                     .collect::<Vec<_>>()
                     .join("/")
             ));
         }
     }
-
     if kept.is_empty() {
         return BlendResult::infeasible("无可用煤", warnings);
     }
 
-    // petro 上限 (用于精确 σ 校验与代理收紧). 只看 max 侧, σ 无下限语义.
-    let petro_max: Option<f64> = active_specs
+    let formulas = build_formulas(&kept, evaluators);
+    if let Some(spec) = active_specs
         .iter()
-        .find(|s| {
-            s.indicator == "petro" && matches!(s.direction, Direction::Upper | Direction::Range)
+        .find(|spec| {
+            spec.enforcement == Enforcement::Hard && !formulas.contains_key(&spec.indicator)
         })
-        .and_then(|s| s.max);
+        .copied()
+    {
+        let reason = format!("{}缺少可用输入", label_zh(&spec.indicator));
+        return BlendResult::infeasible(&reason, warnings);
+    }
+    let petro_spec = active_specs
+        .iter()
+        .find(|spec| spec.indicator == "petro")
+        .copied();
+    let petro_internal_upper = petro_spec
+        .filter(|spec| {
+            spec.enforcement == Enforcement::Hard
+                && matches!(spec.direction, Direction::Upper | Direction::Range)
+        })
+        .and_then(|spec| {
+            let rule = acceptance_rule(spec, request.truncate_decimal);
+            spec.max
+                .map(|maximum| effective_upper(maximum, &rule) - spec.margin.unwrap_or(0.0))
+        });
+    let petro_internal_lower = petro_spec
+        .filter(|spec| {
+            spec.enforcement == Enforcement::Hard
+                && matches!(spec.direction, Direction::Lower | Direction::Range)
+        })
+        .and_then(|spec| {
+            let rule = acceptance_rule(spec, request.truncate_decimal);
+            spec.min
+                .map(|minimum| effective_lower(minimum, &rule) + spec.margin.unwrap_or(0.0))
+        });
 
-    let mut petro_cap: Option<f64> = None; // 收紧后的代理上限 (None = 用合同原值)
-    let mut refine_count = 0usize;
-    let mut fallback: Option<BlendResult> = None; // 收紧前的最后可行解
+    let mut petro_proxy_upper = None;
+    let mut petro_proxy_lower = None;
+    let mut iteration = 0;
+    let mut fallback: Option<BlendResult> = None;
 
     loop {
-        let (mut result, x) = match solve_once(
+        let Some((mut result, ratios)) = solve_once(
             &kept,
             &active_specs,
-            req,
-            eps,
-            petro_cap,
+            request,
+            &formulas,
+            evaluators,
+            petro_proxy_lower,
+            petro_proxy_upper,
             warnings.clone(),
-        ) {
-            Some(v) => v,
-            None => {
-                return match fallback {
-                    Some(mut r) => {
-                        r.warnings.push(
-                                "岩相校验: 线性代理收紧后 LP 不可行, 已回退收紧前方案 (σ 仍超标, 见岩相警告); 建议停用高离散/凹口煤或放宽岩相上限"
-                                    .into(),
-                            );
-                        r
-                    }
-                    None => BlendResult::infeasible("约束冲突, LP 不可行", warnings),
-                };
-            }
+        ) else {
+            return if let Some(previous) = fallback {
+                if petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard) {
+                    let mut failure_warnings = previous.warnings;
+                    failure_warnings
+                        .push("岩相精确校验修复后 LP 不可行；请调整煤池或合同级别".into());
+                    BlendResult::infeasible("岩相精确 Hard 复核未找到可行配方", failure_warnings)
+                } else {
+                    let mut previous = previous;
+                    previous
+                        .warnings
+                        .push("岩相修复后 LP 不可行，已保留候选方案".into());
+                    finalize_quality_status(&mut previous, &active_specs);
+                    previous
+                }
+            } else {
+                BlendResult::infeasible("约束冲突, LP 不可行", warnings)
+            };
         };
+        result.evaluation_iterations = iteration;
 
-        // 岩相精确校验: 参配煤 (x > 1e-5) 全带**有效**煤岩数据才可计算.
-        // 空直方图/全零频率/镜质组含量 0 视同缺数据 (否则会静默算出只覆盖部分煤的 σ).
         let participating: Vec<(&Coal, f64)> = kept
             .iter()
-            .zip(x.iter())
-            .filter(|(_, &xi)| xi > 1e-5)
-            .map(|(c, &xi)| (*c, xi))
+            .zip(&ratios)
+            .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+            .map(|(coal, ratio)| (*coal, *ratio))
             .collect();
-        let parts: Vec<(&Petrography, f64)> = participating
+        let petro_parts: Vec<(&Petrography, f64)> = participating
             .iter()
-            .filter_map(|(c, xi)| {
-                c.petrography
+            .filter_map(|(coal, ratio)| {
+                coal.petrography
                     .as_ref()
-                    .filter(|p| p.is_valid())
-                    .map(|p| (p, *xi))
+                    .filter(|data| data.is_valid())
+                    .map(|data| (data, *ratio))
             })
             .collect();
 
-        if parts.is_empty() {
-            // 没有任何参配煤带煤岩数据 = 功能未启用, 静默跳过
-            // (不产生用户无法消除的常驻警告; 当前 master 数据尚无煤岩字段)
-            return result;
-        }
-        if parts.len() < participating.len() {
-            if petro_max.is_some() {
+        if petro_parts.len() != participating.len() {
+            let any_petro_input = participating
+                .iter()
+                .any(|(coal, _)| coal.petrography.is_some());
+            if petro_spec.is_some() && any_petro_input {
                 let missing: Vec<&str> = participating
                     .iter()
-                    .filter(|(c, _)| !c.petrography.as_ref().is_some_and(|p| p.is_valid()))
-                    .map(|(c, _)| c.name.as_str())
+                    .filter(|(coal, _)| {
+                        !coal.petrography.as_ref().is_some_and(Petrography::is_valid)
+                    })
+                    .map(|(coal, _)| coal.name.as_str())
                     .collect();
                 result.warnings.push(format!(
-                    "岩相校验跳过: {} 缺有效煤岩直方图, σ 仅按线性代理约束 (会低估混煤离散度)",
+                    "岩相精确复核跳过: {} 缺有效煤岩输入",
                     missing.join("/")
                 ));
             }
+            finalize_quality_status(&mut result, &active_specs);
             return result;
         }
 
-        let sigma_data = petrography::mix_histogram(&parts)
-            .and_then(|mixed| petrography::hist_mean_std(&mixed).map(|ms| (mixed, ms)));
-        let Some((mixed, (mean, sigma))) = sigma_data else {
-            if petro_max.is_some() {
+        let Some((mean, sigma)) = petrography::mix_mean_std(&petro_parts) else {
+            if petro_spec.is_some() {
                 result
                     .warnings
-                    .push("岩相校验跳过: 煤岩数据无效 (直方图/镜质组含量为空)".into());
+                    .push("岩相精确复核跳过: μ/σ 输入无法计算".into());
             }
+            finalize_quality_status(&mut result, &active_specs);
             return result;
         };
 
-        let notch = petrography::detect_notch(&mixed, NOTCH_WINDOW.0, NOTCH_WINDOW.1);
-        if let Some(n) = &notch {
+        let all_histograms = petro_parts.iter().all(|(data, _)| data.has_histogram());
+        let mixed_histogram = all_histograms
+            .then(|| petrography::mix_histogram(&petro_parts))
+            .flatten();
+        let notch = mixed_histogram.as_deref().and_then(|histogram| {
+            petrography::detect_notch(histogram, NOTCH_WINDOW.0, NOTCH_WINDOW.1)
+        });
+        if let Some(notch_data) = &notch {
             result.warnings.push(format!(
-                "岩相: 混煤反射率分布在 {:.1}~{:.1} 主焦区间存在凹口 (谷深比 {:.2}), 可能损害焦炭热强度",
-                NOTCH_WINDOW.0, NOTCH_WINDOW.1, n.depth_ratio
+                "岩相: {:.1}~{:.1} 主焦区间存在凹口（谷深比 {:.2}）",
+                NOTCH_WINDOW.0, NOTCH_WINDOW.1, notch_data.depth_ratio
             ));
         }
 
-        let sigma_ok = petro_max.map(|m| sigma <= m + PETRO_SIGMA_TOL);
+        let petro_outcome = check_value(sigma, petro_spec, request.truncate_decimal, true);
+        update_petro_check(
+            &mut result,
+            sigma,
+            &petro_outcome,
+            if all_histograms {
+                EvaluationMethod::Histogram
+            } else {
+                EvaluationMethod::Moments
+            },
+        );
         result.petrography_check = Some(PetrographyCheck {
             mean,
             sigma,
-            sigma_max: petro_max,
-            sigma_ok,
+            sigma_max: petro_spec.and_then(|spec| spec.max),
+            sigma_ok: petro_spec.map(|_| petro_outcome.status != EvaluationStatus::Fail),
             notch,
-            refine_iterations: refine_count,
+            refine_iterations: iteration,
         });
 
-        match sigma_ok {
-            // σ 超标且还有迭代额度 → 按违约比平方收紧代理上限重解
-            Some(false) if refine_count < MAX_PETRO_REFINE => {
-                let max = petro_max.unwrap();
-                let cur = petro_cap.unwrap_or(max);
-                petro_cap = Some(cur * (max / sigma).powi(2) * PETRO_SHRINK_SAFETY);
-                refine_count += 1;
-                fallback = Some(result);
+        let above_upper =
+            petro_internal_upper.is_some_and(|limit| sigma > limit + SOLUTION_TOLERANCE);
+        let below_lower =
+            petro_internal_lower.is_some_and(|limit| sigma + SOLUTION_TOLERANCE < limit);
+        let needs_refinement = above_upper || below_lower;
+        if needs_refinement && iteration < MAX_EVALUATION_ITERATIONS {
+            if let Some(limit) = petro_internal_upper.filter(|_| above_upper) {
+                let current = petro_proxy_upper.unwrap_or(limit);
+                petro_proxy_upper = Some(current * (limit / sigma).powi(2) * PETRO_SHRINK_SAFETY);
             }
-            // 迭代用尽仍超标 → 如实报告, 不静默
-            Some(false) => {
-                result.warnings.push(format!(
-                    "岩相校验: 实际 σ={:.3} 超上限 {:.3} (线性代理低估), 自动收紧 {} 轮未收敛; 建议停用高离散/凹口煤或放宽岩相上限",
-                    sigma,
-                    petro_max.unwrap(),
-                    refine_count
-                ));
-                return result;
+            if let Some(limit) = petro_internal_lower.filter(|_| below_lower) {
+                let current = petro_proxy_lower.unwrap_or(limit);
+                let safe_sigma = sigma.max(SOLUTION_TOLERANCE);
+                petro_proxy_lower =
+                    Some(current * (limit / safe_sigma).powi(2) / PETRO_SHRINK_SAFETY);
             }
-            // 达标 / 无 petro 约束 (校验信息仍挂上)
-            _ => return result,
+            iteration += 1;
+            fallback = Some(result);
+            continue;
         }
+        if needs_refinement {
+            result.warnings.push(format!(
+                "岩相精确值 σ={sigma:.3} 未达到内部保护区间，启发式修复 {iteration} 轮后停止"
+            ));
+            if petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard) {
+                return BlendResult::infeasible(
+                    "岩相精确 Hard 复核未找到可行配方",
+                    result.warnings,
+                );
+            }
+        }
+        if petro_outcome.status == EvaluationStatus::Fail
+            && petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard)
+        {
+            result
+                .warnings
+                .push(format!("岩相精确值 σ={sigma:.3} 未通过合同 Hard 判定"));
+            return BlendResult::infeasible("岩相精确 Hard 复核未找到可行配方", result.warnings);
+        }
+        finalize_quality_status(&mut result, &active_specs);
+        return result;
     }
 }
 
-/// 单次 LP 求解 + 三视图后处理. LP 不可行 → None.
-/// petro_cap: 岩相代理收紧迭代传入的替代上限 (替换 petro spec 的合同 max).
-fn solve_once(
-    kept: &[&Coal],
-    active_specs: &[&Spec],
-    req: &BlendRequest,
-    eps: f64,
-    petro_cap: Option<f64>,
-    warnings: Vec<String>,
-) -> Option<(BlendResult, Vec<f64>)> {
-    let n = kept.len();
-    let cifs: Vec<f64> = kept.iter().map(|c| c.cif()).collect();
-
-    // 构造不等式: A_ub · x ≤ b_ub
-    // direction 决定哪一侧约束生效:
-    //   Upper → 只看 max (越低越好)
-    //   Lower → 只看 min (越高越好)
-    //   Range → min 和 max 都看
-    // margin 安全余量: 上限减 margin、下限加 margin (只影响 LP, 展示层仍用合同原界限).
-    let mut a_ub: Vec<Vec<f64>> = Vec::new();
-    let mut b_ub: Vec<f64> = Vec::new();
-
-    for spec in active_specs {
-        let coefs: Vec<f64> = kept
-            .iter()
-            .map(|c| c.get(&spec.indicator).unwrap())
-            .collect();
-        let use_max = matches!(spec.direction, Direction::Upper | Direction::Range);
-        let use_min = matches!(spec.direction, Direction::Lower | Direction::Range);
-        // 负 margin 会反向放宽约束产出违约配比, 在此钳制 (solve_json 是对外 JSON 边界)
-        let margin = spec.margin.unwrap_or(0.0).max(0.0);
-        if use_max {
-            if let Some(max) = spec.max {
-                let max = if spec.indicator == "petro" {
-                    petro_cap.unwrap_or(max)
-                } else {
-                    max
-                };
-                a_ub.push(coefs.clone());
-                b_ub.push(max + spec_eps(spec, eps) - margin);
-            }
-        }
-        if use_min {
-            if let Some(min) = spec.min {
-                a_ub.push(coefs.iter().map(|v| -v).collect());
-                b_ub.push(-(min + margin));
-            }
+fn build_formulas(coals: &[&Coal], models: &EvaluatorSet) -> HashMap<String, MetricFormula> {
+    let mut formulas = HashMap::new();
+    for indicator in INDICATORS {
+        if let Some(formula) = formula_for(indicator, coals) {
+            formulas.insert(indicator.into(), formula);
         }
     }
 
-    let lp = LpProblem {
-        n,
-        c: cifs.clone(),
-        a_ub,
-        b_ub,
-    };
+    if let (Some(model), Some(base)) = (models.g.as_ref(), formulas.get("G").cloned()) {
+        let coefficients: Vec<f64> = base
+            .proxy_coefficients
+            .iter()
+            .map(|value| model.predictor.slope * value)
+            .collect();
+        formulas.insert(
+            "G".into(),
+            MetricFormula {
+                proxy_coefficients: base.proxy_coefficients,
+                numerators: coefficients,
+                denominators: vec![1.0; coals.len()],
+                intercept: model.predictor.intercept,
+                method: EvaluationMethod::AffineCalibration,
+                verified: true,
+                uncertainty: Some(model.p90_abs_error),
+                model: Some(model.summary(true)),
+            },
+        );
+    }
 
-    let (x, _obj) = lp.solve()?;
+    if let Some(model) = &models.csr {
+        let predictor = &model.predictor;
+        let evaluated_coefficients: Option<Vec<f64>> = coals
+            .iter()
+            .map(|coal| {
+                Some(
+                    predictor.beta_s * coal.get("S")?
+                        + predictor.beta_a * coal.get("A")?
+                        + predictor.beta_v * coal.get("V")?
+                        + predictor.beta_g * coal.get("G")?
+                        + predictor.beta_y * coal.get("Y")?
+                        + predictor.beta_m * coal.get("M")?,
+                )
+            })
+            .collect();
+        if let Some(evaluated_coefficients) = evaluated_coefficients {
+            let proxy_coefficients: Vec<f64> = coals
+                .iter()
+                .zip(&evaluated_coefficients)
+                .map(|(coal, evaluated)| coal.get("CSR").unwrap_or(*evaluated))
+                .collect();
+            formulas.insert(
+                "CSR".into(),
+                MetricFormula {
+                    proxy_coefficients,
+                    numerators: evaluated_coefficients,
+                    denominators: vec![1.0; coals.len()],
+                    intercept: predictor.intercept,
+                    method: EvaluationMethod::Regression,
+                    verified: true,
+                    uncertainty: Some(model.p90_abs_error),
+                    model: Some(model.summary(true)),
+                },
+            );
+        }
+    }
+    formulas
+}
 
-    // 后处理: 三视图
-    let recipe: std::collections::HashMap<String, f64> = kept
+fn expanded_domain(minimum: f64, maximum: f64, ratio: f64) -> (f64, f64) {
+    let width = (maximum - minimum).max(1e-9);
+    (minimum - width * ratio, maximum + width * ratio)
+}
+
+fn push_linear_domain(
+    coefficients: Vec<f64>,
+    intercept: f64,
+    minimum: f64,
+    maximum: f64,
+    inequalities: &mut Vec<Vec<f64>>,
+    bounds: &mut Vec<f64>,
+) {
+    inequalities.push(coefficients.clone());
+    bounds.push(maximum - intercept);
+    inequalities.push(coefficients.into_iter().map(|value| -value).collect());
+    bounds.push(intercept - minimum);
+}
+
+/// 已验证模型用于 Hard 约束时，训练域本身也必须进入 LP。这样求解器不能
+/// 通过选择便宜的域外配方来利用外推值“满足”合同。
+fn append_hard_model_domains(
+    coals: &[&Coal],
+    specs: &[&Spec],
+    models: &EvaluatorSet,
+    inequalities: &mut Vec<Vec<f64>>,
+    bounds: &mut Vec<f64>,
+) -> Option<()> {
+    let hard_g = specs
         .iter()
-        .zip(x.iter())
-        .filter(|(_, &xi)| xi > 1e-5)
-        .map(|(c, &xi)| (c.name.clone(), xi))
+        .any(|spec| spec.indicator == "G" && spec.enforcement == Enforcement::Hard);
+    let hard_csr = specs
+        .iter()
+        .any(|spec| spec.indicator == "CSR" && spec.enforcement == Enforcement::Hard);
+
+    if hard_g && models.g.is_some() {
+        let model = models.g.as_ref()?;
+        let coefficients = coals
+            .iter()
+            .map(|coal| coal.get("G"))
+            .collect::<Option<Vec<_>>>()?;
+        let (minimum, maximum) = expanded_domain(
+            model.training_min,
+            model.training_max,
+            models.extrapolation_ratio,
+        );
+        push_linear_domain(coefficients, 0.0, minimum, maximum, inequalities, bounds);
+    }
+
+    if hard_csr {
+        if let Some(model) = &models.csr {
+            for (index, indicator) in ["S", "A", "V", "G", "Y", "M"].into_iter().enumerate() {
+                let coefficients = coals
+                    .iter()
+                    .map(|coal| coal.get(indicator))
+                    .collect::<Option<Vec<_>>>()?;
+                let (minimum, maximum) = expanded_domain(
+                    model.training_min[index],
+                    model.training_max[index],
+                    models.extrapolation_ratio,
+                );
+                push_linear_domain(coefficients, 0.0, minimum, maximum, inequalities, bounds);
+            }
+        }
+    }
+    Some(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_once(
+    coals: &[&Coal],
+    specs: &[&Spec],
+    request: &BlendRequest,
+    formulas: &HashMap<String, MetricFormula>,
+    models: &EvaluatorSet,
+    petro_proxy_lower: Option<f64>,
+    petro_proxy_upper: Option<f64>,
+    mut warnings: Vec<String>,
+) -> Option<(BlendResult, Vec<f64>)> {
+    let count = coals.len();
+    let costs: Vec<f64> = coals.iter().map(|coal| coal.cif()).collect();
+    let mut inequalities = Vec::new();
+    let mut bounds = Vec::new();
+
+    for spec in specs
+        .iter()
+        .filter(|spec| spec.enforcement == Enforcement::Hard)
+    {
+        let formula = formulas.get(&spec.indicator)?;
+        let rule = acceptance_rule(spec, request.truncate_decimal);
+        let margin = spec.margin.unwrap_or(0.0);
+        if matches!(spec.direction, Direction::Upper | Direction::Range) {
+            if let Some(maximum) = spec.max {
+                let mut upper = effective_upper(maximum, &rule) - margin;
+                if spec.indicator == "petro" {
+                    upper = petro_proxy_upper.unwrap_or(upper);
+                }
+                let (row, bound) = formula.upper_constraint(upper);
+                inequalities.push(row);
+                bounds.push(bound);
+            }
+        }
+        if matches!(spec.direction, Direction::Lower | Direction::Range) {
+            if let Some(minimum) = spec.min {
+                let mut lower = effective_lower(minimum, &rule) + margin;
+                if spec.indicator == "petro" {
+                    lower = petro_proxy_lower.unwrap_or(lower);
+                }
+                let (row, bound) = formula.lower_constraint(lower);
+                inequalities.push(row);
+                bounds.push(bound);
+            }
+        }
+    }
+    append_hard_model_domains(coals, specs, models, &mut inequalities, &mut bounds)?;
+
+    let problem = LpProblem {
+        n: count,
+        c: costs,
+        a_ub: inequalities,
+        b_ub: bounds,
+    };
+    let (ratios, _) = problem.solve()?;
+
+    let recipe = coals
+        .iter()
+        .zip(&ratios)
+        .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+        .map(|(coal, ratio)| (coal.name.clone(), *ratio))
         .collect();
-
-    let fob_per_ton: f64 = kept.iter().zip(x.iter()).map(|(c, xi)| c.fob * xi).sum();
-    let frt_per_ton: f64 = kept.iter().zip(x.iter()).map(|(c, xi)| c.frt * xi).sum();
+    let fob_per_ton: f64 = coals
+        .iter()
+        .zip(&ratios)
+        .map(|(coal, ratio)| coal.fob * ratio)
+        .sum();
+    let frt_per_ton: f64 = coals
+        .iter()
+        .zip(&ratios)
+        .map(|(coal, ratio)| coal.frt * ratio)
+        .sum();
     let cif_per_ton = fob_per_ton + frt_per_ton;
-
     let cost = CostBreakdown {
         fob_per_ton,
         frt_per_ton,
         cif_per_ton,
-        total_fob: req.total_quantity.map(|q| q * fob_per_ton),
-        total_frt: req.total_quantity.map(|q| q * frt_per_ton),
-        total_cif: req.total_quantity.map(|q| q * cif_per_ton),
+        total_fob: request
+            .total_quantity
+            .map(|quantity| quantity * fob_per_ton),
+        total_frt: request
+            .total_quantity
+            .map(|quantity| quantity * frt_per_ton),
+        total_cif: request
+            .total_quantity
+            .map(|quantity| quantity * cif_per_ton),
     };
-
-    // 视图 B: 订单 (按配比降序)
-    let mut orders: Vec<OrderItem> = kept
+    let mut orders: Vec<OrderItem> = coals
         .iter()
-        .zip(x.iter())
-        .filter(|(_, &xi)| xi > 1e-5)
-        .map(|(c, &xi)| {
-            let tons = req.total_quantity.map(|q| q * xi);
+        .zip(&ratios)
+        .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+        .map(|(coal, ratio)| {
+            let tons = request.total_quantity.map(|quantity| quantity * ratio);
             OrderItem {
-                coal: c.name.clone(),
-                ratio: xi,
+                coal: coal.name.clone(),
+                ratio: *ratio,
                 tons,
-                fob_amount: tons.map(|t| t * c.fob),
-                frt_amount: tons.map(|t| t * c.frt),
-                cif_amount: tons.map(|t| t * c.cif()),
+                fob_amount: tons.map(|value| value * coal.fob),
+                frt_amount: tons.map(|value| value * coal.frt),
+                cif_amount: tons.map(|value| value * coal.cif()),
             }
         })
         .collect();
-    orders.sort_by(|a, b| b.ratio.partial_cmp(&a.ratio).unwrap());
+    orders.sort_by(|left, right| right.ratio.total_cmp(&left.ratio));
 
-    // 视图 C: 指标体检 (按 INDICATORS 顺序)
     let mut indicator_check = Vec::new();
-    for &ind in INDICATORS.iter() {
-        let spec = active_specs.iter().find(|s| s.indicator == ind).cloned();
-        if !kept.iter().all(|c| c.has(ind)) {
-            // 煤池数据不全, 跳过
-            continue;
-        }
-        let value: f64 = kept
+    for indicator in INDICATORS {
+        let spec = specs
             .iter()
-            .zip(x.iter())
-            .map(|(c, xi)| c.get(ind).unwrap() * xi)
-            .sum();
-
-        let (slack, binding) = if let Some(s) = &spec {
-            compute_slack_binding(value, s, spec_eps(s, eps))
-        } else {
-            (None, false)
+            .find(|spec| spec.indicator == indicator)
+            .copied();
+        let Some(formula) = formulas.get(indicator) else {
+            if let Some(spec) = spec {
+                let proxy_coefficients = coals
+                    .iter()
+                    .map(|coal| coal.get(indicator))
+                    .collect::<Option<Vec<_>>>();
+                let proxy = proxy_coefficients
+                    .as_deref()
+                    .map(|values| values.iter().zip(&ratios).map(|(a, b)| a * b).sum());
+                indicator_check.push(IndicatorCheck {
+                    indicator: indicator.into(),
+                    label_zh: label_zh(indicator).into(),
+                    value: proxy.unwrap_or(0.0),
+                    min: spec.min,
+                    max: spec.max,
+                    slack: None,
+                    binding: false,
+                    proxy_value: proxy,
+                    evaluated_value: None,
+                    judged_value: None,
+                    uncertainty: None,
+                    method: EvaluationMethod::Unavailable,
+                    status: EvaluationStatus::Unverified,
+                    model: None,
+                });
+            }
+            continue;
         };
-
+        let Some(evaluated) = formula.evaluate(&ratios) else {
+            continue;
+        };
+        let proxy = formula.proxy_value(&ratios);
+        let (mut verified, model_summary) =
+            runtime_model_state(indicator, formula, coals, &ratios, models);
+        let invalid_model_output = model_summary.is_some()
+            && matches!(indicator, "G" | "CSR")
+            && !(0.0..=100.0).contains(&evaluated);
+        if invalid_model_output {
+            verified = false;
+            warnings.push(format!(
+                "{}模型输出 {evaluated:.3} 超出 0~100 物理范围",
+                label_zh(indicator)
+            ));
+        }
+        let mut outcome = check_value(evaluated, spec, request.truncate_decimal, verified);
+        if invalid_model_output {
+            outcome.status = EvaluationStatus::Fail;
+        }
+        if model_summary
+            .as_ref()
+            .is_some_and(|summary| !summary.in_domain)
+        {
+            warnings.push(format!(
+                "{}模型超出训练域，本次只展示为未验证估算",
+                label_zh(indicator)
+            ));
+        }
         indicator_check.push(IndicatorCheck {
-            indicator: ind.into(),
-            label_zh: label_zh(ind).into(),
-            value,
-            min: spec.as_ref().and_then(|s| s.min),
-            max: spec.as_ref().and_then(|s| s.max),
-            slack,
-            binding,
+            indicator: indicator.into(),
+            label_zh: label_zh(indicator).into(),
+            value: evaluated,
+            min: spec.and_then(|item| item.min),
+            max: spec.and_then(|item| item.max),
+            slack: outcome.slack,
+            binding: outcome.binding,
+            proxy_value: Some(proxy),
+            evaluated_value: Some(evaluated),
+            judged_value: Some(outcome.judged),
+            uncertainty: formula.uncertainty,
+            method: formula.method,
+            status: outcome.status,
+            model: model_summary,
         });
     }
 
-    let result = BlendResult {
+    if specs
+        .iter()
+        .filter(|spec| spec.enforcement == Enforcement::Hard)
+        .any(|spec| {
+            indicator_check.iter().any(|check| {
+                check.indicator == spec.indicator && check.status == EvaluationStatus::Fail
+            })
+        })
+    {
+        return None;
+    }
+
+    let mut result = BlendResult {
         ok: true,
         reason: None,
         recipe,
@@ -353,98 +638,132 @@ fn solve_once(
         indicator_check,
         petrography_check: None,
         warnings,
+        quality_status: QualityStatus::Estimated,
+        evaluation_iterations: 0,
     };
-    Some((result, x))
+    finalize_quality_status(&mut result, specs);
+    Some((result, ratios))
 }
 
-/// 可选 CSR 预测预处理.
-///
-/// 提供历史观测、样本足够且拟合 R² ≥ `MIN_CSR_R2` 时, 用预测值覆盖每只煤的 CSR;
-/// 6 项自变量 (S/A/V/G/Y/M) 缺任意一项的煤保留原 CSR 并逐煤点名警告.
-/// 观测缺失或为空 (None / Some([])) → 原样返回;
-/// 样本不足 / 矩阵奇异 / R² 不足 → 原样返回并附警告 (不静默吞掉).
-fn apply_csr_prediction(
-    coals: &[Coal],
-    observations: Option<&[CsrObservation]>,
-) -> (Vec<Coal>, Vec<String>) {
-    let obs = match observations {
-        Some(o) if !o.is_empty() => o,
-        _ => return (coals.to_vec(), Vec::new()),
-    };
-    let predictor = match CsrPredictor::fit(obs) {
-        Ok(p) if p.r_squared >= MIN_CSR_R2 => p,
-        Ok(p) => {
-            let msg = format!(
-                "CSR 预测跳过: R²={:.3} < {:.2}, 拟合质量不足",
-                p.r_squared, MIN_CSR_R2
-            );
-            return (coals.to_vec(), vec![msg]);
-        }
-        Err(e) => return (coals.to_vec(), vec![format!("CSR 预测跳过: {}", e)]),
-    };
-    let mut warnings = Vec::new();
-    let out = coals
-        .iter()
-        .map(|c| {
-            let mut c = c.clone();
-            match predictor.predict_coal(&c) {
-                Some(csr) => {
-                    c.props.insert("CSR".into(), csr);
-                }
-                None => warnings.push(format!("{}: 缺输入指标, CSR 保留录入值", c.name)),
+fn runtime_model_state(
+    indicator: &str,
+    formula: &MetricFormula,
+    coals: &[&Coal],
+    ratios: &[f64],
+    models: &EvaluatorSet,
+) -> (bool, Option<ModelSummary>) {
+    match indicator {
+        "G" => {
+            if let Some(model) = &models.g {
+                let in_domain =
+                    model.is_in_domain(formula.proxy_value(ratios), models.extrapolation_ratio);
+                return (
+                    formula.verified && in_domain,
+                    Some(model.summary(in_domain)),
+                );
             }
-            c
-        })
-        .collect();
-    (out, warnings)
+        }
+        "CSR" => {
+            if let Some(model) = &models.csr {
+                let features = mixed_csr_features(coals, ratios);
+                let in_domain = features
+                    .is_some_and(|values| model.is_in_domain(values, models.extrapolation_ratio));
+                return (
+                    formula.verified && in_domain,
+                    Some(model.summary(in_domain)),
+                );
+            }
+        }
+        _ => {}
+    }
+    (formula.verified, formula.model.clone())
 }
 
-/// 指标各自适用的截断容差: 一位小数截断规则只适用于百分比量纲的化验指标,
-/// 岩相 σ 是两位小数量纲, eps=0.0999 会把 0.15 上限实际放宽到 0.2499,
-/// 并使收紧迭代永远够不到目标 (有效界下限被 eps 托住).
-fn spec_eps(spec: &Spec, eps: f64) -> f64 {
-    if spec.indicator == "petro" {
-        0.0
+fn mixed_csr_features(coals: &[&Coal], ratios: &[f64]) -> Option<[f64; 6]> {
+    let mixed = |indicator: &str| -> Option<f64> {
+        coals
+            .iter()
+            .zip(ratios)
+            .map(|(coal, ratio)| Some(coal.get(indicator)? * ratio))
+            .sum()
+    };
+    Some([
+        mixed("S")?,
+        mixed("A")?,
+        mixed("V")?,
+        mixed("G")?,
+        mixed("Y")?,
+        mixed("M")?,
+    ])
+}
+
+fn update_petro_check(
+    result: &mut BlendResult,
+    sigma: f64,
+    outcome: &crate::quality::CheckOutcome,
+    method: EvaluationMethod,
+) {
+    if let Some(check) = result
+        .indicator_check
+        .iter_mut()
+        .find(|check| check.indicator == "petro")
+    {
+        check.value = sigma;
+        check.evaluated_value = Some(sigma);
+        check.judged_value = Some(outcome.judged);
+        check.slack = outcome.slack;
+        check.binding = outcome.binding;
+        check.method = method;
+        check.status = outcome.status;
+        check.uncertainty = None;
+        check.model = None;
+    }
+}
+
+fn finalize_quality_status(result: &mut BlendResult, specs: &[&Spec]) {
+    if !result.ok {
+        result.quality_status = QualityStatus::NeedsReview;
+        return;
+    }
+    let mut estimated = specs.is_empty();
+    let mut evaluated_contract_items = 0usize;
+    for spec in specs {
+        if spec.enforcement == Enforcement::Advisory {
+            continue;
+        }
+        evaluated_contract_items += 1;
+        let Some(check) = result
+            .indicator_check
+            .iter()
+            .find(|check| check.indicator == spec.indicator)
+        else {
+            result.quality_status = QualityStatus::NeedsReview;
+            return;
+        };
+        match check.status {
+            EvaluationStatus::Fail => {
+                result.quality_status = QualityStatus::NeedsReview;
+                return;
+            }
+            EvaluationStatus::Unverified => estimated = true,
+            EvaluationStatus::Pass | EvaluationStatus::TolerancePass => {}
+        }
+    }
+    if evaluated_contract_items == 0 {
+        result.quality_status = QualityStatus::Estimated;
+        return;
+    }
+    result.quality_status = if estimated {
+        QualityStatus::Estimated
     } else {
-        eps
-    }
-}
-
-/// 计算单项指标的余量和是否 binding.
-/// eps 是截断容差: 启用一位小数截断时 max 实际上限是 max+eps, 算 slack 要带上.
-/// 只对 direction 实际启用的侧计算 slack, 保持与 LP 建模一致.
-/// binding 要求 slack >= 0 (违反约束的负 slack 不算 binding).
-fn compute_slack_binding(value: f64, spec: &Spec, eps: f64) -> (Option<f64>, bool) {
-    let use_max = matches!(spec.direction, Direction::Upper | Direction::Range);
-    let use_min = matches!(spec.direction, Direction::Lower | Direction::Range);
-
-    let mut slacks: Vec<f64> = Vec::new();
-    if use_max {
-        if let Some(max) = spec.max {
-            slacks.push((max + eps) - value); // 离有效上限的余量
-        }
-    }
-    if use_min {
-        if let Some(min) = spec.min {
-            slacks.push(value - min); // 离下限的余量 (下限不松)
-        }
-    }
-    if slacks.is_empty() {
-        return (None, false);
-    }
-    let min_slack = slacks
-        .iter()
-        .cloned()
-        .fold(f64::INFINITY, |a, b| if a < b { a } else { b });
-    // binding: slack 接近 0. 容忍 LP 求解器精度产生的微小负值 (Clarabel ε ~1e-7),
-    // 但显著负值 (真违反约束) 不算 binding.
-    let binding = min_slack > -1e-6 && min_slack < BINDING_TOL;
-    (Some(min_slack), binding)
+        QualityStatus::Verified
+    };
 }
 
 // ============================================================================
-// LP 子问题封装
+// Clarabel LP 子问题
 // ============================================================================
+
 struct LpProblem {
     n: usize,
     c: Vec<f64>,
@@ -455,67 +774,100 @@ struct LpProblem {
 impl LpProblem {
     fn solve(&self) -> Option<(Vec<f64>, f64)> {
         let n = self.n;
-        let m_ub = self.a_ub.len();
-        let total_rows = 1 + m_ub + n;
+        let inequality_count = self.a_ub.len();
+        let total_rows = 1 + inequality_count + n;
+        let mut triplets = Vec::new();
 
-        let mut triplets: Vec<(usize, usize, f64)> = Vec::new();
-        // 等式 sum(x) = 1 → ZeroCone
-        for j in 0..n {
-            triplets.push((0, j, 1.0));
+        for column in 0..n {
+            triplets.push((0, column, 1.0));
         }
-        // 不等式 → NonnegativeCone
-        for (i, row) in self.a_ub.iter().enumerate() {
-            for (j, &v) in row.iter().enumerate() {
-                triplets.push((1 + i, j, v));
+        for (row_index, row) in self.a_ub.iter().enumerate() {
+            for (column, value) in row.iter().enumerate() {
+                triplets.push((1 + row_index, column, *value));
             }
         }
-        // 非负 x_i ≥ 0
-        for j in 0..n {
-            triplets.push((1 + m_ub + j, j, -1.0));
+        for column in 0..n {
+            triplets.push((1 + inequality_count + column, column, -1.0));
         }
 
-        let a_csc = build_csc(total_rows, n, &triplets);
-        let mut b = vec![1.0_f64];
-        b.extend_from_slice(&self.b_ub);
-        b.extend(std::iter::repeat_n(0.0, n));
-
-        let p_csc = CscMatrix::<f64>::zeros((n, n));
-        let cones = [ZeroConeT(1), NonnegativeConeT(m_ub + n)];
-
+        let constraint_matrix = build_csc(total_rows, n, &triplets);
+        let mut right_hand_side = vec![1.0];
+        right_hand_side.extend_from_slice(&self.b_ub);
+        right_hand_side.extend(std::iter::repeat_n(0.0, n));
+        let quadratic = CscMatrix::<f64>::zeros((n, n));
+        let cones = [ZeroConeT(1), NonnegativeConeT(inequality_count + n)];
         let settings = DefaultSettingsBuilder::<f64>::default()
             .verbose(false)
             .max_iter(200)
             .build()
             .ok()?;
-
-        let mut solver = DefaultSolver::new(&p_csc, &self.c, &a_csc, &b, &cones, settings);
+        let mut solver = DefaultSolver::new(
+            &quadratic,
+            &self.c,
+            &constraint_matrix,
+            &right_hand_side,
+            &cones,
+            settings,
+        );
         solver.solve();
-
-        match solver.solution.status {
-            SolverStatus::Solved | SolverStatus::AlmostSolved => {
-                Some((solver.solution.x.clone(), solver.solution.obj_val))
-            }
-            _ => None,
+        if !matches!(
+            solver.solution.status,
+            SolverStatus::Solved | SolverStatus::AlmostSolved
+        ) {
+            return None;
         }
+        let mut solution = solver.solution.x.clone();
+        let raw_sum: f64 = solution.iter().sum();
+        let raw_valid = solution
+            .iter()
+            .all(|value| value.is_finite() && *value >= -SOLUTION_TOLERANCE)
+            && (raw_sum - 1.0).abs() <= SOLUTION_TOLERANCE;
+        if !raw_valid {
+            return None;
+        }
+        for value in &mut solution {
+            *value = value.max(0.0);
+        }
+        let normalized_sum: f64 = solution.iter().sum();
+        if !normalized_sum.is_finite() || normalized_sum <= 0.0 {
+            return None;
+        }
+        for value in &mut solution {
+            *value /= normalized_sum;
+        }
+        let valid = self.a_ub.iter().zip(&self.b_ub).all(|(row, bound)| {
+            row.iter()
+                .zip(&solution)
+                .map(|(coefficient, value)| coefficient * value)
+                .sum::<f64>()
+                <= bound + SOLUTION_TOLERANCE
+        });
+        let objective = self
+            .c
+            .iter()
+            .zip(&solution)
+            .map(|(coefficient, value)| coefficient * value)
+            .sum();
+        valid.then_some((solution, objective))
     }
 }
 
-fn build_csc(rows: usize, cols: usize, triplets: &[(usize, usize, f64)]) -> CscMatrix<f64> {
-    let mut by_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); cols];
-    for &(i, j, v) in triplets {
-        by_col[j].push((i, v));
+fn build_csc(rows: usize, columns: usize, triplets: &[(usize, usize, f64)]) -> CscMatrix<f64> {
+    let mut by_column: Vec<Vec<(usize, f64)>> = vec![Vec::new(); columns];
+    for &(row, column, value) in triplets {
+        by_column[column].push((row, value));
     }
-    let mut colptr = Vec::with_capacity(cols + 1);
-    let mut rowval = Vec::new();
-    let mut nzval = Vec::new();
-    colptr.push(0);
-    for col in &mut by_col {
-        col.sort_by_key(|&(i, _)| i);
-        for &(i, v) in col.iter() {
-            rowval.push(i);
-            nzval.push(v);
+    let mut column_pointers = Vec::with_capacity(columns + 1);
+    let mut row_values = Vec::new();
+    let mut nonzero_values = Vec::new();
+    column_pointers.push(0);
+    for column in &mut by_column {
+        column.sort_by_key(|&(row, _)| row);
+        for &(row, value) in column.iter() {
+            row_values.push(row);
+            nonzero_values.push(value);
         }
-        colptr.push(rowval.len());
+        column_pointers.push(row_values.len());
     }
-    CscMatrix::new(rows, cols, colptr, rowval, nzval)
+    CscMatrix::new(rows, columns, column_pointers, row_values, nonzero_values)
 }
