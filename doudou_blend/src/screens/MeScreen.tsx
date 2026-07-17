@@ -2,39 +2,127 @@
  * 屏 5 - 我的 / 设置.
  * 当前只放登出 + 数据清理入口, 后续加 CSR 校准 / 导出 / 关于.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { getBackend } from "../backend";
 import {
   clearAllCoalPrefs,
-  clearHistory,
   clearUserContract,
   getCoalPrefs,
-  getHistory,
   getUserContract,
   logout,
 } from "../storage";
 
-function getStats() {
+interface Stats {
+  prefs_count: number;
+  history_count: number | null;
+  has_user_contract: boolean;
+}
+
+function getInitialStats(): Stats {
   return {
     prefs_count: Object.keys(getCoalPrefs()).length,
-    history_count: getHistory().length,
+    history_count: null,
     has_user_contract: getUserContract() != null,
   };
 }
 
 export function MeScreen() {
-  const [stats, setStats] = useState(getStats());
+  const [stats, setStats] = useState<Stats>(getInitialStats);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [clearingHistory, setClearingHistory] = useState(false);
+  const historyRequestRef = useRef(0);
+  const clearingHistoryRef = useRef(false);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    const refresh = () => setStats(getStats());
-    window.addEventListener("doudou:prefs_changed", refresh);
-    window.addEventListener("doudou:contract_changed", refresh);
-    window.addEventListener("doudou:history_changed", refresh);
+    mountedRef.current = true;
+    const refreshLocalStats = () => {
+      const current = getInitialStats();
+      setStats((previous) => ({
+        ...previous,
+        prefs_count: current.prefs_count,
+        has_user_contract: current.has_user_contract,
+      }));
+    };
+    const refreshHistoryCount = async () => {
+      const requestId = ++historyRequestRef.current;
+      try {
+        const backend = await getBackend();
+        const count = await backend.countHistory();
+        if (
+          !mountedRef.current ||
+          requestId !== historyRequestRef.current
+        ) {
+          return;
+        }
+        setStats((previous) => ({ ...previous, history_count: count }));
+        setHistoryError(null);
+      } catch {
+        if (
+          mountedRef.current &&
+          requestId === historyRequestRef.current
+        ) {
+          setHistoryError("历史数量读取失败");
+        }
+      }
+    };
+    const onHistoryChange = () => void refreshHistoryCount();
+
+    void refreshHistoryCount();
+    window.addEventListener("doudou:prefs_changed", refreshLocalStats);
+    window.addEventListener("doudou:contract_changed", refreshLocalStats);
+    window.addEventListener("doudou:history_changed", onHistoryChange);
     return () => {
-      window.removeEventListener("doudou:prefs_changed", refresh);
-      window.removeEventListener("doudou:contract_changed", refresh);
-      window.removeEventListener("doudou:history_changed", refresh);
+      mountedRef.current = false;
+      historyRequestRef.current += 1;
+      window.removeEventListener("doudou:prefs_changed", refreshLocalStats);
+      window.removeEventListener("doudou:contract_changed", refreshLocalStats);
+      window.removeEventListener("doudou:history_changed", onHistoryChange);
     };
   }, []);
+
+  async function clearBackendHistory() {
+    if (
+      clearingHistoryRef.current ||
+      !confirm("清空所有历史方案?")
+    ) {
+      return;
+    }
+    clearingHistoryRef.current = true;
+    const requestId = ++historyRequestRef.current;
+    setClearingHistory(true);
+    setHistoryError(null);
+    try {
+      const backend = await getBackend();
+      await backend.clearHistory();
+      // Backend 会同步派发 history_changed；清空完成后重新成为最新代，
+      // 确定性写入 0，避免事件触发的旧计数挂起或失败后覆盖结果。
+      historyRequestRef.current += 1;
+      if (mountedRef.current) {
+        setStats((previous) => ({ ...previous, history_count: 0 }));
+        setHistoryError(null);
+      }
+    } catch {
+      if (requestId === historyRequestRef.current) {
+        historyRequestRef.current += 1;
+      }
+      if (mountedRef.current) {
+        setHistoryError("清空历史失败，请重试");
+      }
+    } finally {
+      clearingHistoryRef.current = false;
+      if (mountedRef.current) {
+        setClearingHistory(false);
+      }
+    }
+  }
+
+  const historyCountText =
+    stats.history_count == null
+      ? historyError
+        ? "读取失败"
+        : "读取中..."
+      : `${stats.history_count} 条`;
 
   return (
     <>
@@ -83,7 +171,12 @@ export function MeScreen() {
           label="自定义合同"
           value={stats.has_user_contract ? "已修改" : "用默认"}
         />
-        <Row label="历史方案" value={`${stats.history_count} 条`} isLast />
+        <Row label="历史方案" value={historyCountText} isLast />
+        {historyError && (
+          <div style={{ fontSize: 11, color: "var(--c-danger)", marginTop: 4 }}>
+            {historyError}
+          </div>
+        )}
       </div>
 
       {/* 危险区 */}
@@ -108,11 +201,10 @@ export function MeScreen() {
           }}
         />
         <DangerButton
-          label="清空历史"
+          label={clearingHistory ? "清空中..." : "清空历史"}
           hint="删除所有保存的配煤方案"
-          onClick={() => {
-            if (confirm("清空所有历史方案?")) clearHistory();
-          }}
+          disabled={clearingHistory}
+          onClick={() => void clearBackendHistory()}
         />
       </div>
 
@@ -121,7 +213,7 @@ export function MeScreen() {
         <div className="card-title">关于</div>
         <Row label="版本" value="v0.1.1" />
         <Row label="运行模式" value={detectMode()} />
-        <Row label="数据源" value="73 煤 master v2.0" isLast />
+        <Row label="数据源" value="内置 Master" isLast />
       </div>
 
       <p
@@ -176,20 +268,24 @@ function DangerButton({
   label,
   hint,
   onClick,
+  disabled = false,
 }: {
   label: string;
   hint: string;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       style={{
         display: "block",
         width: "100%",
         textAlign: "left",
         padding: "12px 0",
         borderBottom: "1px solid var(--c-border)",
+        opacity: disabled ? 0.5 : 1,
       }}
     >
       <div

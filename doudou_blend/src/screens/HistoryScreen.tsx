@@ -4,7 +4,12 @@
  * 支持回填混煤实测化验 (CSR + S/A/V/G/Y/M) —— 数据闭环: 把「配比 + 预测指标」
  * 配上事后化验单, 既是信任对照 (预测 vs 实测), 也是 G 修正/CSR 回归的样本.
  */
-import { useEffect, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { getBackend } from "../backend";
 import type { HistoryRecord, MeasuredQuality } from "../types";
 
@@ -41,29 +46,73 @@ function recipeBrief(recipe: Record<string, number>): string {
 export function HistoryScreen() {
   const [list, setList] = useState<HistoryRecord[]>([]);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const refreshRequestRef = useRef(0);
+  const clearingRef = useRef(false);
+  const mountedRef = useRef(true);
 
   async function refresh() {
+    const requestId = ++refreshRequestRef.current;
     try {
       const backend = await getBackend();
-      setList(await backend.listHistory());
+      const nextList = await backend.listHistory();
+      if (
+        !mountedRef.current ||
+        requestId !== refreshRequestRef.current
+      ) {
+        return;
+      }
+      setList(nextList);
       setLoadErr(null);
     } catch {
-      setLoadErr("加载历史失败");
+      if (
+        mountedRef.current &&
+        requestId === refreshRequestRef.current
+      ) {
+        setLoadErr("加载历史失败");
+      }
     }
   }
 
   useEffect(() => {
+    mountedRef.current = true;
     void refresh();
     const onChange = () => void refresh();
     window.addEventListener("doudou:history_changed", onChange);
-    return () => window.removeEventListener("doudou:history_changed", onChange);
+    return () => {
+      mountedRef.current = false;
+      refreshRequestRef.current += 1;
+      window.removeEventListener("doudou:history_changed", onChange);
+    };
   }, []);
 
   async function clearAll() {
-    if (!confirm("清空所有历史记录?")) return;
-    const backend = await getBackend();
-    await backend.clearHistory();
-    void refresh();
+    if (
+      clearingRef.current ||
+      !confirm("清空所有历史记录?")
+    ) {
+      return;
+    }
+    clearingRef.current = true;
+    refreshRequestRef.current += 1;
+    setClearing(true);
+    try {
+      const backend = await getBackend();
+      await backend.clearHistory();
+      if (mountedRef.current) {
+        setList([]);
+        setLoadErr(null);
+      }
+    } catch {
+      if (mountedRef.current) {
+        setLoadErr("清空历史失败，请重试");
+      }
+    } finally {
+      clearingRef.current = false;
+      if (mountedRef.current) {
+        setClearing(false);
+      }
+    }
   }
 
   return (
@@ -81,9 +130,10 @@ export function HistoryScreen() {
         {list.length > 0 && (
           <button
             style={{ fontSize: 12, color: "var(--c-danger)", padding: "4px 10px" }}
+            disabled={clearing}
             onClick={() => void clearAll()}
           >
-            清空
+            {clearing ? "清空中..." : "清空"}
           </button>
         )}
       </div>
@@ -97,7 +147,7 @@ export function HistoryScreen() {
         </div>
       ) : (
         list.map((entry) => (
-          <HistoryCard key={entry.id} entry={entry} onSaved={refresh} />
+          <HistoryCard key={entry.id} entry={entry} />
         ))
       )}
     </>
@@ -147,18 +197,20 @@ function inputsFromEntry(entry: HistoryRecord): Record<MeasuredKey, string> {
 }
 
 /** 单条历史卡片 + 内联回填混煤实测化验 (7 项均可选, 至少填一项). */
-function HistoryCard({
-  entry,
-  onSaved,
-}: {
-  entry: HistoryRecord;
-  onSaved: () => void | Promise<void>;
-}) {
+function HistoryCard({ entry }: { entry: HistoryRecord }) {
   const [editing, setEditing] = useState(false);
   const [inputs, setInputs] = useState<Record<MeasuredKey, string>>(() =>
     inputsFromEntry(entry),
   );
   const [err, setErr] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // 列表刷新后, 非编辑态同步外部最新值 (避免 useState 初值过期).
   useEffect(() => {
@@ -189,11 +241,13 @@ function HistoryCard({
     try {
       const backend = await getBackend();
       await backend.setMeasuredQuality(entry.id, measured);
+      if (!mountedRef.current) return;
       setEditing(false);
       setErr(null);
-      await onSaved();
     } catch {
-      setErr("保存失败，请重试");
+      if (mountedRef.current) {
+        setErr("保存失败，请重试");
+      }
     }
   }
 

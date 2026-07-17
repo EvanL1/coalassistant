@@ -1,8 +1,12 @@
 /**
  * 屏 2 - 煤池
- * 73+ 煤列表 + 状态过滤 + 点击编辑 (CoalEditor)
+ * 煤种列表 + 状态过滤 + 点击编辑 (CoalEditor)
  */
 import { useEffect, useMemo, useState } from "react";
+import {
+  resolveCoalPool,
+  type ResolvedCoal,
+} from "../domain/resolvedCoal";
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalStatus, MasterCoalEntry } from "../types";
@@ -38,7 +42,7 @@ export function CoalPoolScreen() {
   const [userCoals, setUserCoals] = useState<MasterCoalEntry[]>([]);
   const [filter, setFilter] = useState<CoalStatus | "all" | "enabled" | "hidden">("all");
   const [query, setQuery] = useState("");
-  const [editing, setEditing] = useState<MasterCoalEntry | null>(null);
+  const [editing, setEditing] = useState<ResolvedCoal | null>(null);
   const [showNew, setShowNew] = useState(false);
 
   useEffect(() => {
@@ -56,29 +60,35 @@ export function CoalPoolScreen() {
     };
   }, []);
 
-  // Master + 用户新增的合并展示, 用户新增的排前 (新的更容易找到)
-  const allCoals = useMemo<MasterCoalEntry[]>(
+  const allBaseCoals = useMemo<MasterCoalEntry[]>(
     () => (master ? [...userCoals, ...master.coals] : []),
     [master, userCoals],
   );
 
-  const userCoalNames = useMemo(
-    () => new Set(userCoals.map((c) => c.name)),
-    [userCoals],
+  // 卡片、筛选和求解器共用同一套有效值解析，用户新增煤排在前面。
+  const allCoals = useMemo<ResolvedCoal[]>(
+    () => resolveCoalPool(master?.coals ?? [], userCoals, prefs),
+    [master, prefs, userCoals],
+  );
+  const masterCoalNames = useMemo(
+    () =>
+      new Set(
+        (master?.coals ?? []).map((coal) =>
+          normalizeCoalName(coal.name),
+        ),
+      ),
+    [master],
   );
 
   if (!master) {
     return <div className="loading">加载中...</div>;
   }
 
-  function isHidden(coal: MasterCoalEntry): boolean {
-    return prefs[coal.name]?.hidden === true;
+  function isHidden(coal: ResolvedCoal): boolean {
+    return coal.hidden;
   }
-  function isEnabled(coal: MasterCoalEntry): boolean {
-    const p = prefs[coal.name];
-    if (p?.enabled != null) return p.enabled;
-    // 默认: verified 启用, 其他停用
-    return coal.status === "verified";
+  function isEnabled(coal: ResolvedCoal): boolean {
+    return coal.effectiveEnabled;
   }
 
   // 默认所有视图都过滤掉 hidden 煤 (只有 hidden filter 显示)
@@ -238,11 +248,10 @@ export function CoalPoolScreen() {
             : "当前过滤条件下没有煤种"}
         </div>
       ) : (
-        filtered.map((coal) => (
+        filtered.map((coal, index) => (
           <CoalCard
-            key={coal.name}
+            key={`${coal.origin}:${coal.name}:${index}`}
             coal={coal}
-            enabled={isEnabled(coal)}
             onClick={() => setEditing(coal)}
           />
         ))
@@ -250,15 +259,19 @@ export function CoalPoolScreen() {
 
       {editing && (
         <CoalEditor
-          coal={editing}
-          isUserAdded={userCoalNames.has(editing.name)}
+          coal={editing.base}
+          isUserAdded={editing.origin === "user"}
+          preservePrefOnDelete={
+            editing.origin === "user" &&
+            masterCoalNames.has(normalizeCoalName(editing.name))
+          }
           onClose={() => setEditing(null)}
         />
       )}
 
       {showNew && (
         <NewCoalDialog
-          existing={allCoals}
+          existing={allBaseCoals}
           onClose={() => setShowNew(false)}
         />
       )}
@@ -296,18 +309,23 @@ function FilterChip({
 
 function CoalCard({
   coal,
-  enabled,
   onClick,
 }: {
-  coal: MasterCoalEntry;
-  enabled: boolean;
+  coal: ResolvedCoal;
   onClick: () => void;
 }) {
   const PROP_ORDER_TOP = ["S", "A", "V", "G"];
   const PROP_ORDER_BOTTOM = ["M", "petro", "Y", "CSR"];
-
-  const cif =
-    coal.fob != null && coal.frt != null ? coal.fob + coal.frt : null;
+  const enabled = coal.effectiveEnabled;
+  const readinessText: Record<ResolvedCoal["readiness"], string> = {
+    ready: "● 启用中",
+    disabled: "○ 停用 · 点击编辑",
+    hidden: "○ 已隐藏 · 点击恢复",
+    missing_fob: "● 已启用 · 缺出厂价，未参与求解",
+    missing_frt: "● 已启用 · 缺运费，未参与求解",
+    duplicate_name: "名称冲突 · 未参与求解",
+    invalid_override: "● 已启用 · 修改数据无效",
+  };
 
   return (
     <div
@@ -320,16 +338,23 @@ function CoalCard({
     >
       <div className="coal-row">
         <div>
-          <div className="coal-name">{coal.name}</div>
+          <div className="coal-name">
+            {coal.name}
+            {coal.hasOverrides && (
+              <span style={{ color: "var(--c-primary)", fontSize: 11 }}>
+                {" "}· 已修改
+              </span>
+            )}
+          </div>
           <div className="coal-region">
             {coal.region || "未知产地"}
             {coal.coal_type ? ` · ${coal.coal_type}` : ""}
           </div>
         </div>
         <div>
-          {cif != null ? (
+          {coal.cif != null ? (
             <>
-              <div className="coal-price">¥{cif}</div>
+              <div className="coal-price">¥{coal.cif}</div>
               <div className="coal-price-detail">
                 单价 {coal.fob} + 运费 {coal.frt}
               </div>
@@ -363,7 +388,7 @@ function CoalCard({
         </div>
       )}
 
-      {coal.status === "verified" && (
+      {PROP_ORDER_BOTTOM.some((k) => coal.props[k] != null) && (
         <div className="coal-props">
           {PROP_ORDER_BOTTOM.map((k) => {
             const v = coal.props[k];
@@ -391,11 +416,16 @@ function CoalCard({
         <span
           style={{
             fontSize: 11,
-            color: enabled ? "var(--c-success)" : "var(--c-text-3)",
+            color:
+              coal.readiness === "ready"
+                ? "var(--c-success)"
+                : coal.effectiveEnabled
+                  ? "var(--c-danger)"
+                  : "var(--c-text-3)",
             fontWeight: 600,
           }}
         >
-          {enabled ? "● 启用中" : "○ 停用 · 点击编辑"}
+          {readinessText[coal.readiness]}
         </span>
       </div>
     </div>

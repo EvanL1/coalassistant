@@ -9,6 +9,7 @@
  *   - "重置为 master 默认" 按钮 (清除 user_overrides)
  */
 import { useEffect, useState } from "react";
+import { resolveCoal, type CoalOrigin } from "./domain/resolvedCoal";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "./types";
 import type { MasterCoalEntry } from "./types";
 import {
@@ -23,6 +24,8 @@ interface Props {
   coal: MasterCoalEntry;
   /** true = 用户自己新增的 (走 removeUserCoal 真删); false/undefined = master 煤 (走 hidden=true 软隐藏) */
   isUserAdded?: boolean;
+  /** 旧数据与 Master 重名时，删除用户煤不能连带清掉共用的 Master 偏好。 */
+  preservePrefOnDelete?: boolean;
   onClose: () => void;
   onSaved?: () => void;
 }
@@ -34,18 +37,21 @@ interface FormState {
   props: Record<string, string>;
 }
 
-function toForm(coal: MasterCoalEntry, pref: CoalPref | null): FormState {
+function toForm(
+  coal: MasterCoalEntry,
+  pref: CoalPref | null,
+  origin: CoalOrigin,
+): FormState {
+  const resolved = resolveCoal(coal, pref, origin);
   return {
-    enabled: pref?.enabled ?? coal.status === "verified",
-    fob: String(pref?.fob_override ?? coal.fob ?? ""),
-    frt: String(pref?.frt_override ?? coal.frt ?? ""),
+    enabled: resolved.requestedEnabled,
+    fob: resolved.fob != null ? String(resolved.fob) : "",
+    frt: resolved.frt != null ? String(resolved.frt) : "",
     props: Object.fromEntries(
-      INDICATOR_ORDER.map((k) => {
-        const override = pref?.props_override?.[k];
-        const master = coal.props[k];
-        const v = override ?? master;
-        return [k, v != null ? String(v) : ""];
-      })
+      INDICATOR_ORDER.map((key) => [
+        key,
+        resolved.props[key] != null ? String(resolved.props[key]) : "",
+      ]),
     ),
   };
 }
@@ -56,10 +62,20 @@ function parseNumOrNull(s: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-export function CoalEditor({ coal, isUserAdded, onClose, onSaved }: Props) {
+export function CoalEditor({
+  coal,
+  isUserAdded,
+  preservePrefOnDelete,
+  onClose,
+  onSaved,
+}: Props) {
+  const origin: CoalOrigin = isUserAdded ? "user" : "master";
   const [pref, setPref] = useState<CoalPref | null>(getCoalPref(coal.name));
-  const [form, setForm] = useState<FormState>(() => toForm(coal, pref));
-  const isHidden = pref?.hidden === true;
+  const [form, setForm] = useState<FormState>(() =>
+    toForm(coal, pref, origin),
+  );
+  const resolved = resolveCoal(coal, pref, origin);
+  const isHidden = resolved.hidden;
 
   // 锁住 body 滚动
   useEffect(() => {
@@ -97,13 +113,13 @@ export function CoalEditor({ coal, isUserAdded, onClose, onSaved }: Props) {
     if (!confirm(`重置 ${coal.name} 的所有修改, 回到 master 默认值?`)) return;
     clearCoalPref(coal.name);
     setPref(null);
-    setForm(toForm(coal, null));
+    setForm(toForm(coal, null, origin));
   }
 
   function removeCoal() {
     if (isUserAdded) {
       if (!confirm(`彻底删除「${coal.name}」？\n用户自定义煤, 数据无法恢复.`)) return;
-      removeUserCoal(coal.name);
+      removeUserCoal(coal.name, preservePrefOnDelete);
     } else {
       if (!confirm(`隐藏「${coal.name}」？\n之后不再在煤池和求解器中出现. 可在「已隐藏」筛选里找回.`)) return;
       setCoalPref(coal.name, { hidden: true });
@@ -118,11 +134,7 @@ export function CoalEditor({ coal, isUserAdded, onClose, onSaved }: Props) {
     onSaved?.();
   }
 
-  const hasOverrides =
-    pref != null &&
-    (pref.fob_override != null ||
-      pref.frt_override != null ||
-      (pref.props_override && Object.keys(pref.props_override).length > 0));
+  const hasOverrides = resolved.hasOverrides;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>

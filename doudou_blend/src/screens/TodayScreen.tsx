@@ -8,18 +8,30 @@
  *
  * 求解后展示成本、配方、8 项指标, 并支持保存到历史.
  */
-import { useEffect, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { getBackend } from "../backend";
+import {
+  resolveCoalPool,
+  toBlendCoal,
+} from "../domain/resolvedCoal";
+import {
+  isSnapshotActionable,
+  LatestRequestTracker,
+  type SolveSnapshot,
+} from "../domain/solveSession";
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
 import type {
   BlendRequest,
   BlendResult,
-  Coal,
   EvaluationMethod,
   EvaluationStatus,
   IndicatorCheck,
-  MasterCoalEntry,
   QualityStatus,
   Spec,
 } from "../types";
@@ -30,7 +42,6 @@ import {
   getUserContract,
   getUserCoals,
   setQuantity,
-  type CoalPrefs,
 } from "../storage";
 
 const RECIPE_COLORS = ["#0a5fff", "#7c3aed", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#8b5cf6"];
@@ -157,59 +168,31 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-/** 应用 user_overrides 到 master 煤上, 返回 LP 用的 Coal. */
-function applyOverrides(coal: MasterCoalEntry, prefs: CoalPrefs): Coal | null {
-  const pref = prefs[coal.name];
-  // 基础检查: 必须有 fob/frt
-  const fob = pref?.fob_override ?? coal.fob;
-  const frt = pref?.frt_override ?? coal.frt;
-  if (fob == null || frt == null) return null;
-
-  // 合并 props: master + override
-  const props: Record<string, number> = {};
-  for (const [k, v] of Object.entries(coal.props)) {
-    if (v != null) {
-      props[k] = v;
-    }
-  }
-  if (pref?.props_override) {
-    for (const [k, v] of Object.entries(pref.props_override)) {
-      if (v != null) {
-        props[k] = v;
-      }
-    }
-  }
-
-  return { name: coal.name, props, fob, frt };
-}
-
-/** 启用状态: hidden 一票否决, 否则 显式 override > master verified 默认启用. */
-function isEnabled(coal: MasterCoalEntry, prefs: CoalPrefs): boolean {
-  const p = prefs[coal.name];
-  if (p?.hidden) return false;
-  if (p?.enabled != null) return p.enabled;
-  return coal.status === "verified";
-}
-
-interface SolveState {
-  status: "loading" | "ok" | "error";
-  result?: BlendResult;
-  contractName?: string;
-  request?: BlendRequest;
-  enabledCount?: number;
-  error?: string;
-}
+type SolveState =
+  | { status: "loading" }
+  | { status: "refreshing"; snapshot: SolveSnapshot }
+  | { status: "ok"; snapshot: SolveSnapshot }
+  | { status: "error"; error: string };
 
 export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   const [state, setState] = useState<SolveState>({ status: "loading" });
-  const [saveFlag, setSaveFlag] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   // 重算反馈: idle / running / done. running 时按钮显示"重算中...", done 时显示"✓ 已重算" 1.5s
   const [recompute, setRecompute] = useState<"idle" | "running" | "done">("idle");
   // 采购吨数输入 (字符串以便编辑); 导出反馈文案
   const [qtyInput, setQtyInput] = useState(() => String(getQuantity()));
   const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const qtyInputRef = useRef(qtyInput);
+  const requestTrackerRef = useRef(new LatestRequestTracker());
+  const recomputeTimerRef = useRef<number | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
+  const exportTimerRef = useRef<number | null>(null);
+  const savingRef = useRef(false);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
     void runSolve(true);
     // 监听 prefs/contract/user_coals 变化, 自动重算 (inline, 不整页 loading)
     const refresh = () => void runSolve(false);
@@ -217,36 +200,66 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
     window.addEventListener("doudou:contract_changed", refresh);
     window.addEventListener("doudou:user_coals_changed", refresh);
     return () => {
+      mountedRef.current = false;
       window.removeEventListener("doudou:prefs_changed", refresh);
       window.removeEventListener("doudou:contract_changed", refresh);
       window.removeEventListener("doudou:user_coals_changed", refresh);
+      requestTrackerRef.current.invalidate();
+      if (recomputeTimerRef.current != null) {
+        window.clearTimeout(recomputeTimerRef.current);
+      }
+      if (saveTimerRef.current != null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+      if (exportTimerRef.current != null) {
+        window.clearTimeout(exportTimerRef.current);
+      }
+      savingRef.current = false;
     };
   }, []);
 
   /** initial=true 时整页 loading; 否则原地反馈, 保留旧结果直到新结果出来. */
   async function runSolve(initial: boolean = false) {
-    if (initial) setState({ status: "loading" });
-    else setRecompute("running");
+    const tracker = requestTrackerRef.current;
+    const requestId = tracker.issue();
+    // 用户输入必须在任何 await 前冻结，确保请求号对应唯一输入快照。
+    const prefs = getCoalPrefs();
+    const userContract = getUserContract();
+    const userCoals = getUserCoals();
+    const totalQuantity = getQuantity();
+
+    if (recomputeTimerRef.current != null) {
+      window.clearTimeout(recomputeTimerRef.current);
+      recomputeTimerRef.current = null;
+    }
+    setSaveMsg(null);
+    setExportMsg(null);
+    if (initial) {
+      setState({ status: "loading" });
+      setRecompute("idle");
+    } else {
+      setRecompute("running");
+      setState((previous) =>
+        "snapshot" in previous
+          ? { status: "refreshing", snapshot: previous.snapshot }
+          : { status: "loading" },
+      );
+    }
+
     try {
       const [master, backend] = await Promise.all([loadMaster(), getBackend()]);
-      const prefs = getCoalPrefs();
-      const userContract = getUserContract();
-      const userCoals = getUserCoals();
+      if (!tracker.isCurrent(requestId)) return;
 
-      // 启用煤集: master + 用户新增 (新增的也走同样的启用判定 + override 流程)
-      // 没填 fob/frt 的会在 applyOverrides 里被过滤掉 (返回 null), 所以
-      // 用户刚新增、还没在 CoalEditor 里补价格的 draft 煤自动不会被卷进 LP.
-      const enabledAll = [...master.coals, ...userCoals].filter((c) =>
-        isEnabled(c, prefs),
-      );
-      const coals = enabledAll
-        .map((c) => applyOverrides(c, prefs))
-        .filter((c): c is Coal => c != null);
+      const coals = resolveCoalPool(master.coals, userCoals, prefs)
+        .map(toBlendCoal)
+        .filter((coal) => coal != null);
 
       if (coals.length === 0) {
-        setState({
-          status: "error",
-          error: "没有启用的煤. 去煤池启用一些主力煤吧.",
+        tracker.accept(requestId, () => {
+          setState({
+            status: "error",
+            error: "没有可参与求解的煤。请在煤池启用煤种并补齐有效价格。",
+          });
         });
         return;
       }
@@ -259,65 +272,197 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       const request: BlendRequest = {
         coals,
         specs,
-        total_quantity: getQuantity(),
+        total_quantity: totalQuantity,
         truncate_decimal: true,
       };
 
       const json = await backend.solveJson(JSON.stringify(request));
       const result: BlendResult = JSON.parse(json);
-      setState({
-        status: "ok",
-        result,
-        contractName,
-        request,
-        enabledCount: coals.length,
+      tracker.accept(requestId, () => {
+        setState({
+          status: "ok",
+          snapshot: {
+            requestId,
+            request,
+            result,
+            contractName,
+            enabledCount: coals.length,
+          },
+        });
       });
     } catch (e) {
-      setState({ status: "error", error: String(e) });
+      tracker.accept(requestId, () => {
+        setState({ status: "error", error: String(e) });
+      });
     } finally {
-      if (!initial) {
+      if (!initial && tracker.isCurrent(requestId)) {
         setRecompute("done");
-        setTimeout(() => setRecompute("idle"), 1500);
+        recomputeTimerRef.current = window.setTimeout(() => {
+          if (tracker.isCurrent(requestId)) {
+            setRecompute("idle");
+          }
+          recomputeTimerRef.current = null;
+        }, 1500);
       }
     }
   }
 
   async function saveToHistory() {
-    if (state.status !== "ok" || !state.result?.cost || !state.result.ok) return;
-    const backend = await getBackend();
-    // 保存完整结果，供历史页展示和后续复核。
-    await backend.saveHistory(state.result, state.contractName || "", getQuantity());
-    setSaveFlag(true);
-    setTimeout(() => setSaveFlag(false), 2000);
+    const snapshot = state.status === "ok" ? state.snapshot : null;
+    if (
+      savingRef.current ||
+      !snapshot?.result.cost ||
+      !isSnapshotActionable(
+        snapshot,
+        requestTrackerRef.current.currentRequestId,
+        qtyInputRef.current,
+      )
+    ) {
+      return;
+    }
+
+    savingRef.current = true;
+    setSaving(true);
+    setSaveMsg(null);
+    if (saveTimerRef.current != null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    let feedbackShown = false;
+    try {
+      const backend = await getBackend();
+      if (
+        !isSnapshotActionable(
+          snapshot,
+          requestTrackerRef.current.currentRequestId,
+          qtyInputRef.current,
+        )
+      ) {
+        return;
+      }
+      const quantity = snapshot.request.total_quantity;
+      if (typeof quantity !== "number") return;
+      // 保存完整快照，避免新吨数和旧订单组合成一条历史记录。
+      await backend.saveHistory(
+        snapshot.result,
+        snapshot.contractName,
+        quantity,
+      );
+      if (
+        !mountedRef.current ||
+        !requestTrackerRef.current.isCurrent(snapshot.requestId)
+      ) {
+        return;
+      }
+      setSaveMsg("✓ 已保存");
+      feedbackShown = true;
+    } catch (error) {
+      console.error("保存方案失败", error);
+      if (
+        mountedRef.current &&
+        requestTrackerRef.current.isCurrent(snapshot.requestId)
+      ) {
+        setSaveMsg("保存失败");
+        feedbackShown = true;
+      }
+    } finally {
+      savingRef.current = false;
+      if (!mountedRef.current) return;
+      setSaving(false);
+      if (
+        !feedbackShown ||
+        !requestTrackerRef.current.isCurrent(snapshot.requestId)
+      ) {
+        return;
+      }
+      saveTimerRef.current = window.setTimeout(() => {
+        if (
+          mountedRef.current &&
+          requestTrackerRef.current.isCurrent(snapshot.requestId)
+        ) {
+          setSaveMsg(null);
+        }
+        saveTimerRef.current = null;
+      }, 2000);
+    }
   }
 
   /** 提交采购吨数: 合法则持久化并重算, 非法则回退上次值. */
   function commitQty() {
-    const n = Number(qtyInput);
+    const n = Number(qtyInputRef.current);
     if (Number.isFinite(n) && n > 0) {
+      const normalized = String(n);
+      const currentSnapshot =
+        state.status === "ok" ? state.snapshot : null;
+      qtyInputRef.current = normalized;
+      setQtyInput(normalized);
+      if (
+        isSnapshotActionable(
+          currentSnapshot,
+          requestTrackerRef.current.currentRequestId,
+          normalized,
+        )
+      ) {
+        return;
+      }
       setQuantity(n);
-      setQtyInput(String(n));
       void runSolve(false);
     } else {
-      setQtyInput(String(getQuantity()));
+      const previous = String(getQuantity());
+      qtyInputRef.current = previous;
+      setQtyInput(previous);
     }
   }
 
   /** 导出: 把当前方案复制成采购清单文本. */
   async function exportOrder() {
-    if (state.status !== "ok" || !state.result?.ok) return;
+    const snapshot = state.status === "ok" ? state.snapshot : null;
+    if (
+      snapshot == null ||
+      !isSnapshotActionable(
+        snapshot,
+        requestTrackerRef.current.currentRequestId,
+        qtyInputRef.current,
+      )
+    ) {
+      return;
+    }
+    const quantity = snapshot.request.total_quantity;
+    if (typeof quantity !== "number") return;
     const d = new Date();
     const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    const text = buildOrderText(state.result, state.contractName ?? "", iso, getQuantity());
+    const text = buildOrderText(
+      snapshot.result,
+      snapshot.contractName,
+      iso,
+      quantity,
+    );
     const ok = await copyText(text);
+    if (
+      !mountedRef.current ||
+      !requestTrackerRef.current.isCurrent(snapshot.requestId)
+    ) {
+      return;
+    }
     setExportMsg(ok ? "✓ 已复制清单" : "复制失败");
-    setTimeout(() => setExportMsg(null), 2000);
+    if (exportTimerRef.current != null) {
+      window.clearTimeout(exportTimerRef.current);
+    }
+    exportTimerRef.current = window.setTimeout(() => {
+      if (
+        mountedRef.current &&
+        requestTrackerRef.current.isCurrent(snapshot.requestId)
+      ) {
+        setExportMsg(null);
+      }
+      exportTimerRef.current = null;
+    }, 2000);
   }
 
   if (state.status === "loading") {
     return <div className="loading">求解中...</div>;
   }
-  if (state.status === "error" || !state.result) {
+  if (state.status === "error") {
     return (
       <div className="empty">
         <p style={{ marginBottom: 16 }}>{state.error}</p>
@@ -328,7 +473,14 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
     );
   }
 
-  const { result, contractName, enabledCount } = state;
+  const { snapshot } = state;
+  const { result, contractName, enabledCount } = snapshot;
+  const refreshing = state.status === "refreshing";
+  const actionsEnabled = isSnapshotActionable(
+    snapshot,
+    requestTrackerRef.current.currentRequestId,
+    qtyInput,
+  );
   if (!result.ok) {
     return (
       <>
@@ -358,7 +510,11 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           建议: 去「合同」放宽某项约束, 或去「煤池」启用更多煤源.
         </p>
         <div className="action-row">
-          <button className="btn btn-secondary" onClick={() => runSolve(false)}>
+          <button
+            className="btn btn-secondary"
+            onClick={() => runSolve(false)}
+            disabled={recompute === "running"}
+          >
             {recompute === "running" ? "重算中..." : recompute === "done" ? "✓ 已重算" : "重试"}
           </button>
         </div>
@@ -404,14 +560,19 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </button>
         <span>·</span>
         <button onClick={() => onNavigate("pool")} style={summaryLink}>
-          启用 {enabledCount} 种煤 ▸
+          参与求解 {enabledCount} 种煤 ▸
         </button>
         <span>· 采购</span>
         <input
           type="number"
           inputMode="numeric"
           value={qtyInput}
-          onChange={(e) => setQtyInput(e.target.value)}
+          onChange={(e) => {
+            qtyInputRef.current = e.target.value;
+            setQtyInput(e.target.value);
+            setSaveMsg(null);
+            setExportMsg(null);
+          }}
           onBlur={commitQty}
           onKeyDown={(e) => {
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
@@ -430,6 +591,24 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         />
         <span>吨</span>
       </div>
+
+      {(refreshing || !actionsEnabled) && (
+        <div
+          role="status"
+          style={{
+            marginBottom: 12,
+            padding: "8px 10px",
+            borderRadius: 8,
+            background: "#fef3c7",
+            color: "#92400e",
+            fontSize: 12,
+          }}
+        >
+          {refreshing
+            ? "输入已变更，正在重算；当前结果仅供参考，暂不可保存或导出。"
+            : "采购量尚未与当前结果同步；离开输入框后会重新计算。"}
+        </div>
+      )}
 
       <div className="cost-card">
         <div className="cost-label">最低到厂价</div>
@@ -627,15 +806,20 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             ? "✓ 已重算"
             : "重新计算"}
         </button>
-        <button className="btn btn-secondary" onClick={exportOrder}>
+        <button
+          className="btn btn-secondary"
+          onClick={exportOrder}
+          disabled={!actionsEnabled}
+        >
           {exportMsg ?? "导出订单"}
         </button>
         <button
           className="btn btn-primary"
           onClick={() => void saveToHistory()}
+          disabled={!actionsEnabled || saving}
           style={{ gridColumn: "1 / -1" }}
         >
-          {saveFlag ? "✓ 已保存" : "保存方案"}
+          {saving ? "保存中..." : saveMsg ?? "保存方案"}
         </button>
       </div>
     </>

@@ -19,12 +19,18 @@ interface Backend {
   getVersion: () => Promise<string>;
   /** 采集: 保存一次配煤方案 (含混合后指标, 回归 X). */
   saveHistory: (result: BlendResult, contractName: string, quantity: number | null) => Promise<void>;
+  /** 返回历史方案数量，不加载完整 result_json. */
+  countHistory: () => Promise<number>;
   /** 列出历史方案 (跨后端统一形状, 倒序). */
   listHistory: () => Promise<HistoryRecord[]>;
   /** 回填: 给某条历史录入混煤实测化验 (部分字段, 只更新提供的项). */
   setMeasuredQuality: (id: string, measured: MeasuredQuality) => Promise<void>;
   /** 清空所有历史方案. */
   clearHistory: () => Promise<void>;
+}
+
+function notifyHistoryChanged(): void {
+  window.dispatchEvent(new CustomEvent('doudou:history_changed'));
 }
 
 /** 从 BlendResult 的 indicator_check 抽出回归自变量 X (混合后 6 项指标). 缺任一项 → null. */
@@ -65,6 +71,11 @@ async function makeTauriBackend(): Promise<Backend> {
         totalQuantity: quantity,
         resultJson: JSON.stringify(result),
       });
+      notifyHistoryChanged();
+    },
+    countHistory: async () => {
+      const status = await invoke<{ history: number }>('db_status');
+      return status.history;
     },
     listHistory: async () => {
       const rows = await invoke<Array<{
@@ -110,9 +121,11 @@ async function makeTauriBackend(): Promise<Backend> {
     },
     setMeasuredQuality: async (id, measured) => {
       await invoke('set_measured_quality', { id: Number(id), measured });
+      notifyHistoryChanged();
     },
     clearHistory: async () => {
       await invoke('clear_history');
+      notifyHistoryChanged();
     },
   };
 }
@@ -135,6 +148,7 @@ async function makeWasmBackend(): Promise<Backend> {
         result,
       });
     },
+    countHistory: async () => getHistory().length,
     listHistory: async () =>
       getHistory().map((e) => {
         let mixed: MixedIndicators | null = null;

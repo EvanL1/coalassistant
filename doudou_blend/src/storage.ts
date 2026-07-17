@@ -11,6 +11,9 @@
  */
 
 import type { Spec, MasterCoalEntry, BlendResult, MeasuredQuality } from "./types";
+import { normalizeCoalName } from "./domain/coalName";
+
+export { normalizeCoalName } from "./domain/coalName";
 
 const KEY_COAL_PREFS = "doudou_blend.coal_prefs.v1";
 const KEY_CONTRACT = "doudou_blend.contract.v1";
@@ -20,7 +23,9 @@ const KEY_USER_COALS = "doudou_blend.user_coals.v1";
 
 /** 单个煤的用户偏好: 启用 + 价格覆盖 + 化验值覆盖 */
 export interface CoalPref {
-  enabled: boolean;
+  enabled?: boolean;
+  /** 读取旧存储时发现该煤偏好结构损坏，仅供解析层阻止求解。 */
+  invalid_data?: boolean;
   /** 用户隐藏: true 时从煤池/求解器全部滤掉 (master 煤不能真删, 只能隐藏) */
   hidden?: boolean;
   /** 用户改后的 FOB; null = 用 master 默认 */
@@ -28,7 +33,7 @@ export interface CoalPref {
   /** 用户改后的运费; null = 用 master 默认 */
   frt_override?: number | null;
   /** 用户改过的化验项; null = 用 master 默认 */
-  props_override?: Partial<Record<string, number>>;
+  props_override?: Partial<Record<string, number | null>>;
   /** 最近一次修改时间 (ISO) */
   updated_at?: string;
 }
@@ -64,7 +69,16 @@ export interface HistoryEntry {
 export function getCoalPrefs(): CoalPrefs {
   try {
     const raw = localStorage.getItem(KEY_COAL_PREFS);
-    return raw ? (JSON.parse(raw) as CoalPrefs) : {};
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return {};
+    const prefs: CoalPrefs = {};
+    for (const [name, value] of Object.entries(parsed)) {
+      prefs[name] = isRecord(value)
+        ? (value as CoalPref)
+        : { invalid_data: true };
+    }
+    return prefs;
   } catch {
     return {};
   }
@@ -72,11 +86,13 @@ export function getCoalPrefs(): CoalPrefs {
 
 export function setCoalPref(name: string, pref: Partial<CoalPref>): void {
   const all = getCoalPrefs();
-  all[name] = {
+  const next: CoalPref = {
     ...all[name],
     ...pref,
     updated_at: new Date().toISOString(),
-  } as CoalPref;
+  };
+  delete next.invalid_data;
+  all[name] = next;
   localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(all));
   // 派发自定义事件让其他组件订阅
   window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
@@ -213,12 +229,16 @@ export function setMeasuredQualityLocal(id: string, m: MeasuredQuality): void {
 //
 // Master 煤种是只读 (嵌入核心 crate), 用户新增的煤暂存这里.
 // 新增时仅录煤名/产地/煤类, 化验值后续在 CoalEditor 里补 (status=draft).
-// 注: 当前不参与求解, 等用户在 CoalEditor 补全化验值并启用后, 后续接求解器再说.
+// 补全价格并启用后, 与 Master 煤走同一套解析规则参与求解.
 
 export function getUserCoals(): MasterCoalEntry[] {
   try {
     const raw = localStorage.getItem(KEY_USER_COALS);
-    return raw ? (JSON.parse(raw) as MasterCoalEntry[]) : [];
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter(isMasterCoalEntry)
+      : [];
   } catch {
     return [];
   }
@@ -231,23 +251,37 @@ export function addUserCoal(coal: MasterCoalEntry): void {
   window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
 }
 
-export function removeUserCoal(name: string): void {
+export function removeUserCoal(
+  name: string,
+  preservePref: boolean = false,
+): void {
   const all = getUserCoals().filter((c) => c.name !== name);
   localStorage.setItem(KEY_USER_COALS, JSON.stringify(all));
+  if (!preservePref) {
+    clearCoalPref(name);
+  }
   window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
 }
 
-export function clearUserCoals(): void {
+export function clearUserCoals(masterCoalNames: readonly string[]): void {
+  const masterNames = new Set(masterCoalNames.map(normalizeCoalName));
+  const userNames = new Set(
+    getUserCoals()
+      .filter((coal) => !masterNames.has(normalizeCoalName(coal.name)))
+      .map((coal) => coal.name),
+  );
+  const prefs = getCoalPrefs();
+  for (const name of userNames) {
+    delete prefs[name];
+  }
   localStorage.removeItem(KEY_USER_COALS);
+  if (Object.keys(prefs).length > 0) {
+    localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(prefs));
+  } else {
+    localStorage.removeItem(KEY_COAL_PREFS);
+  }
+  window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
   window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
-}
-
-/**
- * 煤名归一化用于查重: trim + 全角空格转半角 + 大小写无关.
- * "老山兰 " / "老山兰" / "老山兰　" / "LaoShanLan" / "laoshanlan" 视为同一个名字.
- */
-export function normalizeCoalName(s: string): string {
-  return s.replace(/　/g, " ").trim().toLowerCase();
 }
 
 /**
@@ -262,6 +296,32 @@ export function findDuplicateCoalName(
   if (!target) return null;
   const hit = existing.find((c) => normalizeCoalName(c.name) === target);
   return hit ? hit.name : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return (
+    value != null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  );
+}
+
+const COAL_STATUSES = new Set([
+  "verified",
+  "active",
+  "draft",
+  "incomplete",
+  "archived",
+]);
+
+function isMasterCoalEntry(value: unknown): value is MasterCoalEntry {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.name === "string" &&
+    normalizeCoalName(value.name).length > 0 &&
+    COAL_STATUSES.has(String(value.status)) &&
+    isRecord(value.props)
+  );
 }
 
 // ============================================================
