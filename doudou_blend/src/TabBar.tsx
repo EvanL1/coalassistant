@@ -61,17 +61,30 @@ import type { JSX } from "react";
 
 export function TabBar({ active, onChange }: Props) {
   return (
-    <nav className="tab-bar">
+    <nav className="tab-bar" aria-label="主导航">
+      <div className="tab-bar-brand">
+        <img src="/icon.svg" alt="" />
+        <div>
+          <div className="tab-bar-brand-name">豆哥配煤</div>
+          <div className="tab-bar-brand-subtitle">智能配煤工作台</div>
+        </div>
+      </div>
+      <div className="tab-bar-label">工作台</div>
       {TABS.map((t) => (
         <button
           key={t.id}
           className={`tab ${active === t.id ? "active" : ""}`}
           onClick={() => onChange(t.id)}
+          aria-current={active === t.id ? "page" : undefined}
         >
           {t.icon}
           <span>{t.label}</span>
         </button>
       ))}
+      <div className="tab-bar-footer">
+        <span className="tab-bar-status" />
+        Rust API 已连接
+      </div>
     </nav>
   );
 }

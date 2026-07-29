@@ -30,12 +30,15 @@ vi.mock("../backend", () => ({
   getBackend: mocks.getBackend,
 }));
 
+vi.mock("../auth", () => ({
+  logout: vi.fn(),
+}));
+
 vi.mock("../storage", () => ({
   clearAllCoalPrefs: vi.fn(),
   clearUserContract: vi.fn(),
   getCoalPrefs: mocks.getCoalPrefs,
   getUserContract: mocks.getUserContract,
-  logout: vi.fn(),
 }));
 
 afterEach(() => {

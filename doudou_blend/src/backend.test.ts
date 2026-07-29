@@ -6,13 +6,6 @@ const { invoke } = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("blend-kit-wasm", () => ({
-  default: vi.fn(async () => undefined),
-  solveJson: vi.fn(),
-  getMasterJson: vi.fn(),
-  getVersion: vi.fn(),
-}));
-
 function makeStorage(): Storage {
   const values = new Map<string, string>();
   return {
@@ -35,6 +28,7 @@ beforeEach(() => {
   invoke.mockReset();
   vi.stubGlobal("window", new EventTarget());
   vi.stubGlobal("localStorage", makeStorage());
+  vi.stubGlobal("fetch", vi.fn());
   if (typeof CustomEvent === "undefined") {
     vi.stubGlobal(
       "CustomEvent",
@@ -86,8 +80,36 @@ describe("Backend 历史契约", () => {
       JSON.stringify([{ id: "1" }, { id: "2" }]),
     );
 
-    const backend = await forceBackend("wasm");
+    const backend = await forceBackend("http");
 
     await expect(backend.countHistory()).resolves.toBe(2);
+  });
+
+  it("Web 求解通过同源 Rust API 并保留 JSON 字符串边界", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValue(
+      new Response('{"ok":true}', {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const backend = await forceBackend("http");
+    const input = '{"coals":[],"specs":[]}';
+
+    await expect(backend.solveJson(input)).resolves.toBe('{"ok":true}');
+    expect(fetchMock).toHaveBeenCalledWith("/api/solve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: input,
+    });
+  });
+
+  it("Web API 错误不会被误当作求解结果", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response("服务暂不可用", { status: 503 }),
+    );
+    const backend = await forceBackend("http");
+
+    await expect(backend.getMasterJson()).rejects.toThrow("服务暂不可用");
   });
 });

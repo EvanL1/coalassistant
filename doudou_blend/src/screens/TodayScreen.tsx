@@ -610,7 +610,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </div>
       )}
 
-      <div className="cost-card">
+      <div className="today-dashboard">
+      <div className="cost-card today-cost">
         <div className="cost-label">最低到厂价</div>
         <div className="cost-amount">
           <span className="cost-int">{costInt}</span>
@@ -635,7 +636,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </div>
       </div>
 
-      <div className="card">
+      <div className="card today-recipe">
         <div
           className="card-title"
           style={{
@@ -683,7 +684,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </div>
       </div>
 
-      <div className="card">
+      <div className="card today-indicators">
         <div
           className="card-title"
           style={{
@@ -777,6 +778,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           })}
         </div>
       </div>
+      </div>
 
       {result.warnings.length > 0 && (
         <div
@@ -814,10 +816,9 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           {exportMsg ?? "导出订单"}
         </button>
         <button
-          className="btn btn-primary"
+          className="btn btn-primary today-save"
           onClick={() => void saveToHistory()}
           disabled={!actionsEnabled || saving}
-          style={{ gridColumn: "1 / -1" }}
         >
           {saving ? "保存中..." : saveMsg ?? "保存方案"}
         </button>

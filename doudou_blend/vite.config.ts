@@ -33,5 +33,12 @@ export default defineConfig(async () => ({
     fs: {
       allow: [".", ".."],
     },
+    // 浏览器开发模式把同源 API 转发给本地 Rust 服务.
+    proxy: {
+      "/api": {
+        target: process.env.VITE_API_PROXY_TARGET || "http://127.0.0.1:3000",
+        changeOrigin: true,
+      },
+    },
   },
 }));

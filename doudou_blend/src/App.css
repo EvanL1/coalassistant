@@ -48,6 +48,15 @@ button {
   color: inherit;
 }
 
+.login-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--c-primary), var(--c-primary-dark));
+  color: white;
+  font-size: 14px;
+}
+
 .app {
   max-width: 480px;
   margin: 0 auto;
@@ -59,6 +68,17 @@ button {
 
 .app-content {
   padding: 16px;
+  min-width: 0;
+}
+
+.screen {
+  min-width: 0;
+}
+
+.tab-bar-brand,
+.tab-bar-label,
+.tab-bar-footer {
+  display: none;
 }
 
 /* ========== Card ========== */
@@ -137,6 +157,7 @@ button {
 }
 .cost-meta {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
   align-items: center;
@@ -333,6 +354,16 @@ button {
 .tab svg {
   width: 22px;
   height: 22px;
+}
+
+.coal-card-grid,
+.history-grid,
+.today-dashboard {
+  display: contents;
+}
+
+.today-save {
+  grid-column: 1 / -1;
 }
 
 /* ========== Coal Pool Cards ========== */
@@ -655,4 +686,285 @@ button {
   color: var(--c-text);
   font-size: 22px;
   margin: 0 0 8px;
+}
+
+/* ========== Tablet / Web ========== */
+@media (min-width: 720px) {
+  .app {
+    max-width: 760px;
+  }
+
+  .app-content {
+    padding: 24px;
+  }
+
+  .tab-bar {
+    max-width: 760px;
+  }
+
+  .page-title {
+    font-size: 28px;
+  }
+
+  .indicator-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .coal-card-grid,
+  .history-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 14px;
+  }
+
+  .coal-card-grid .coal-card,
+  .history-grid .card {
+    margin-bottom: 0;
+  }
+
+  .screen-me {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .screen-me > .page-header,
+  .screen-me > p {
+    grid-column: 1 / -1;
+  }
+
+  .screen-me > .card {
+    margin-bottom: 0;
+  }
+}
+
+/* ========== Desktop Web ========== */
+@media (min-width: 960px) {
+  :root {
+    --sidebar-width: 236px;
+  }
+
+  body {
+    background: #eef1f5;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+    max-width: none;
+    margin: 0;
+    padding-bottom: 0;
+    background: #eef1f5;
+  }
+
+  .app-content {
+    width: 100%;
+    max-width: 1380px;
+    margin: 0 auto;
+    padding: 34px clamp(28px, 4vw, 56px) 48px;
+  }
+
+  .tab-bar {
+    position: sticky;
+    inset: 0 auto auto 0;
+    align-self: start;
+    width: var(--sidebar-width);
+    height: 100vh;
+    max-width: none;
+    margin: 0;
+    padding: 24px 16px 18px;
+    border-top: 0;
+    border-right: 1px solid var(--c-border);
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto repeat(5, 52px) 1fr;
+    gap: 6px;
+    box-shadow: 8px 0 28px rgba(15, 23, 42, 0.035);
+    z-index: 20;
+  }
+
+  .tab-bar-brand {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 2px 8px 24px;
+  }
+
+  .tab-bar-brand img {
+    width: 42px;
+    height: 42px;
+    border-radius: 11px;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .tab-bar-brand-name {
+    font-size: 17px;
+    font-weight: 800;
+    letter-spacing: -0.3px;
+  }
+
+  .tab-bar-brand-subtitle {
+    margin-top: 2px;
+    color: var(--c-text-3);
+    font-size: 10px;
+  }
+
+  .tab-bar-label {
+    display: block;
+    padding: 0 12px 6px;
+    color: var(--c-text-3);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+  }
+
+  .tab {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 0 14px;
+    border-radius: 12px;
+    font-size: 14px;
+    font-weight: 600;
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+
+  .tab:hover {
+    background: #f3f6fb;
+    color: var(--c-text-2);
+  }
+
+  .tab.active {
+    background: #eaf1ff;
+    color: var(--c-primary);
+  }
+
+  .tab svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .tab-bar-footer {
+    display: flex;
+    align-self: end;
+    align-items: center;
+    gap: 7px;
+    padding: 12px;
+    border-radius: 10px;
+    background: #f7f9fc;
+    color: var(--c-text-3);
+    font-size: 10px;
+  }
+
+  .tab-bar-status {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--c-success);
+    box-shadow: 0 0 0 3px #dcfce7;
+  }
+
+  .page-header {
+    margin-bottom: 22px;
+  }
+
+  .page-title {
+    font-size: 32px;
+    letter-spacing: -0.8px;
+  }
+
+  .page-subtitle {
+    font-size: 13px;
+  }
+
+  .index-ticker {
+    margin-bottom: 6px;
+    padding-inline: 0 !important;
+  }
+
+  .today-dashboard {
+    display: grid;
+    grid-template-columns: minmax(320px, 0.85fr) minmax(480px, 1.35fr);
+    grid-template-rows: auto 1fr;
+    gap: 16px;
+    align-items: stretch;
+  }
+
+  .today-dashboard > .cost-card,
+  .today-dashboard > .card {
+    margin-bottom: 0;
+  }
+
+  .today-cost {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .today-recipe {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .today-indicators {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+
+  .today-indicators .indicator-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .screen-today > .action-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .screen-today .today-save {
+    grid-column: auto;
+  }
+
+  .screen-contract {
+    max-width: 980px;
+  }
+
+  .coal-card-grid {
+    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+    gap: 16px;
+  }
+
+  .history-grid {
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: 16px;
+  }
+
+  .screen-me {
+    max-width: 1040px;
+    gap: 16px;
+  }
+
+  .modal-backdrop {
+    align-items: center;
+    padding: 32px;
+  }
+
+  .modal-sheet {
+    max-width: 720px;
+    max-height: min(860px, 88vh);
+    border-radius: 20px;
+    animation: modal-in 0.2s ease;
+    box-shadow: 0 24px 80px rgba(15, 23, 42, 0.25);
+  }
+
+  .modal-handle {
+    display: none;
+  }
+
+  @keyframes modal-in {
+    from {
+      opacity: 0;
+      transform: translateY(12px) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
 }

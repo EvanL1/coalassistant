@@ -1,4 +1,4 @@
-/** 数据加载层: 从后端 (WASM 或 Tauri) 取 master 数据并 cache. */
+/** 数据加载层: 从后端 (HTTP API 或 Tauri) 取 master 数据并 cache. */
 
 import { getBackend } from "./backend";
 import type { CoalMaster } from "./types";

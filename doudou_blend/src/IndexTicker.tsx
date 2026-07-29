@@ -54,6 +54,7 @@ export function IndexTicker() {
 
   return (
     <div
+      className="index-ticker"
       style={{
         display: "flex",
         alignItems: "center",

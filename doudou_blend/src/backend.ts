@@ -1,16 +1,16 @@
 /**
- * 双后端适配器: Tauri 桌面/移动 用 IPC, 浏览器用 WASM 直调.
+ * 双后端适配器: Tauri 桌面/移动用 IPC, Web 用同源 Rust HTTP API.
  *
  * 设计原则:
- *   - 统一异步接口 (即使 WASM 是同步的也包成 Promise, 防止前端代码因运行时不同而分叉)
+ *   - 统一异步接口, 防止前端代码因运行时不同而分叉
  *   - 启动时探测一次, 之后缓存
- *   - WASM 模块只初始化一次, 后续调用零开销
+ *   - Web 使用同源 API, 避免额外的 CORS 和环境变量配置
  */
 
 import { appendHistory, clearHistory as clearLocalHistory, getHistory, setMeasuredQualityLocal } from './storage';
 import type { BlendResult, HistoryRecord, MeasuredQuality, MixedIndicators } from './types';
 
-type BackendKind = 'tauri' | 'wasm';
+type BackendKind = 'tauri' | 'http';
 
 interface Backend {
   kind: BackendKind;
@@ -130,16 +130,26 @@ async function makeTauriBackend(): Promise<Backend> {
   };
 }
 
-async function makeWasmBackend(): Promise<Backend> {
-  // 动态 import 避免 Tauri build 时把 WASM 也打包进去
-  const wasm = await import('blend-kit-wasm');
-  // 注意 default export 是 __wbg_init, 显式调用初始化
-  await wasm.default();
+async function requestApi(path: string, init?: RequestInit): Promise<string> {
+  const response = await fetch(`/api/${path}`, init);
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(body || `HTTP ${response.status}`);
+  }
+  return body;
+}
+
+async function makeHttpBackend(): Promise<Backend> {
   return {
-    kind: 'wasm',
-    solveJson: async (input) => wasm.solveJson(input),
-    getMasterJson: async () => wasm.getMasterJson(),
-    getVersion: async () => wasm.getVersion(),
+    kind: 'http',
+    solveJson: async (input) =>
+      requestApi('solve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: input,
+      }),
+    getMasterJson: async () => requestApi('master'),
+    getVersion: async () => requestApi('version'),
     saveHistory: async (result, contractName, _quantity) => {
       appendHistory({
         cost_cif: result.cost?.cif_per_ton ?? 0,
@@ -188,13 +198,13 @@ async function makeWasmBackend(): Promise<Backend> {
  */
 export async function getBackend(): Promise<Backend> {
   if (cached) return cached;
-  cached = detectTauri() ? await makeTauriBackend() : await makeWasmBackend();
+  cached = detectTauri() ? await makeTauriBackend() : await makeHttpBackend();
   return cached;
 }
 
 /** 强制使用特定后端 (主要给测试用). */
 export async function forceBackend(kind: BackendKind): Promise<Backend> {
-  cached = kind === 'tauri' ? await makeTauriBackend() : await makeWasmBackend();
+  cached = kind === 'tauri' ? await makeTauriBackend() : await makeHttpBackend();
   return cached;
 }
 

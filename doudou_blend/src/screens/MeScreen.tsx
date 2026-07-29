@@ -3,13 +3,13 @@
  * 当前只放登出 + 数据清理入口, 后续加 CSR 校准 / 导出 / 关于.
  */
 import { useEffect, useRef, useState } from "react";
+import { logout } from "../auth";
 import { getBackend } from "../backend";
 import {
   clearAllCoalPrefs,
   clearUserContract,
   getCoalPrefs,
   getUserContract,
-  logout,
 } from "../storage";
 
 interface Stats {
@@ -155,7 +155,7 @@ export function MeScreen() {
               color: "var(--c-danger)",
             }}
             onClick={() => {
-              if (confirm("退出登录? 本地数据不会被清除.")) logout();
+              if (confirm("退出登录? 本地数据不会被清除.")) void logout();
             }}
           >
             退出登录
@@ -225,7 +225,7 @@ export function MeScreen() {
           marginBottom: 12,
         }}
       >
-        豆哥配煤 · 全部计算在本地完成 · 数据不上传
+        豆哥配煤 · 核心计算由服务端完成 · 历史保存在本机
       </p>
     </>
   );
@@ -235,7 +235,7 @@ function detectMode(): string {
   if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
     return "Tauri 原生 IPC";
   }
-  return "浏览器 WASM";
+  return "浏览器 Rust API";
 }
 
 function Row({

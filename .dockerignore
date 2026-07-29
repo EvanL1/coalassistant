@@ -1,0 +1,13 @@
+.git
+.gitignore
+**/target
+**/node_modules
+**/dist
+blend_kit_wasm/pkg
+doudou_blend/src-tauri/gen
+*.db
+*.sqlite
+*.sqlite3
+*.log
+.env
+.env.*

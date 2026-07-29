@@ -146,9 +146,11 @@ export function HistoryScreen() {
           </p>
         </div>
       ) : (
-        list.map((entry) => (
-          <HistoryCard key={entry.id} entry={entry} />
-        ))
+        <div className="history-grid">
+          {list.map((entry) => (
+            <HistoryCard key={entry.id} entry={entry} />
+          ))}
+        </div>
       )}
     </>
   );

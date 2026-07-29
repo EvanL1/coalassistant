@@ -21,6 +21,10 @@ pub struct AppState {
     pub conn: Mutex<Connection>,
 }
 
+pub struct AuthState {
+    authenticated: Mutex<bool>,
+}
+
 // ============================================================
 // 通用 commands
 // ============================================================
@@ -38,6 +42,24 @@ fn solve_blend(input_json: String) -> String {
 #[tauri::command]
 fn get_master_json() -> String {
     blend_kit::master_json().to_string()
+}
+
+#[tauri::command]
+fn is_authenticated(state: tauri::State<AuthState>) -> bool {
+    *state.authenticated.lock().unwrap()
+}
+
+#[tauri::command]
+fn login(state: tauri::State<AuthState>, username: String, password: String) -> bool {
+    let authenticated =
+        username.trim().eq_ignore_ascii_case("doudou") && password.trim() == "123456";
+    *state.authenticated.lock().unwrap() = authenticated;
+    authenticated
+}
+
+#[tauri::command]
+fn logout(state: tauri::State<AuthState>) {
+    *state.authenticated.lock().unwrap() = false;
 }
 
 // ============================================================
@@ -222,12 +244,18 @@ pub fn run() {
             app.manage(AppState {
                 conn: Mutex::new(conn),
             });
+            app.manage(AuthState {
+                authenticated: Mutex::new(false),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             version,
             solve_blend,
             get_master_json,
+            is_authenticated,
+            login,
+            logout,
             db_status,
             list_coals,
             get_coal,

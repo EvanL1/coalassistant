@@ -248,13 +248,15 @@ export function CoalPoolScreen() {
             : "当前过滤条件下没有煤种"}
         </div>
       ) : (
-        filtered.map((coal, index) => (
-          <CoalCard
-            key={`${coal.origin}:${coal.name}:${index}`}
-            coal={coal}
-            onClick={() => setEditing(coal)}
-          />
-        ))
+        <div className="coal-card-grid">
+          {filtered.map((coal, index) => (
+            <CoalCard
+              key={`${coal.origin}:${coal.name}:${index}`}
+              coal={coal}
+              onClick={() => setEditing(coal)}
+            />
+          ))}
+        </div>
       )}
 
       {editing && (

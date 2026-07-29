@@ -1,5 +1,5 @@
 /**
- * 登录屏 - 轻量门禁.
+ * 登录屏 - Web 使用服务端 HttpOnly 会话，Tauri 使用原生内存会话.
  *
  * 设计:
  *   - 单页 form, 居中
@@ -7,27 +7,35 @@
  *   - 登录成功后由父级 App 自动切换到主界面
  */
 import { useState } from "react";
-import { tryLogin } from "./storage";
+import { tryLogin } from "./auth";
 
 export function LoginScreen() {
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
-    const ok = tryLogin(user, pass);
-    if (!ok) {
-      setError("账号或密码错误");
-      // 摇晃动画提示
-      const card = document.getElementById("login-card");
-      if (card) {
-        card.classList.remove("shake");
-        // 触发重排
-        void card.offsetWidth;
-        card.classList.add("shake");
+    setSubmitting(true);
+    try {
+      const ok = await tryLogin(user, pass);
+      if (!ok) {
+        setError("账号或密码错误");
+        // 摇晃动画提示
+        const card = document.getElementById("login-card");
+        if (card) {
+          card.classList.remove("shake");
+          // 触发重排
+          void card.offsetWidth;
+          card.classList.add("shake");
+        }
       }
+    } catch {
+      setError("登录服务暂不可用，请稍后重试");
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -123,6 +131,7 @@ export function LoginScreen() {
           <button
             type="submit"
             className="btn btn-primary"
+            disabled={submitting}
             style={{
               width: "100%",
               height: 48,
@@ -131,7 +140,7 @@ export function LoginScreen() {
               marginTop: 4,
             }}
           >
-            登录
+            {submitting ? "登录中…" : "登录"}
           </button>
         </form>
 
