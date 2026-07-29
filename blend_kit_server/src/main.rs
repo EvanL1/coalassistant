@@ -26,7 +26,7 @@ async fn main() {
 
     info!(%address, static_dir = %public_dir.display(), "豆哥配煤服务已启动");
 
-    axum::serve(listener, blend_kit_server::app(public_dir))
+    axum::serve(listener, blend_kit_server::app(public_dir).await)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("HTTP 服务异常退出");

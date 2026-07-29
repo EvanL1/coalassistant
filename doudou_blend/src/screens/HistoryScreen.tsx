@@ -1,6 +1,6 @@
 /**
  * 屏 4 - 历史方案
- * 列出历史方案 (后端: native SQLite / web localStorage), 倒序展示.
+ * 列出历史方案 (后端: native SQLite / web PostgreSQL), 倒序展示.
  * 支持回填混煤实测化验 (CSR + S/A/V/G/Y/M) —— 数据闭环: 把「配比 + 预测指标」
  * 配上事后化验单, 既是信任对照 (预测 vs 实测), 也是 G 修正/CSR 回归的样本.
  */

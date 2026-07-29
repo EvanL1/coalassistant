@@ -2,13 +2,15 @@ use std::path::PathBuf;
 
 use axum::{
     body::Body,
-    extract::{Json, State},
+    extract::{Json, Path, State},
     http::{header, HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sqlx::PgPool;
 use subtle::ConstantTimeEq;
 use tower_http::{
     compression::CompressionLayer,
@@ -16,12 +18,21 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+mod database;
+
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const TEXT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 const SESSION_COOKIE: &str = "doudou_session";
 
-pub fn app(public_dir: PathBuf) -> Router {
-    app_with_auth(public_dir, AuthConfig::from_env())
+pub async fn app(public_dir: PathBuf) -> Router {
+    let database = database::connect_from_env().await;
+    app_with_state(
+        public_dir,
+        AppState {
+            auth: AuthConfig::from_env(),
+            database,
+        },
+    )
 }
 
 #[derive(Clone)]
@@ -67,7 +78,23 @@ impl AuthConfig {
     }
 }
 
+#[derive(Clone)]
+struct AppState {
+    auth: AuthConfig,
+    database: Option<PgPool>,
+}
+
 pub fn app_with_auth(public_dir: PathBuf, auth: AuthConfig) -> Router {
+    app_with_state(
+        public_dir,
+        AppState {
+            auth,
+            database: None,
+        },
+    )
+}
+
+fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
     let index_file = public_dir.join("index.html");
     let static_files = ServeDir::new(public_dir)
         .append_index_html_on_directories(true)
@@ -81,18 +108,38 @@ pub fn app_with_auth(public_dir: PathBuf, auth: AuthConfig) -> Router {
         .route("/api/solve", post(solve))
         .route("/api/master", get(master))
         .route("/api/version", get(version))
+        .route("/api/storage", get(get_storage).put(put_storage))
+        .route(
+            "/api/history",
+            get(list_history).post(create_history).delete(clear_history),
+        )
+        .route("/api/history/count", get(count_history))
+        .route("/api/history/import", post(import_history))
+        .route("/api/history/{id}/measured", patch(set_measured_quality))
         .fallback_service(static_files)
-        .with_state(auth)
+        .with_state(state)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
 }
 
-async fn health() -> impl IntoResponse {
+async fn health(State(state): State<AppState>) -> Response {
+    if let Some(pool) = &state.database {
+        if let Err(error) = database::health(pool).await {
+            tracing::error!(%error, "PostgreSQL 健康检查失败");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, TEXT_CONTENT_TYPE)],
+                "database unavailable",
+            )
+                .into_response();
+        }
+    }
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, TEXT_CONTENT_TYPE)],
         "ok",
     )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -106,13 +153,14 @@ struct AuthStatus {
     authenticated: bool,
 }
 
-async fn auth_session(State(auth): State<AuthConfig>, headers: HeaderMap) -> Json<AuthStatus> {
+async fn auth_session(State(state): State<AppState>, headers: HeaderMap) -> Json<AuthStatus> {
     Json(AuthStatus {
-        authenticated: is_authenticated(&headers, &auth),
+        authenticated: is_authenticated(&headers, &state.auth),
     })
 }
 
-async fn login(State(auth): State<AuthConfig>, Json(input): Json<LoginRequest>) -> Response {
+async fn login(State(state): State<AppState>, Json(input): Json<LoginRequest>) -> Response {
+    let auth = &state.auth;
     if input.username != auth.username || !secret_eq(&input.password, &auth.password) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -154,11 +202,11 @@ async fn logout() -> Response {
 }
 
 async fn solve(
-    State(auth): State<AuthConfig>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     request: Request<Body>,
 ) -> Response {
-    if !is_authenticated(&headers, &auth) {
+    if !is_authenticated(&headers, &state.auth) {
         return unauthorized();
     }
 
@@ -194,8 +242,8 @@ async fn solve(
         .into_response()
 }
 
-async fn master(State(auth): State<AuthConfig>, headers: HeaderMap) -> Response {
-    if !is_authenticated(&headers, &auth) {
+async fn master(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !is_authenticated(&headers, &state.auth) {
         return unauthorized();
     }
 
@@ -206,14 +254,208 @@ async fn master(State(auth): State<AuthConfig>, headers: HeaderMap) -> Response 
         .into_response()
 }
 
-async fn version(State(auth): State<AuthConfig>, headers: HeaderMap) -> Response {
-    if !is_authenticated(&headers, &auth) {
+async fn version(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !is_authenticated(&headers, &state.auth) {
         return unauthorized();
     }
 
     (
         [(header::CONTENT_TYPE, TEXT_CONTENT_TYPE)],
         env!("CARGO_PKG_VERSION"),
+    )
+        .into_response()
+}
+
+async fn get_storage(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let username = match authenticated_username(&headers, &state) {
+        Ok(username) => username,
+        Err(response) => return *response,
+    };
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::load_storage(pool, &username).await {
+        Ok(storage) => Json(storage).into_response(),
+        Err(error) => database_error(error),
+    }
+}
+
+async fn put_storage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut storage): Json<database::UserStorage>,
+) -> Response {
+    let username = match authenticated_username(&headers, &state) {
+        Ok(username) => username,
+        Err(response) => return *response,
+    };
+    if let Err(reason) = storage.validate() {
+        return bad_request(reason);
+    }
+    storage.initialized = true;
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::save_storage(pool, &username, &storage).await {
+        Ok(()) => Json(storage).into_response(),
+        Err(error) => database_error(error),
+    }
+}
+
+async fn create_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<database::CreateHistory>,
+) -> Response {
+    let username = match authenticated_username(&headers, &state) {
+        Ok(username) => username,
+        Err(response) => return *response,
+    };
+    if let Err(reason) = input.validate() {
+        return bad_request(reason);
+    }
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::create_history(pool, &username, &input).await {
+        Ok(id) => Json(json!({ "id": id })).into_response(),
+        Err(error) => database_error(error),
+    }
+}
+
+async fn import_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<database::ImportHistory>,
+) -> Response {
+    let username = match authenticated_username(&headers, &state) {
+        Ok(username) => username,
+        Err(response) => return *response,
+    };
+    if input.entries.len() > 100 {
+        return bad_request("一次最多导入 100 条历史方案");
+    }
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::import_history(pool, &username, &input).await {
+        Ok(imported) => Json(json!({ "imported": imported })).into_response(),
+        Err(error) => database_error(error),
+    }
+}
+
+async fn count_history(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let username = match authenticated_username(&headers, &state) {
+        Ok(username) => username,
+        Err(response) => return *response,
+    };
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::count_history(pool, &username).await {
+        Ok(count) => Json(database::count_response(count)).into_response(),
+        Err(error) => database_error(error),
+    }
+}
+
+async fn list_history(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let username = match authenticated_username(&headers, &state) {
+        Ok(username) => username,
+        Err(response) => return *response,
+    };
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::list_history(pool, &username).await {
+        Ok(history) => Json(history).into_response(),
+        Err(error) => database_error(error),
+    }
+}
+
+async fn set_measured_quality(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(measured): Json<database::MeasuredQuality>,
+) -> Response {
+    let username = match authenticated_username(&headers, &state) {
+        Ok(username) => username,
+        Err(response) => return *response,
+    };
+    if let Err(reason) = measured.validate() {
+        return bad_request(reason);
+    }
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::set_measured_quality(pool, &username, &id, &measured).await {
+        Ok(true) => Json(json!({ "updated": true })).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+            r#"{"ok":false,"reason":"历史方案不存在"}"#,
+        )
+            .into_response(),
+        Err(error) => database_error(error),
+    }
+}
+
+async fn clear_history(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let username = match authenticated_username(&headers, &state) {
+        Ok(username) => username,
+        Err(response) => return *response,
+    };
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::clear_history(pool, &username).await {
+        Ok(deleted) => Json(json!({ "deleted": deleted })).into_response(),
+        Err(error) => database_error(error),
+    }
+}
+
+fn authenticated_username(headers: &HeaderMap, state: &AppState) -> Result<String, Box<Response>> {
+    is_authenticated(headers, &state.auth)
+        .then(|| state.auth.username.clone())
+        .ok_or_else(|| Box::new(unauthorized()))
+}
+
+fn require_database(state: &AppState) -> Result<&PgPool, Box<Response>> {
+    state.database.as_ref().ok_or_else(|| {
+        Box::new(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+                r#"{"ok":false,"reason":"数据库尚未配置"}"#,
+            )
+                .into_response(),
+        )
+    })
+}
+
+fn bad_request(reason: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+        Json(json!({ "ok": false, "reason": reason })),
+    )
+        .into_response()
+}
+
+fn database_error(error: sqlx::Error) -> Response {
+    tracing::error!(%error, "PostgreSQL 操作失败");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+        r#"{"ok":false,"reason":"数据库操作失败"}"#,
     )
         .into_response()
 }
@@ -343,6 +585,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_storage_requires_database_after_login() {
+        let response = test_app()
+            .oneshot(authenticated_request("GET", "/api/storage", Body::empty()))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn test_login_sets_http_only_session_cookie() {
         let response = test_app()
             .oneshot(
@@ -372,15 +624,18 @@ mod tests {
         )
         .unwrap();
 
-        let response = app(public_dir.path().to_path_buf())
-            .oneshot(
-                Request::builder()
-                    .uri("/history")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app_with_auth(
+            public_dir.path().to_path_buf(),
+            AuthConfig::new("tester", "secret", "test-session-token", false),
+        )
+        .oneshot(
+            Request::builder()
+                .uri("/history")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_text(response).await, "<html>豆哥配煤</html>");

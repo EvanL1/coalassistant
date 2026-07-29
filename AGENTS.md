@@ -19,7 +19,7 @@ node test_wasm_solve.mjs
 
 cd ../blend_kit_server
 cargo test
-STATIC_DIR=../doudou_blend/dist cargo run
+DATABASE_URL=postgresql://... STATIC_DIR=../doudou_blend/dist cargo run
 
 cd ../doudou_blend
 npm install
@@ -28,7 +28,7 @@ npm run build           # Type-check and create dist/
 npm run tauri dev       # Native desktop development
 ```
 
-The production web frontend calls the Rust HTTP API and no longer requires the generated WASM package. Run `blend_kit_server` alongside `npm run dev`; Vite proxies `/api` to port 3000 by default.
+The production web frontend calls the Rust HTTP API and no longer requires the generated WASM package. Run `blend_kit_server` with `DATABASE_URL` alongside `npm run dev`; Vite proxies `/api` to port 3000 by default. Database schema changes belong in `blend_kit_server/migrations/` and run automatically at server startup.
 
 ## Coding Style & Naming Conventions
 

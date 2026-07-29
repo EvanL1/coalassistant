@@ -9,10 +9,13 @@ import { MeScreen } from "./screens/MeScreen";
 import { LoginScreen } from "./LoginScreen";
 import { isLoggedIn } from "./auth";
 import { IndexTicker } from "./IndexTicker";
+import { initializeCloudStorage } from "./cloudStorage";
 
 function App() {
   const [tab, setTab] = useState<TabId>("today");
   const [authed, setAuthed] = useState<boolean | null>(null);
+  const [storageReady, setStorageReady] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
 
   // 监听认证变化 (登录/登出后自动切屏)
   useEffect(() => {
@@ -30,10 +33,45 @@ function App() {
     };
   }, []);
 
-  if (authed == null) {
+  useEffect(() => {
+    let active = true;
+    let stopSync: () => void = () => undefined;
+    if (!authed) {
+      setStorageReady(false);
+      setStorageError(null);
+      return () => undefined;
+    }
+
+    setStorageReady(false);
+    setStorageError(null);
+    void initializeCloudStorage()
+      .then((cleanup) => {
+        if (!active) {
+          cleanup();
+          return;
+        }
+        stopSync = cleanup;
+        setStorageReady(true);
+      })
+      .catch(() => {
+        if (active) setStorageError("云端数据加载失败，请刷新重试");
+      });
+
+    return () => {
+      active = false;
+      stopSync();
+    };
+  }, [authed]);
+
+  if (authed == null || (authed && !storageReady)) {
     return (
       <div className="login-loading" role="status">
-        正在验证登录状态…
+        {storageError ?? (authed ? "正在同步云端数据…" : "正在验证登录状态…")}
+        {storageError && (
+          <button className="btn btn-primary" onClick={() => location.reload()}>
+            重新加载
+          </button>
+        )}
       </div>
     );
   }

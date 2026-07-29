@@ -16,9 +16,23 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: 'npm'
+          cache-dependency-path: doudou_blend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: doudou_blend
+        run: npm ci
 
       - name: Check repository consistency
         run: node scripts/check_repository_consistency.mjs
+
+      - name: Test frontend
+        working-directory: doudou_blend
+        run: npm test
+
+      - name: Build frontend
+        working-directory: doudou_blend
+        run: npm run build
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,6 +42,7 @@ jobs:
         with:
           workspaces: |
             blend_kit_rs
+            blend_kit_server
             doudou_blend/src-tauri
 
       # blend_kit_rs 核心: 不依赖 Tauri / Android, 最简单
@@ -43,12 +58,21 @@ jobs:
         working-directory: blend_kit_rs
         run: cargo run --release --example master_demo
 
+      - name: Test Web server
+        working-directory: blend_kit_server
+        run: cargo test --locked
+
       # Tauri 端: 仅 build, 不跑测试 (需要 Tauri 系统依赖)
       # 移除 tauri 测试以保持 CI 快速; 真正的端到端测试留给 release.yml
       - name: Format check
         run: |
-          cargo fmt --manifest-path blend_kit_rs/Cargo.toml -- --check || echo "blend_kit_rs fmt issues (warn only)"
+          cargo fmt --manifest-path blend_kit_rs/Cargo.toml -- --check
+          cargo fmt --manifest-path blend_kit_server/Cargo.toml -- --check
 
       - name: Clippy (blend_kit)
         working-directory: blend_kit_rs
-        run: cargo clippy --release -- -D warnings || true
+        run: cargo clippy --release -- -D warnings
+
+      - name: Clippy (Web server)
+        working-directory: blend_kit_server
+        run: cargo clippy --all-targets --locked -- -D warnings

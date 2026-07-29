@@ -7,7 +7,6 @@
  *   - Web 使用同源 API, 避免额外的 CORS 和环境变量配置
  */
 
-import { appendHistory, clearHistory as clearLocalHistory, getHistory, setMeasuredQualityLocal } from './storage';
 import type { BlendResult, HistoryRecord, MeasuredQuality, MixedIndicators } from './types';
 
 type BackendKind = 'tauri' | 'http';
@@ -140,6 +139,22 @@ async function requestApi(path: string, init?: RequestInit): Promise<string> {
 }
 
 async function makeHttpBackend(): Promise<Backend> {
+  type HttpHistoryRow = {
+    id: string;
+    occurred_at: string;
+    contract_name: string;
+    cost_cif: number;
+    recipe: Record<string, number>;
+    result: BlendResult | null;
+    csr_measured: number | null;
+    s_measured: number | null;
+    a_measured: number | null;
+    v_measured: number | null;
+    g_measured: number | null;
+    y_measured: number | null;
+    m_measured: number | null;
+  };
+
   return {
     kind: 'http',
     solveJson: async (input) =>
@@ -150,44 +165,61 @@ async function makeHttpBackend(): Promise<Backend> {
       }),
     getMasterJson: async () => requestApi('master'),
     getVersion: async () => requestApi('version'),
-    saveHistory: async (result, contractName, _quantity) => {
-      appendHistory({
-        cost_cif: result.cost?.cif_per_ton ?? 0,
-        recipe: result.recipe ?? {},
-        contract_name: contractName,
-        result,
+    saveHistory: async (result, contractName, quantity) => {
+      await requestApi('history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          result,
+          contract_name: contractName,
+          quantity,
+        }),
       });
+      notifyHistoryChanged();
     },
-    countHistory: async () => getHistory().length,
-    listHistory: async () =>
-      getHistory().map((e) => {
+    countHistory: async () => {
+      const response = JSON.parse(await requestApi('history/count')) as { count?: unknown };
+      if (typeof response.count !== 'number') throw new Error('历史数量格式无效');
+      return response.count;
+    },
+    listHistory: async () => {
+      const rows = JSON.parse(await requestApi('history')) as HttpHistoryRow[];
+      if (!Array.isArray(rows)) throw new Error('历史列表格式无效');
+      return rows.map((row) => {
         let mixed: MixedIndicators | null = null;
         try {
-          if (e.result) mixed = deriveMixed(e.result);
+          if (row.result) mixed = deriveMixed(row.result);
         } catch {
-          // result 结构损坏 → 当旧记录处理 (无 mixed, 不开放回填). 与 Tauri 路径一致.
+          // result 结构损坏 → 当旧记录处理 (无 mixed, 不开放回填).
         }
         return {
-          id: e.id,
-          occurred_at: e.occurred_at,
-          contract_name: e.contract_name,
-          cost_cif: e.cost_cif,
-          recipe: e.recipe ?? {},
+          id: row.id,
+          occurred_at: row.occurred_at,
+          contract_name: row.contract_name,
+          cost_cif: row.cost_cif,
+          recipe: row.recipe ?? {},
           mixed,
-          csr_measured: e.csr_measured ?? null,
-          s_measured: e.s_measured ?? null,
-          a_measured: e.a_measured ?? null,
-          v_measured: e.v_measured ?? null,
-          g_measured: e.g_measured ?? null,
-          y_measured: e.y_measured ?? null,
-          m_measured: e.m_measured ?? null,
+          csr_measured: row.csr_measured ?? null,
+          s_measured: row.s_measured ?? null,
+          a_measured: row.a_measured ?? null,
+          v_measured: row.v_measured ?? null,
+          g_measured: row.g_measured ?? null,
+          y_measured: row.y_measured ?? null,
+          m_measured: row.m_measured ?? null,
         };
-      }),
+      });
+    },
     setMeasuredQuality: async (id, measured) => {
-      setMeasuredQualityLocal(id, measured);
+      await requestApi(`history/${encodeURIComponent(id)}/measured`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(measured),
+      });
+      notifyHistoryChanged();
     },
     clearHistory: async () => {
-      clearLocalHistory();
+      await requestApi('history', { method: 'DELETE' });
+      notifyHistoryChanged();
     },
   };
 }

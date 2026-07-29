@@ -1,7 +1,7 @@
 /**
  * 用户数据存储层.
  *
- * Web 端: localStorage
+ * Web 端: localStorage 作为同步缓存，登录后由 PostgreSQL 状态覆盖并持续写回
  * Tauri 端: 后续接 SQLite (user_overrides / user_coal_prefs 表) - 当前先 fallback localStorage
  *
  * 设计:
@@ -60,6 +60,21 @@ export interface HistoryEntry {
   y_measured?: number;
   m_measured?: number;
 }
+
+/** Web 端同步到 PostgreSQL 的用户状态快照。 */
+export interface UserStorageSnapshot {
+  coal_prefs: CoalPrefs;
+  contract: Spec[] | null;
+  quantity: number;
+  user_coals: MasterCoalEntry[];
+}
+
+export const USER_STORAGE_EVENTS = [
+  "doudou:prefs_changed",
+  "doudou:contract_changed",
+  "doudou:quantity_changed",
+  "doudou:user_coals_changed",
+] as const;
 
 // ============================================================
 // 煤偏好
@@ -167,6 +182,7 @@ export function getQuantity(): number {
 
 export function setQuantity(n: number): void {
   localStorage.setItem(KEY_QUANTITY, String(n));
+  window.dispatchEvent(new CustomEvent("doudou:quantity_changed"));
 }
 
 // ============================================================
@@ -281,6 +297,43 @@ export function clearUserCoals(masterCoalNames: readonly string[]): void {
   }
   window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
   window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
+}
+
+/** 读取当前本地缓存，供 Web 首次导入和持续同步使用。 */
+export function getUserStorageSnapshot(): UserStorageSnapshot {
+  return {
+    coal_prefs: getCoalPrefs(),
+    contract: getUserContract(),
+    quantity: getQuantity(),
+    user_coals: getUserCoals(),
+  };
+}
+
+/** 用服务端快照原子替换本地缓存；调用方应在启动同步监听前执行。 */
+export function replaceUserStorageSnapshot(snapshot: UserStorageSnapshot): void {
+  if (Object.keys(snapshot.coal_prefs).length > 0) {
+    localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(snapshot.coal_prefs));
+  } else {
+    localStorage.removeItem(KEY_COAL_PREFS);
+  }
+
+  if (snapshot.contract) {
+    localStorage.setItem(KEY_CONTRACT, JSON.stringify(snapshot.contract));
+  } else {
+    localStorage.removeItem(KEY_CONTRACT);
+  }
+
+  localStorage.setItem(KEY_QUANTITY, String(snapshot.quantity));
+
+  if (snapshot.user_coals.length > 0) {
+    localStorage.setItem(KEY_USER_COALS, JSON.stringify(snapshot.user_coals));
+  } else {
+    localStorage.removeItem(KEY_USER_COALS);
+  }
+
+  for (const eventName of USER_STORAGE_EVENTS) {
+    window.dispatchEvent(new CustomEvent(eventName));
+  }
 }
 
 /**

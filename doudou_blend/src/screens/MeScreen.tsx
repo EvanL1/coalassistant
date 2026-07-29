@@ -143,7 +143,7 @@ export function MeScreen() {
           <div>
             <div style={{ fontSize: 15, fontWeight: 600 }}>doudou</div>
             <div style={{ fontSize: 11, color: "var(--c-text-3)" }}>
-              已登录 · 全部数据本地保存
+              已登录 · {isTauriMode() ? "原生数据保存在本机" : "Web 数据云端保存"}
             </div>
           </div>
           <button
@@ -165,7 +165,7 @@ export function MeScreen() {
 
       {/* 数据状态 */}
       <div className="card">
-        <div className="card-title">本地数据</div>
+        <div className="card-title">用户数据</div>
         <Row label="煤偏好覆盖" value={`${stats.prefs_count} 项`} />
         <Row
           label="自定义合同"
@@ -225,17 +225,22 @@ export function MeScreen() {
           marginBottom: 12,
         }}
       >
-        豆哥配煤 · 核心计算由服务端完成 · 历史保存在本机
+        豆哥配煤 · 核心计算由服务端完成 ·{" "}
+        {isTauriMode() ? "原生数据保存在本机" : "Web 数据保存在 PostgreSQL"}
       </p>
     </>
   );
 }
 
 function detectMode(): string {
-  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+  if (isTauriMode()) {
     return "Tauri 原生 IPC";
   }
   return "浏览器 Rust API";
+}
+
+function isTauriMode(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 function Row({
