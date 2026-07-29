@@ -2,7 +2,7 @@
 
 生产部署使用根目录 `Dockerfile`：Node 阶段构建 React，Rust 阶段编译
 `blend_kit_server`，最终镜像只包含原生服务和静态资源。Railway 托管 Web
-与 Rust 计算 API，Supabase 托管生产 PostgreSQL。
+与 Rust 计算 API，Supabase 托管生产 PostgreSQL；两者均部署在新加坡。
 
 服务必须配置以下变量：
 
@@ -19,14 +19,14 @@ Railway 自动注入 `PORT`，服务监听 `0.0.0.0:$PORT`。`railway.json`
 生产 Supabase 项目：
 
 - 项目名：`CoalAssistant`
-- Project ref：`sijwoholbkuwcwggdgyu`
-- 区域：`ap-northeast-1`（东京）
+- Project ref：`xbsdqlxmzidmvbafxgzn`
+- 区域：`ap-southeast-1`（新加坡）
 
 仓库内的 `blend_kit_server/migrations/` 是数据库结构的唯一迁移源。
 Supabase CLI 只用于项目管理和检查，不维护第二份迁移文件。首次在本地关联：
 
 ```bash
-supabase link --project-ref sijwoholbkuwcwggdgyu
+supabase link --project-ref xbsdqlxmzidmvbafxgzn
 supabase db query --linked \
   'select current_database() as database, current_user as role;'
 ```
@@ -39,8 +39,8 @@ supabase db query --linked \
 
 不要再发布 GitHub Pages；Web 版依赖同源 Rust API，静态 Pages 无法独立运行。
 不要在 Railway PostgreSQL 与 Supabase 之间双写。旧 Railway PostgreSQL
-和原 `us-west-1` Supabase 项目暂时保留为回滚资源，确认东京项目稳定后再
-单独决定是否移除。
+以及原东京、美国西部 Supabase 项目暂时保留为回滚资源，确认新加坡项目稳定
+后再单独决定是否移除。
 
 本地联调：
 
