@@ -7,6 +7,7 @@ import {
   resolveCoalPool,
   type ResolvedCoal,
 } from "../domain/resolvedCoal";
+import { buildPriceAnchor } from "../domain/priceDrift";
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalStatus, MasterCoalEntry } from "../types";
@@ -67,7 +68,11 @@ export function CoalPoolScreen() {
 
   // 卡片、筛选和求解器共用同一套有效值解析，用户新增煤排在前面。
   const allCoals = useMemo<ResolvedCoal[]>(
-    () => resolveCoalPool(master?.coals ?? [], userCoals, prefs),
+    () =>
+      resolveCoalPool(master?.coals ?? [], userCoals, prefs, {
+        anchor: buildPriceAnchor(prefs),
+        masterUpdatedAt: master?.updated_at ?? null,
+      }),
     [master, prefs, userCoals],
   );
   const masterCoalNames = useMemo(
@@ -267,6 +272,7 @@ export function CoalPoolScreen() {
             editing.origin === "user" &&
             masterCoalNames.has(normalizeCoalName(editing.name))
           }
+          masterUpdatedAt={master.updated_at}
           onClose={() => setEditing(null)}
         />
       )}

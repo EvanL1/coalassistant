@@ -971,3 +971,13 @@ button {
     }
   }
 }
+
+/* 成本卡下方的价格推算说明: 求解用的不是原始录入价时必须说清楚 */
+.cost-drift {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.22);
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0.9;
+}

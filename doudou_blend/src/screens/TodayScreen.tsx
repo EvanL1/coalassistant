@@ -17,8 +17,10 @@ import {
 import { getBackend } from "../backend";
 import {
   resolveCoalPool,
+  summarizeDrift,
   toBlendCoal,
 } from "../domain/resolvedCoal";
+import { buildPriceAnchor } from "../domain/priceDrift";
 import {
   isSnapshotActionable,
   LatestRequestTracker,
@@ -250,7 +252,14 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       const [master, backend] = await Promise.all([loadMaster(), getBackend()]);
       if (!tracker.isCurrent(requestId)) return;
 
-      const coals = resolveCoalPool(master.coals, userCoals, prefs)
+      // 用锚点煤把各煤的旧报价推算到当前口径再求解, 否则会系统性低估到厂成本.
+      const anchor = buildPriceAnchor(prefs);
+      const pool = resolveCoalPool(master.coals, userCoals, prefs, {
+        anchor,
+        masterUpdatedAt: master.updated_at,
+      });
+      const driftSummary = summarizeDrift(pool, anchor.coals);
+      const coals = pool
         .map(toBlendCoal)
         .filter((coal) => coal != null);
 
@@ -287,6 +296,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             result,
             contractName,
             enabledCount: coals.length,
+            drift: driftSummary,
           },
         });
       });
@@ -475,6 +485,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
 
   const { snapshot } = state;
   const { result, contractName, enabledCount } = snapshot;
+  const drift = snapshot.drift ?? null;
   const refreshing = state.status === "refreshing";
   const actionsEnabled = isSnapshotActionable(
     snapshot,
@@ -634,6 +645,16 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             </span>
           )}
         </div>
+        {drift && (
+          <div className="cost-drift">
+            按锚点推算 {drift.avgRatio >= 1 ? "+" : "−"}
+            {(Math.abs(drift.avgRatio - 1) * 100).toFixed(1)}%
+            {" · "}
+            {drift.count} 种煤用旧报价推算
+            {drift.oldestQuotedAt && ` · 最旧报价 ${drift.oldestQuotedAt}`}
+            {drift.anchors.length > 0 && ` · 锚点 ${drift.anchors.join("、")}`}
+          </div>
+        )}
       </div>
 
       <div className="card today-recipe">

@@ -4,6 +4,7 @@ import type { MasterCoalEntry } from "../types";
 import {
   resolveCoal,
   resolveCoalPool,
+  summarizeDrift,
   toBlendCoal,
 } from "./resolvedCoal";
 
@@ -248,5 +249,144 @@ describe("resolveCoalPool", () => {
       "duplicate_name",
     ]);
     expect(resolved.map(toBlendCoal)).toEqual([null, null]);
+  });
+});
+
+describe("价格漂移推算", () => {
+  /** 临北 6-30 报 1425, 9-8 复录 1650 -> 全池比例 1.157894... */
+  const drift = {
+    anchor: {
+      coals: ["临北"],
+      quotes: {
+        临北: [
+          { date: "2026-06-30", fob: 1425 },
+          { date: "2026-09-08", fob: 1650 },
+        ],
+      },
+    },
+    masterUpdatedAt: "2026-06-30",
+  };
+  const ratio = 1650 / 1425;
+
+  it("没有锚点时行为与从前完全一致", () => {
+    const resolved = resolveCoal(masterCoal, null, "master");
+    expect(resolved.fob_drifted).toBeNull();
+    expect(resolved.drift_ratio).toBeNull();
+    expect(resolved.cif).toBe(1_100);
+    expect(toBlendCoal(resolved)?.fob).toBe(1_000);
+  });
+
+  it("没单独录过价的煤按 master updated_at 当录价日推算", () => {
+    const resolved = resolveCoal(masterCoal, null, "master", drift);
+    expect(resolved.fob_quoted_at).toBe("2026-06-30");
+    expect(resolved.fob).toBe(1_000);
+    expect(resolved.fob_drifted).toBeCloseTo(1_000 * ratio, 6);
+    expect(resolved.drift_ratio).toBeCloseTo(ratio, 6);
+  });
+
+  it("到厂价用推算价, 运费不参与漂移", () => {
+    const resolved = resolveCoal(masterCoal, null, "master", drift);
+    expect(resolved.cif).toBeCloseTo(1_000 * ratio + 100, 6);
+  });
+
+  it("求解器拿到的是推算价而不是旧报价", () => {
+    const resolved = resolveCoal(masterCoal, null, "master", drift);
+    expect(toBlendCoal(resolved)).toMatchObject({
+      fob: resolved.fob_drifted,
+      frt: 100,
+    });
+  });
+
+  it("刚录过价的煤不再被漂移", () => {
+    const pref: CoalPref = {
+      fob_override: 1_200,
+      fob_quoted_at: "2026-09-08",
+    };
+    const resolved = resolveCoal(masterCoal, pref, "master", drift);
+    expect(resolved.fob).toBe(1_200);
+    expect(resolved.fob_drifted).toBe(1_200);
+    expect(resolved.cif).toBe(1_300);
+  });
+
+  it("旧数据没有 fob_quoted_at 时退回 updated_at 时间戳", () => {
+    const pref: CoalPref = {
+      fob_override: 1_200,
+      updated_at: "2026-09-08T02:00:00.000Z",
+    };
+    const resolved = resolveCoal(masterCoal, pref, "master", drift);
+    expect(resolved.fob_quoted_at).toBe("2026-09-08");
+    expect(resolved.fob_drifted).toBe(1_200);
+  });
+
+  it("锚点定位不到基准时不推算, 退回录入价求解", () => {
+    const pref: CoalPref = {
+      fob_override: 1_200,
+      fob_quoted_at: "2026-01-01",
+    };
+    const resolved = resolveCoal(masterCoal, pref, "master", drift);
+    expect(resolved.fob_drifted).toBeNull();
+    expect(resolved.cif).toBe(1_300);
+    expect(toBlendCoal(resolved)?.fob).toBe(1_200);
+  });
+
+  it("整池解析时漂移逐煤生效", () => {
+    const other: MasterCoalEntry = { ...masterCoal, name: "另一个煤", fob: 800 };
+    const pool = resolveCoalPool([masterCoal, other], [], {}, drift);
+    expect(pool.map((c) => c.fob_drifted)).toEqual([
+      expect.closeTo(1_000 * ratio, 6),
+      expect.closeTo(800 * ratio, 6),
+    ]);
+  });
+});
+
+describe("summarizeDrift", () => {
+  const drift = {
+    anchor: {
+      coals: ["临北"],
+      quotes: {
+        临北: [
+          { date: "2026-06-30", fob: 1425 },
+          { date: "2026-09-08", fob: 1650 },
+        ],
+      },
+    },
+    masterUpdatedAt: "2026-06-30",
+  };
+
+  it("没有锚点时不生成摘要", () => {
+    const pool = resolveCoalPool([masterCoal], [], {});
+    expect(summarizeDrift(pool, [])).toBeNull();
+  });
+
+  it("统计被推算的煤数量与平均比例", () => {
+    const other: MasterCoalEntry = { ...masterCoal, name: "另一个煤", fob: 800 };
+    const pool = resolveCoalPool([masterCoal, other], [], {}, drift);
+    const summary = summarizeDrift(pool, drift.anchor.coals);
+    expect(summary).toMatchObject({
+      count: 2,
+      oldestQuotedAt: "2026-06-30",
+      anchors: ["临北"],
+    });
+    expect(summary?.avgRatio).toBeCloseTo(1650 / 1425, 6);
+  });
+
+  it("刚录过价的煤不计入推算", () => {
+    const pool = resolveCoalPool(
+      [masterCoal],
+      [],
+      { 测试主煤: { fob_override: 1_200, fob_quoted_at: "2026-09-08" } },
+      drift,
+    );
+    expect(summarizeDrift(pool, drift.anchor.coals)).toBeNull();
+  });
+
+  it("停用的煤不计入推算", () => {
+    const pool = resolveCoalPool(
+      [masterCoal],
+      [],
+      { 测试主煤: { enabled: false } },
+      drift,
+    );
+    expect(summarizeDrift(pool, drift.anchor.coals)).toBeNull();
   });
 });

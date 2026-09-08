@@ -16,6 +16,7 @@ import {
   getCoalPref,
   setCoalPref,
   clearCoalPref,
+  recordCoalQuote,
   removeUserCoal,
   type CoalPref,
 } from "./storage";
@@ -26,6 +27,8 @@ interface Props {
   isUserAdded?: boolean;
   /** 旧数据与 Master 重名时，删除用户煤不能连带清掉共用的 Master 偏好。 */
   preservePrefOnDelete?: boolean;
+  /** master 的 updated_at, 首次改价时用来给报价历史补起点 */
+  masterUpdatedAt?: string | null;
   onClose: () => void;
   onSaved?: () => void;
 }
@@ -34,6 +37,8 @@ interface FormState {
   enabled: boolean;
   fob: string;
   frt: string;
+  /** 作为价格锚点参与推算 */
+  isAnchor: boolean;
   props: Record<string, string>;
 }
 
@@ -47,6 +52,7 @@ function toForm(
     enabled: resolved.requestedEnabled,
     fob: resolved.fob != null ? String(resolved.fob) : "",
     frt: resolved.frt != null ? String(resolved.frt) : "",
+    isAnchor: pref?.is_price_anchor === true,
     props: Object.fromEntries(
       INDICATOR_ORDER.map((key) => [
         key,
@@ -54,6 +60,13 @@ function toForm(
       ]),
     ),
   };
+}
+
+/** 距今天数; 日期不合法返回 null. */
+function daysSince(date: string): number | null {
+  const t = Date.parse(`${date}T00:00:00`);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.round((Date.now() - t) / 86_400_000));
 }
 
 function parseNumOrNull(s: string): number | null {
@@ -66,6 +79,7 @@ export function CoalEditor({
   coal,
   isUserAdded,
   preservePrefOnDelete,
+  masterUpdatedAt,
   onClose,
   onSaved,
 }: Props) {
@@ -76,6 +90,11 @@ export function CoalEditor({
   );
   const resolved = resolveCoal(coal, pref, origin);
   const isHidden = resolved.hidden;
+  const quotedAt = resolved.fob_quoted_at ?? masterUpdatedAt ?? null;
+  const staleDays = quotedAt ? daysSince(quotedAt) : null;
+  // 一个点算不出涨跌. 锚点开着却只有 0~1 条报价时会静默不生效, 必须说出来.
+  const quoteCount = pref?.fob_history?.length ?? 0;
+  const anchorNotReady = form.isAnchor && quoteCount < 2;
 
   // 锁住 body 滚动
   useEffect(() => {
@@ -103,8 +122,18 @@ export function CoalEditor({
       enabled: form.enabled,
       fob_override: fobNum !== coal.fob ? fobNum : null,
       frt_override: frtNum !== coal.frt ? frtNum : null,
+      is_price_anchor: form.isAnchor,
       props_override: Object.keys(propsOverride).length > 0 ? propsOverride : undefined,
     });
+    // 出厂价变了才记一次报价. 报价历史是漂移推算唯一的数据来源, 没有它锚点算不出比例.
+    if (fobNum != null && fobNum !== resolved.fob) {
+      const seedDate = pref?.fob_quoted_at ?? masterUpdatedAt ?? null;
+      const seed =
+        resolved.fob != null && seedDate
+          ? { date: seedDate, fob: resolved.fob }
+          : null;
+      recordCoalQuote(coal.name, fobNum, seed);
+    }
     onSaved?.();
     onClose();
   }
@@ -183,6 +212,53 @@ export function CoalEditor({
                 placeholder="元/吨"
               />
             </div>
+            {quotedAt && (
+              <div
+                style={{
+                  fontSize: 11,
+                  padding: "0 0 8px",
+                  color:
+                    staleDays != null && staleDays > 30
+                      ? "var(--c-danger)"
+                      : "var(--c-text-3)",
+                }}
+              >
+                上次录价 {quotedAt}
+                {staleDays != null && ` · ${staleDays} 天前`}
+                {staleDays != null && staleDays > 30 && " · 建议复核"}
+              </div>
+            )}
+            <div className="edit-row">
+              <div className="edit-row-label">
+                作为价格锚点
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 400,
+                    color: "var(--c-text-3)",
+                    marginTop: 2,
+                  }}
+                >
+                  用它的涨跌比例推算其他未更新的煤
+                </div>
+              </div>
+              <div
+                className={`toggle ${form.isAnchor ? "on" : ""}`}
+                onClick={() => setForm({ ...form, isAnchor: !form.isAnchor })}
+              />
+            </div>
+            {anchorNotReady && (
+              <div
+                style={{
+                  fontSize: 11,
+                  padding: "0 0 8px",
+                  color: "var(--c-warning, #f59e0b)",
+                }}
+              >
+                锚点还不能用: 一个价格点算不出涨跌。改一次出厂价并保存,
+                系统会把旧价当起点, 从此开始推算。
+              </div>
+            )}
             <div className="edit-row">
               <div className="edit-row-label">运费 FRT</div>
               <input

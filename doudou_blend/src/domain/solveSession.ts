@@ -1,4 +1,5 @@
 import type { BlendRequest, BlendResult } from "../types";
+import type { DriftSummary } from "./resolvedCoal";
 
 export interface SolveSnapshot {
   requestId: number;
@@ -6,6 +7,8 @@ export interface SolveSnapshot {
   result: BlendResult;
   contractName: string;
   enabledCount: number;
+  /** 本次求解用了推算价时的说明; null = 全部按录入价 */
+  drift?: DriftSummary | null;
 }
 
 export class LatestRequestTracker {

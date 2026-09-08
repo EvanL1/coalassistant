@@ -12,6 +12,7 @@
 
 import type { Spec, MasterCoalEntry, BlendResult, MeasuredQuality } from "./types";
 import { normalizeCoalName } from "./domain/coalName";
+import type { AnchorQuote } from "./domain/priceDrift";
 
 export { normalizeCoalName } from "./domain/coalName";
 
@@ -29,6 +30,12 @@ export interface CoalPref {
   hidden?: boolean;
   /** 用户改后的 FOB; null = 用 master 默认 */
   fob_override?: number | null;
+  /** fob 是哪天录的 (YYYY-MM-DD); 缺失时按 master updated_at 兜底 */
+  fob_quoted_at?: string | null;
+  /** 这个煤的报价历史, 每次改价追加一条; 锚点煤靠它构成自建价格指数 */
+  fob_history?: AnchorQuote[];
+  /** 标记为价格锚点: 用它的涨跌比例推算其余未更新煤的现价 */
+  is_price_anchor?: boolean;
   /** 用户改后的运费; null = 用 master 默认 */
   frt_override?: number | null;
   /** 用户改过的化验项; null = 用 master 默认 */
@@ -114,6 +121,48 @@ export function setCoalPref(name: string, pref: Partial<CoalPref>): void {
 
 export function getCoalPref(name: string): CoalPref | null {
   return getCoalPrefs()[name] ?? null;
+}
+
+/** 本地日期 YYYY-MM-DD. 不能用 toISOString(那是 UTC), 国内凌晨会差一天. */
+function todayLocal(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+const MAX_QUOTE_HISTORY = 60;
+
+/**
+ * 录一次价: 写 fob 覆盖 + 录价日, 并追加到该煤的报价历史.
+ *
+ * `seed` 是改价之前的口径(通常是 master 的 {updated_at, fob}), 只在历史为空时
+ * 用来补起点 —— 没有起点就只有一个点, 算不出涨跌比例, 锚点也就失效了.
+ */
+export function recordCoalQuote(
+  name: string,
+  fob: number,
+  seed?: AnchorQuote | null,
+): void {
+  const date = todayLocal();
+  const previous = getCoalPref(name);
+  const history: AnchorQuote[] = Array.isArray(previous?.fob_history)
+    ? [...previous.fob_history]
+    : [];
+  if (history.length === 0 && seed != null && seed.date < date) {
+    history.push({ date: seed.date, fob: seed.fob });
+  }
+  const sameDay = history.findIndex((quote) => quote?.date === date);
+  if (sameDay >= 0) {
+    history[sameDay] = { date, fob };
+  } else {
+    history.push({ date, fob });
+  }
+  history.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  setCoalPref(name, {
+    fob_override: fob,
+    fob_quoted_at: date,
+    fob_history: history.slice(-MAX_QUOTE_HISTORY),
+  });
 }
 
 export function clearCoalPref(name: string): void {
