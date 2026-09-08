@@ -278,7 +278,7 @@ describe("TodayScreen 报价时效提示", () => {
     expect(note.className).toContain("cost-warn");
   });
 
-  it("拿到期货比例时补一条参考估算, 并声明未计入求解", async () => {
+  it("拿到期货比例时补一条参考估算", async () => {
     mocks.fetchFuturesRatioSince.mockResolvedValue(1.152);
     mocks.getBackend.mockResolvedValue({
       solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
@@ -289,10 +289,9 @@ describe("TodayScreen 报价时效提示", () => {
     await screen.findByText("1000", { selector: ".cost-int" });
 
     // fob 900 * 1.152 + frt 100 = 1136.8 -> 1137; 运费不参与漂移
-    const estimate = await screen.findByText(/若随焦煤期货同步变动/);
+    const estimate = await screen.findByText(/随焦煤期货/);
     expect(estimate.textContent).toContain("+15.2%");
     expect(estimate.textContent).toContain("1137");
-    expect(estimate.textContent).toContain("未计入求解");
   });
 
   it("期货数据拿不到时只显示时效提示, 不编造估算", async () => {
@@ -306,6 +305,6 @@ describe("TodayScreen 报价时效提示", () => {
     await screen.findByText("1000", { selector: ".cost-int" });
     await screen.findByText(/报价停留在 2026-07-17/);
 
-    expect(screen.queryByText(/若随焦煤期货同步变动/)).toBeNull();
+    expect(screen.queryByText(/随焦煤期货/)).toBeNull();
   });
 });

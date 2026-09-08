@@ -255,8 +255,7 @@ export function CoalEditor({
                   color: "var(--c-warning, #f59e0b)",
                 }}
               >
-                锚点还不能用: 一个价格点算不出涨跌。改一次出厂价并保存,
-                系统会把旧价当起点, 从此开始推算。
+                改一次出厂价并保存后生效
               </div>
             )}
             <div className="edit-row">

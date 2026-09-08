@@ -711,13 +711,11 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
                 </div>
                 {futuresEstimate != null && futuresRatio != null && (
                   <div style={{ marginTop: 4 }}>
-                    若随焦煤期货同步变动（
-                    {futuresRatio >= 1 ? "+" : "−"}
-                    {(Math.abs(futuresRatio - 1) * 100).toFixed(1)}%，已剔除换月）
-                    ，到厂价约 <b>{futuresEstimate.toFixed(0)}</b> 元/吨
+                    参考 · 随焦煤期货 {futuresRatio >= 1 ? "+" : "−"}
+                    {(Math.abs(futuresRatio - 1) * 100).toFixed(1)}% · 到厂价约{" "}
+                    <b>{futuresEstimate.toFixed(0)}</b> 元/吨
                     {futuresTotal != null &&
-                      `，总额约 ${Math.round(futuresTotal).toLocaleString("zh-CN")} 元`}
-                    。仅供参考，未计入求解 —— 期货标的是低硫标准品，与实际煤种有价差。
+                      ` · 总额约 ${Math.round(futuresTotal).toLocaleString("zh-CN")} 元`}
                   </div>
                 )}
               </>
