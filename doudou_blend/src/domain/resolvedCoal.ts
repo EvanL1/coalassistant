@@ -289,47 +289,50 @@ export function toBlendCoal(coal: ResolvedCoal): Coal | null {
   };
 }
 
-/** 求解使用推算价时的展示摘要. */
-export interface DriftSummary {
-  /** 被推算的煤数量 */
-  count: number;
-  /** 平均涨跌比例 */
-  avgRatio: number;
-  /** 其中最旧的一次录价日 */
+/** 本次求解所用价格的可信度摘要. 无论是否发生推算都会返回. */
+export interface PriceStatus {
+  /** 参与求解的煤里最旧的报价日; null = 无法判定 */
   oldestQuotedAt: string | null;
+  /** 用了推算价的煤数量; 0 = 全部按原始录入价 */
+  driftedCount: number;
+  /** 被推算煤的平均涨跌比例; null = 没有发生推算 */
+  avgRatio: number | null;
   /** 参与推算的锚点煤 */
   anchors: string[];
 }
 
 /**
- * 汇总本次求解里有多少煤用了推算价、平均漂了多少.
- * 没有任何煤被推算(没锚点/比例为 1)时返回 null, 界面就不必提这件事.
+ * 汇总本次求解的价格可信度.
+ *
+ * 注意这里**总是**返回对象, 而不是"没推算就返回 null" —— 最需要向用户交代的
+ * 恰恰是没有推算的默认态: 那时卡片上印着两位小数的到厂价和总额, 底下却是几十天
+ * 前的报价. 把提示做成"功能生效后才显示"等于把警告装在了不需要警告的一侧.
  */
-export function summarizeDrift(
+export function summarizePriceStatus(
   pool: readonly ResolvedCoal[],
   anchors: readonly string[],
-): DriftSummary | null {
-  const drifted = pool.filter(
-    (coal) =>
-      coal.readiness === "ready" &&
-      coal.drift_ratio != null &&
-      Math.abs(coal.drift_ratio - 1) > 1e-9,
-  );
-  if (drifted.length === 0) return null;
-  const avgRatio =
-    drifted.reduce((sum, coal) => sum + (coal.drift_ratio ?? 1), 0) /
-    drifted.length;
+): PriceStatus {
+  const participating = pool.filter((coal) => coal.readiness === "ready");
   let oldestQuotedAt: string | null = null;
-  for (const coal of drifted) {
+  for (const coal of participating) {
     const quoted = coal.fob_quoted_at;
     if (quoted && (oldestQuotedAt == null || quoted < oldestQuotedAt)) {
       oldestQuotedAt = quoted;
     }
   }
+  const drifted = participating.filter(
+    (coal) =>
+      coal.drift_ratio != null && Math.abs(coal.drift_ratio - 1) > 1e-9,
+  );
+  const avgRatio =
+    drifted.length > 0
+      ? drifted.reduce((sum, coal) => sum + (coal.drift_ratio ?? 1), 0) /
+        drifted.length
+      : null;
   return {
-    count: drifted.length,
-    avgRatio,
     oldestQuotedAt,
+    driftedCount: drifted.length,
+    avgRatio,
     anchors: [...anchors],
   };
 }

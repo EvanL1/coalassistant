@@ -981,3 +981,9 @@ button {
   line-height: 1.5;
   opacity: 0.9;
 }
+
+/* 报价过期告警: 蓝底卡片上用暖黄, 保证对比度 */
+.cost-warn {
+  color: #ffd666;
+  font-weight: 600;
+}

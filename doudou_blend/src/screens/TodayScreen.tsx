@@ -17,10 +17,11 @@ import {
 import { getBackend } from "../backend";
 import {
   resolveCoalPool,
-  summarizeDrift,
+  summarizePriceStatus,
   toBlendCoal,
 } from "../domain/resolvedCoal";
 import { buildPriceAnchor } from "../domain/priceDrift";
+import { fetchFuturesRatioSince } from "../index_quote";
 import {
   isSnapshotActionable,
   LatestRequestTracker,
@@ -58,6 +59,13 @@ const summaryLink: CSSProperties = {
   fontWeight: 600,
   fontSize: 12,
 };
+
+/** 距今天数; 日期不合法返回 null. */
+function daysSince(date: string): number | null {
+  const t = Date.parse(`${date}T00:00:00`);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.round((Date.now() - t) / 86_400_000));
+}
 
 function formatPrice(n: number): { int: string; dec: string } {
   const [intPart, decPart] = n.toFixed(2).split(".");
@@ -179,6 +187,8 @@ type SolveState =
 export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   const [state, setState] = useState<SolveState>({ status: "loading" });
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  // 焦煤期货自最旧报价日以来的涨跌比例, 只用于"若随行情同步变动"的参考估算
+  const [futuresRatio, setFuturesRatio] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   // 重算反馈: idle / running / done. running 时按钮显示"重算中...", done 时显示"✓ 已重算" 1.5s
   const [recompute, setRecompute] = useState<"idle" | "running" | "done">("idle");
@@ -220,6 +230,27 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
     };
   }, []);
 
+  const oldestQuotedAt =
+    state.status === "ok" ? state.snapshot.price?.oldestQuotedAt ?? null : null;
+
+  useEffect(() => {
+    if (!oldestQuotedAt) {
+      setFuturesRatio(null);
+      return;
+    }
+    let alive = true;
+    fetchFuturesRatioSince(oldestQuotedAt)
+      .then((ratio) => {
+        if (alive) setFuturesRatio(ratio);
+      })
+      .catch(() => {
+        if (alive) setFuturesRatio(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [oldestQuotedAt]);
+
   /** initial=true 时整页 loading; 否则原地反馈, 保留旧结果直到新结果出来. */
   async function runSolve(initial: boolean = false) {
     const tracker = requestTrackerRef.current;
@@ -258,7 +289,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         anchor,
         masterUpdatedAt: master.updated_at,
       });
-      const driftSummary = summarizeDrift(pool, anchor.coals);
+      const priceStatus = summarizePriceStatus(pool, anchor.coals);
       const coals = pool
         .map(toBlendCoal)
         .filter((coal) => coal != null);
@@ -296,7 +327,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             result,
             contractName,
             enabledCount: coals.length,
-            drift: driftSummary,
+            price: priceStatus,
           },
         });
       });
@@ -485,7 +516,20 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
 
   const { snapshot } = state;
   const { result, contractName, enabledCount } = snapshot;
-  const drift = snapshot.drift ?? null;
+  const price = snapshot.price ?? null;
+  const quoteAgeDays = price?.oldestQuotedAt
+    ? daysSince(price.oldestQuotedAt)
+    : null;
+  const quoteStale = quoteAgeDays != null && quoteAgeDays > 14;
+  // 只漂出厂价, 运费不动 —— 与锚点推算同一套口径
+  const futuresEstimate =
+    futuresRatio != null && result.cost != null
+      ? result.cost.fob_per_ton * futuresRatio + result.cost.frt_per_ton
+      : null;
+  const futuresTotal =
+    futuresEstimate != null && snapshot.request.total_quantity != null
+      ? futuresEstimate * snapshot.request.total_quantity
+      : null;
   const refreshing = state.status === "refreshing";
   const actionsEnabled = isSnapshotActionable(
     snapshot,
@@ -645,14 +689,39 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             </span>
           )}
         </div>
-        {drift && (
+        {price?.oldestQuotedAt && (
           <div className="cost-drift">
-            按锚点推算 {drift.avgRatio >= 1 ? "+" : "−"}
-            {(Math.abs(drift.avgRatio - 1) * 100).toFixed(1)}%
-            {" · "}
-            {drift.count} 种煤用旧报价推算
-            {drift.oldestQuotedAt && ` · 最旧报价 ${drift.oldestQuotedAt}`}
-            {drift.anchors.length > 0 && ` · 锚点 ${drift.anchors.join("、")}`}
+            {price.driftedCount > 0 && price.avgRatio != null ? (
+              <>
+                按锚点推算 {price.avgRatio >= 1 ? "+" : "−"}
+                {(Math.abs(price.avgRatio - 1) * 100).toFixed(1)}%
+                {" · "}
+                {price.driftedCount} 种煤用旧报价推算
+                {` · 最旧报价 ${price.oldestQuotedAt}`}
+                {price.anchors.length > 0 &&
+                  ` · 锚点 ${price.anchors.join("、")}`}
+              </>
+            ) : (
+              <>
+                <div className={quoteStale ? "cost-warn" : undefined}>
+                  {quoteStale && "⚠ "}
+                  报价停留在 {price.oldestQuotedAt}
+                  {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
+                  {" · 未按市场校正"}
+                </div>
+                {futuresEstimate != null && futuresRatio != null && (
+                  <div style={{ marginTop: 4 }}>
+                    若随焦煤期货同步变动（
+                    {futuresRatio >= 1 ? "+" : "−"}
+                    {(Math.abs(futuresRatio - 1) * 100).toFixed(1)}%，已剔除换月）
+                    ，到厂价约 <b>{futuresEstimate.toFixed(0)}</b> 元/吨
+                    {futuresTotal != null &&
+                      `，总额约 ${Math.round(futuresTotal).toLocaleString("zh-CN")} 元`}
+                    。仅供参考，未计入求解 —— 期货标的是低硫标准品，与实际煤种有价差。
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </div>

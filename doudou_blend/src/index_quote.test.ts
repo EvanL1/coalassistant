@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseEastmoneyKlines, parseRealtimeQuote } from "./index_quote";
+import {
+  indexRatioSince,
+  parseEastmoneyKlines,
+  parseRealtimeQuote,
+  rollAdjustedPoints,
+} from "./index_quote";
 
 /** 2026-09-08 焦煤主连实测响应: 1664.0, 涨 19.5, +1.19% (昨结算 1644.5) */
 const jmmResponse = {
@@ -67,29 +72,81 @@ describe("parseEastmoneyKlines", () => {
     },
   };
 
-  it("取第 3 个字段作为收盘价", () => {
+  it("取第 2/3 个字段作为开盘价与收盘价", () => {
     expect(parseEastmoneyKlines(response, 3)).toEqual([
-      { date: "2026-09-04", close: 1666 },
-      { date: "2026-09-07", close: 1627.5 },
-      { date: "2026-09-08", close: 1662 },
+      { date: "2026-09-04", open: 1658, close: 1666 },
+      { date: "2026-09-07", open: 1666, close: 1627.5 },
+      { date: "2026-09-08", open: 1622, close: 1662 },
     ]);
   });
 
   it("只取末尾 take 条", () => {
     expect(parseEastmoneyKlines(response, 1)).toEqual([
-      { date: "2026-09-08", close: 1662 },
+      { date: "2026-09-08", open: 1622, close: 1662 },
     ]);
   });
 
   it("跳过脏行", () => {
-    const dirty = { data: { klines: ["坏数据", 42, "2026-09-08,1,1662,1,1"] } };
+    const dirty = { data: { klines: ["坏数据", 42, "2026-09-08,1600,1662,1,1"] } };
     expect(parseEastmoneyKlines(dirty, 10)).toEqual([
-      { date: "2026-09-08", close: 1662 },
+      { date: "2026-09-08", open: 1600, close: 1662 },
     ]);
   });
 
   it("结构不对时返回空数组而不是抛错", () => {
     expect(parseEastmoneyKlines({ data: { klines: null } }, 10)).toEqual([]);
     expect(parseEastmoneyKlines(null, 10)).toEqual([]);
+  });
+});
+
+describe("rollAdjustedPoints / indexRatioSince", () => {
+  /**
+   * 2026-08-19 真实换月: 主连昨收 1374.0 → 今开 1550.0 (+12.81%)。
+   * 当天 JM2609 自己 1374→1380, JM2701 1546.5→1550, 没有合约涨了 12.81%。
+   */
+  const series = [
+    { date: "2026-06-30", open: 1295, close: 1280.5 },
+    { date: "2026-08-18", open: 1367.5, close: 1374 },
+    { date: "2026-08-19", open: 1550, close: 1586.5 },
+    { date: "2026-09-08", open: 1622, close: 1663.5 },
+  ];
+
+  it("把换月之前的历史整体缩放对齐, 当前值不动", () => {
+    const adjusted = rollAdjustedPoints(series);
+    const factor = 1550 / 1374;
+    expect(adjusted[0].close).toBeCloseTo(1280.5 * factor, 6);
+    expect(adjusted[1].close).toBeCloseTo(1374 * factor, 6);
+    // 断点及之后不动 —— 最新价必须等于市场真实报价
+    expect(adjusted[2].close).toBe(1586.5);
+    expect(adjusted[3].close).toBe(1663.5);
+  });
+
+  it("剔除换月后的涨幅只有朴素算法的一半", () => {
+    const adjusted = indexRatioSince(series, "2026-06-30")!;
+    const naive = 1663.5 / 1280.5;
+    expect(adjusted).toBeCloseTo((1374 / 1280.5) * (1663.5 / 1550), 6);
+    expect(adjusted).toBeCloseTo(1.1516, 3); // +15.2%
+    expect(naive).toBeCloseTo(1.2991, 3); // +29.9%, 含 12.81% 换月跳空
+  });
+
+  it("跳空未超阈值时不当作换月", () => {
+    const smooth = [
+      { date: "2026-09-07", open: 1600, close: 1620 },
+      { date: "2026-09-08", open: 1650, close: 1680 }, // +1.85% 隔夜, 正常行情
+    ];
+    expect(rollAdjustedPoints(smooth)[0].close).toBe(1620);
+    expect(indexRatioSince(smooth, "2026-09-07")).toBeCloseTo(1680 / 1620, 6);
+  });
+
+  it("基准日晚于全部历史时取最新一根, 比例为 1", () => {
+    expect(indexRatioSince(series, "2026-12-01")).toBe(1);
+  });
+
+  it("基准日早于全部历史时定不出基准, 返回 null", () => {
+    expect(indexRatioSince(series, "2020-01-01")).toBeNull();
+  });
+
+  it("空序列返回 null", () => {
+    expect(indexRatioSince([], "2026-06-30")).toBeNull();
   });
 });

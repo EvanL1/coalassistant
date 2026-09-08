@@ -6,7 +6,7 @@
  * 只做展示, 不进任何求解逻辑.
  */
 import { useEffect, useState } from "react";
-import { fetchQuotes, type Quote } from "./index_quote";
+import { fetchQuotes, SPARK_POINTS, type Quote } from "./index_quote";
 
 /** 内联 SVG 折线, 数据归一化到固定 viewBox, 不引图表库. */
 function Sparkline({ closes, color }: { closes: number[]; color: string }) {
@@ -60,8 +60,11 @@ function QuoteItem({ quote }: { quote: Quote }) {
       {quote.stale && quote.lastDate && (
         <span style={{ fontSize: 10 }}>({quote.lastDate})</span>
       )}
-      {quote.closes.length >= 2 && (
-        <Sparkline closes={quote.closes} color={color} />
+      {quote.points.length >= 2 && (
+        <Sparkline
+          closes={quote.points.slice(-SPARK_POINTS).map((point) => point.close)}
+          color={color}
+        />
       )}
     </div>
   );

@@ -4,7 +4,7 @@ import type { MasterCoalEntry } from "../types";
 import {
   resolveCoal,
   resolveCoalPool,
-  summarizeDrift,
+  summarizePriceStatus,
   toBlendCoal,
 } from "./resolvedCoal";
 
@@ -339,7 +339,7 @@ describe("价格漂移推算", () => {
   });
 });
 
-describe("summarizeDrift", () => {
+describe("summarizePriceStatus", () => {
   const drift = {
     anchor: {
       coals: ["临北"],
@@ -353,40 +353,65 @@ describe("summarizeDrift", () => {
     masterUpdatedAt: "2026-06-30",
   };
 
-  it("没有锚点时不生成摘要", () => {
-    const pool = resolveCoalPool([masterCoal], [], {});
-    expect(summarizeDrift(pool, [])).toBeNull();
+  it("没有锚点时仍然报告报价时效 —— 这正是最需要提示的状态", () => {
+    const pool = resolveCoalPool([masterCoal], [], {}, {
+      anchor: { coals: [], quotes: {} },
+      masterUpdatedAt: "2026-06-30",
+    });
+    expect(summarizePriceStatus(pool, [])).toEqual({
+      oldestQuotedAt: "2026-06-30",
+      driftedCount: 0,
+      avgRatio: null,
+      anchors: [],
+    });
   });
 
   it("统计被推算的煤数量与平均比例", () => {
     const other: MasterCoalEntry = { ...masterCoal, name: "另一个煤", fob: 800 };
     const pool = resolveCoalPool([masterCoal, other], [], {}, drift);
-    const summary = summarizeDrift(pool, drift.anchor.coals);
-    expect(summary).toMatchObject({
-      count: 2,
+    const status = summarizePriceStatus(pool, drift.anchor.coals);
+    expect(status).toMatchObject({
+      driftedCount: 2,
       oldestQuotedAt: "2026-06-30",
       anchors: ["临北"],
     });
-    expect(summary?.avgRatio).toBeCloseTo(1650 / 1425, 6);
+    expect(status.avgRatio).toBeCloseTo(1650 / 1425, 6);
   });
 
-  it("刚录过价的煤不计入推算", () => {
+  it("刚录过价的煤不计入推算, 但仍贡献报价日", () => {
     const pool = resolveCoalPool(
       [masterCoal],
       [],
       { 测试主煤: { fob_override: 1_200, fob_quoted_at: "2026-09-08" } },
       drift,
     );
-    expect(summarizeDrift(pool, drift.anchor.coals)).toBeNull();
+    expect(summarizePriceStatus(pool, drift.anchor.coals)).toMatchObject({
+      driftedCount: 0,
+      oldestQuotedAt: "2026-09-08",
+    });
   });
 
-  it("停用的煤不计入推算", () => {
+  it("停用的煤既不计入推算也不影响报价时效", () => {
     const pool = resolveCoalPool(
       [masterCoal],
       [],
       { 测试主煤: { enabled: false } },
       drift,
     );
-    expect(summarizeDrift(pool, drift.anchor.coals)).toBeNull();
+    expect(summarizePriceStatus(pool, drift.anchor.coals)).toMatchObject({
+      driftedCount: 0,
+      oldestQuotedAt: null,
+    });
+  });
+
+  it("多个煤报价日不同时取最旧的那个", () => {
+    const other: MasterCoalEntry = { ...masterCoal, name: "另一个煤", fob: 800 };
+    const pool = resolveCoalPool(
+      [masterCoal, other],
+      [],
+      { 测试主煤: { fob_override: 1_200, fob_quoted_at: "2026-08-01" } },
+      drift,
+    );
+    expect(summarizePriceStatus(pool, []).oldestQuotedAt).toBe("2026-06-30");
   });
 });

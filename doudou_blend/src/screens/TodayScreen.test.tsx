@@ -17,7 +17,12 @@ const mocks = vi.hoisted(() => ({
   loadMaster: vi.fn(),
   setQuantity: vi.fn(),
   writeText: vi.fn(),
+  fetchFuturesRatioSince: vi.fn(),
   quantity: { value: 3_700 },
+}));
+
+vi.mock("../index_quote", () => ({
+  fetchFuturesRatioSince: mocks.fetchFuturesRatioSince,
 }));
 
 vi.mock("../backend", () => ({
@@ -106,6 +111,8 @@ beforeEach(() => {
   });
   mocks.loadMaster.mockResolvedValue(master);
   mocks.writeText.mockResolvedValue(undefined);
+  mocks.fetchFuturesRatioSince.mockReset();
+  mocks.fetchFuturesRatioSince.mockResolvedValue(null);
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: { writeText: mocks.writeText },
@@ -249,5 +256,56 @@ describe("TodayScreen 求解快照", () => {
 
     expect(timerSpy).not.toHaveBeenCalled();
     timerSpy.mockRestore();
+  });
+});
+
+describe("TodayScreen 报价时效提示", () => {
+  /**
+   * 回归: 早先只在"锚点推算生效后"才显示说明, 而真正危险的是没推算的默认态 ——
+   * 卡片印着两位小数的到厂价和总额, 底下是几十天前的报价, 界面却一言不发.
+   */
+  it("没有锚点推算时也必须显示报价日与未校正提示", async () => {
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("1000", { selector: ".cost-int" });
+
+    const note = await screen.findByText(/报价停留在 2026-07-17/);
+    expect(note.textContent).toContain("未按市场校正");
+    expect(note.className).toContain("cost-warn");
+  });
+
+  it("拿到期货比例时补一条参考估算, 并声明未计入求解", async () => {
+    mocks.fetchFuturesRatioSince.mockResolvedValue(1.152);
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("1000", { selector: ".cost-int" });
+
+    // fob 900 * 1.152 + frt 100 = 1136.8 -> 1137; 运费不参与漂移
+    const estimate = await screen.findByText(/若随焦煤期货同步变动/);
+    expect(estimate.textContent).toContain("+15.2%");
+    expect(estimate.textContent).toContain("1137");
+    expect(estimate.textContent).toContain("未计入求解");
+  });
+
+  it("期货数据拿不到时只显示时效提示, 不编造估算", async () => {
+    mocks.fetchFuturesRatioSince.mockResolvedValue(null);
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("1000", { selector: ".cost-int" });
+    await screen.findByText(/报价停留在 2026-07-17/);
+
+    expect(screen.queryByText(/若随焦煤期货同步变动/)).toBeNull();
   });
 });
