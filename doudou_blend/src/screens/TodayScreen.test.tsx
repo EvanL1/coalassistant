@@ -17,12 +17,12 @@ const mocks = vi.hoisted(() => ({
   loadMaster: vi.fn(),
   setQuantity: vi.fn(),
   writeText: vi.fn(),
-  fetchFuturesRatioSince: vi.fn(),
+  fetchCoalIndexRatioSince: vi.fn(),
   quantity: { value: 3_700 },
 }));
 
-vi.mock("../index_quote", () => ({
-  fetchFuturesRatioSince: mocks.fetchFuturesRatioSince,
+vi.mock("../coal_index", () => ({
+  fetchCoalIndexRatioSince: mocks.fetchCoalIndexRatioSince,
 }));
 
 vi.mock("../backend", () => ({
@@ -111,8 +111,8 @@ beforeEach(() => {
   });
   mocks.loadMaster.mockResolvedValue(master);
   mocks.writeText.mockResolvedValue(undefined);
-  mocks.fetchFuturesRatioSince.mockReset();
-  mocks.fetchFuturesRatioSince.mockResolvedValue(null);
+  mocks.fetchCoalIndexRatioSince.mockReset();
+  mocks.fetchCoalIndexRatioSince.mockResolvedValue(null);
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: { writeText: mocks.writeText },
@@ -278,8 +278,8 @@ describe("TodayScreen 报价时效提示", () => {
     expect(note.className).toContain("cost-warn");
   });
 
-  it("拿到期货比例时补一条参考估算", async () => {
-    mocks.fetchFuturesRatioSince.mockResolvedValue(1.152);
+  it("拿到现货指数比例时补一条参考估算", async () => {
+    mocks.fetchCoalIndexRatioSince.mockResolvedValue(1.152);
     mocks.getBackend.mockResolvedValue({
       solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
       saveHistory: vi.fn(),
@@ -289,13 +289,13 @@ describe("TodayScreen 报价时效提示", () => {
     await screen.findByText("1000", { selector: ".cost-int" });
 
     // fob 900 * 1.152 + frt 100 = 1136.8 -> 1137; 运费不参与漂移
-    const estimate = await screen.findByText(/随焦煤期货/);
+    const estimate = await screen.findByText(/随焦煤现货指数/);
     expect(estimate.textContent).toContain("+15.2%");
     expect(estimate.textContent).toContain("1137");
   });
 
-  it("期货数据拿不到时只显示时效提示, 不编造估算", async () => {
-    mocks.fetchFuturesRatioSince.mockResolvedValue(null);
+  it("现货指数拿不到时只显示时效提示, 不编造估算", async () => {
+    mocks.fetchCoalIndexRatioSince.mockResolvedValue(null);
     mocks.getBackend.mockResolvedValue({
       solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
       saveHistory: vi.fn(),
@@ -305,6 +305,6 @@ describe("TodayScreen 报价时效提示", () => {
     await screen.findByText("1000", { selector: ".cost-int" });
     await screen.findByText(/报价停留在 2026-07-17/);
 
-    expect(screen.queryByText(/随焦煤期货/)).toBeNull();
+    expect(screen.queryByText(/随焦煤现货指数/)).toBeNull();
   });
 });

@@ -18,6 +18,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+mod coal_index;
 mod database;
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
@@ -102,6 +103,7 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
 
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/coal-index", get(coal_index_handler))
         .route("/api/auth/session", get(auth_session))
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
@@ -151,6 +153,19 @@ struct LoginRequest {
 #[derive(Serialize)]
 struct AuthStatus {
     authenticated: bool,
+}
+
+/// 焦煤现货指数序列, 供今日屏参考估算. 公开(不敏感, 与 health 同级).
+async fn coal_index_handler() -> Response {
+    match coal_index::get_spot_series().await {
+        Some(points) => Json(points).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, TEXT_CONTENT_TYPE)],
+            "coal index unavailable",
+        )
+            .into_response(),
+    }
 }
 
 async fn auth_session(State(state): State<AppState>, headers: HeaderMap) -> Json<AuthStatus> {

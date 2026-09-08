@@ -21,7 +21,7 @@ import {
   toBlendCoal,
 } from "../domain/resolvedCoal";
 import { buildPriceAnchor } from "../domain/priceDrift";
-import { fetchFuturesRatioSince } from "../index_quote";
+import { fetchCoalIndexRatioSince } from "../coal_index";
 import {
   isSnapshotActionable,
   LatestRequestTracker,
@@ -187,8 +187,8 @@ type SolveState =
 export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   const [state, setState] = useState<SolveState>({ status: "loading" });
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
-  // 焦煤期货自最旧报价日以来的涨跌比例, 只用于"若随行情同步变动"的参考估算
-  const [futuresRatio, setFuturesRatio] = useState<number | null>(null);
+  // 焦煤现货指数(CCP)自最旧报价日以来的涨跌比例, 只用于参考估算
+  const [indexRatio, setIndexRatio] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   // 重算反馈: idle / running / done. running 时按钮显示"重算中...", done 时显示"✓ 已重算" 1.5s
   const [recompute, setRecompute] = useState<"idle" | "running" | "done">("idle");
@@ -235,16 +235,16 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
 
   useEffect(() => {
     if (!oldestQuotedAt) {
-      setFuturesRatio(null);
+      setIndexRatio(null);
       return;
     }
     let alive = true;
-    fetchFuturesRatioSince(oldestQuotedAt)
+    fetchCoalIndexRatioSince(oldestQuotedAt)
       .then((ratio) => {
-        if (alive) setFuturesRatio(ratio);
+        if (alive) setIndexRatio(ratio);
       })
       .catch(() => {
-        if (alive) setFuturesRatio(null);
+        if (alive) setIndexRatio(null);
       });
     return () => {
       alive = false;
@@ -522,13 +522,13 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
     : null;
   const quoteStale = quoteAgeDays != null && quoteAgeDays > 14;
   // 只漂出厂价, 运费不动 —— 与锚点推算同一套口径
-  const futuresEstimate =
-    futuresRatio != null && result.cost != null
-      ? result.cost.fob_per_ton * futuresRatio + result.cost.frt_per_ton
+  const indexEstimate =
+    indexRatio != null && result.cost != null
+      ? result.cost.fob_per_ton * indexRatio + result.cost.frt_per_ton
       : null;
-  const futuresTotal =
-    futuresEstimate != null && snapshot.request.total_quantity != null
-      ? futuresEstimate * snapshot.request.total_quantity
+  const indexTotal =
+    indexEstimate != null && snapshot.request.total_quantity != null
+      ? indexEstimate * snapshot.request.total_quantity
       : null;
   const refreshing = state.status === "refreshing";
   const actionsEnabled = isSnapshotActionable(
@@ -709,13 +709,13 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
                   {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
                   {" · 未按市场校正"}
                 </div>
-                {futuresEstimate != null && futuresRatio != null && (
+                {indexEstimate != null && indexRatio != null && (
                   <div style={{ marginTop: 4 }}>
-                    参考 · 随焦煤期货 {futuresRatio >= 1 ? "+" : "−"}
-                    {(Math.abs(futuresRatio - 1) * 100).toFixed(1)}% · 到厂价约{" "}
-                    <b>{futuresEstimate.toFixed(0)}</b> 元/吨
-                    {futuresTotal != null &&
-                      ` · 总额约 ${Math.round(futuresTotal).toLocaleString("zh-CN")} 元`}
+                    参考 · 随焦煤现货指数 {indexRatio >= 1 ? "+" : "−"}
+                    {(Math.abs(indexRatio - 1) * 100).toFixed(1)}% · 到厂价约{" "}
+                    <b>{indexEstimate.toFixed(0)}</b> 元/吨
+                    {indexTotal != null &&
+                      ` · 总额约 ${Math.round(indexTotal).toLocaleString("zh-CN")} 元`}
                   </div>
                 )}
               </>

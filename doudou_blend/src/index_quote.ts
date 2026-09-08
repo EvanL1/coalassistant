@@ -3,7 +3,7 @@
  *
  * 数据源: 东方财富, 响应回显 Origin 带 CORS 头, 浏览器 / Tauri webview 均可直接 fetch.
  *   - 实时接口 push2  : 最新价 + 涨跌额/涨跌幅
- *   - 日K接口 push2his: 250 日序列, 画 sparkline + 算价格漂移参考
+ *   - 日K接口 push2his: 近 30 日收盘, 画 sparkline
  *
  * 为什么涨跌幅必须走实时接口: 国内期货的涨跌幅基准是**昨结算价**, 不是昨收盘价.
  * 早先版本用相邻两根日K的收盘价相减, 算出来的数跟交易所/行情软件对不上, 极端
@@ -60,10 +60,6 @@ const KEY_QUOTES = "doudou_blend.index_quotes.v3";
 const TTL_MS = 10 * 60 * 1000;
 /** sparkline 画多少点 */
 export const SPARK_POINTS = 30;
-/** 保留多少日K: 价格漂移参考要回溯到几个月前的报价日 */
-const HISTORY_POINTS = 250;
-/** 大商所焦煤主连, 价格漂移参考基准 */
-const COKING_COAL_SECID = "114.jmm";
 
 function realtimeUrl(secid: string): string {
   return (
@@ -79,7 +75,7 @@ function klineUrl(secid: string): string {
     `?secid=${encodeURIComponent(secid)}` +
     "&klt=101&fqt=0" +
     "&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57" +
-    `&end=20500101&lmt=${HISTORY_POINTS}`
+    `&end=20500101&lmt=${SPARK_POINTS}`
   );
 }
 
@@ -166,7 +162,7 @@ async function fetchOne(symbol: QuoteSymbol): Promise<Quote | null> {
 
   const points =
     klineResult.status === "fulfilled"
-      ? parseEastmoneyKlines(klineResult.value, HISTORY_POINTS)
+      ? parseEastmoneyKlines(klineResult.value, SPARK_POINTS)
       : [];
   return {
     secid: symbol.secid,
@@ -201,75 +197,4 @@ export async function fetchQuotes(): Promise<Quote[] | null> {
     // 存不进缓存不影响本次展示
   }
   return quotes;
-}
-
-/**
- * 后复权: 剔除主力连续序列里的换月跳空.
- *
- * `jmm` 是"主力连续"——每天取当时主力合约的价, 换月那天直接跳到另一个合约的
- * 价位上. 远月比近月贵(contango), 于是拼接处凭空多出一截: 实测 2026-08-19
- * 昨收 1374.0 → 今开 1550.0, +12.81%, 而当天 JM2609 自己只从 1374 开到 1380,
- * JM2701 只从 1546.5 到 1550 —— 没有任何合约涨了 12.81%.
- *
- * 判据: 大商所焦煤涨跌停板 8% 量级, 单一合约上隔夜跳空超过它物理上不可能,
- * 所以"隔夜跳空 > limit ⇒ 换月拼接"是可靠的. 阈值宁松勿紧 —— 漏判会把合约
- * 价差当成涨价(高估), 误判只是少算一段真实行情(低估), 后者安全得多.
- *
- * 做法是把断点**之前**的历史整体缩放对齐, 当前值不动, 这样"最新价"始终等于
- * 市场真实报价, 只有基准被调整. 要求 points 按日期升序.
- */
-export function rollAdjustedPoints(
-  points: readonly KlinePoint[],
-  limit = 0.08,
-): KlinePoint[] {
-  const adjusted = points.map((point) => ({ ...point }));
-  for (let i = adjusted.length - 1; i > 0; i--) {
-    const previousClose = points[i - 1].close;
-    const open = points[i].open;
-    if (!(previousClose > 0) || !(open > 0)) continue;
-    const gap = (open - previousClose) / previousClose;
-    if (Math.abs(gap) <= limit) continue;
-    const factor = open / previousClose;
-    for (let j = 0; j < i; j++) {
-      adjusted[j].open *= factor;
-      adjusted[j].close *= factor;
-    }
-  }
-  return adjusted;
-}
-
-/**
- * 复权后的指数从 `date` 到最新的涨跌比例.
- * date 早于全部历史(定不出基准)时返回 null.
- */
-export function indexRatioSince(
-  points: readonly KlinePoint[],
-  date: string,
-): number | null {
-  const adjusted = rollAdjustedPoints(points);
-  let base: KlinePoint | null = null;
-  let latest: KlinePoint | null = null;
-  for (const point of adjusted) {
-    if (latest == null || point.date > latest.date) latest = point;
-    if (point.date > date) continue;
-    if (base == null || point.date > base.date) base = point;
-  }
-  if (base == null || latest == null) return null;
-  if (!(base.close > 0) || !(latest.close > 0)) return null;
-  return latest.close / base.close;
-}
-
-/**
- * 焦煤期货自 `date` 起的涨跌比例, 供界面给"若随行情同步变动"的参考估算.
- *
- * 只做提示, 绝不进求解: 期货标的是低硫标准品, 而用户煤池按重量大头是中高硫
- * 山西煤, 两者价差自己会动. 拿它当成交价会错得离谱.
- */
-export async function fetchFuturesRatioSince(
-  date: string,
-): Promise<number | null> {
-  const quotes = await fetchQuotes();
-  const cokingCoal = quotes?.find((quote) => quote.secid === COKING_COAL_SECID);
-  if (cokingCoal == null || cokingCoal.points.length < 2) return null;
-  return indexRatioSince(cokingCoal.points, date);
 }
