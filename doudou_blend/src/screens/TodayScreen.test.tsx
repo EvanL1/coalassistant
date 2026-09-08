@@ -278,7 +278,7 @@ describe("TodayScreen 报价时效提示", () => {
     expect(note.className).toContain("cost-warn");
   });
 
-  it("拿到现货指数比例时补一条参考估算", async () => {
+  it("拿到现货指数比例时用预测价当主显示, 原报价降为小字", async () => {
     mocks.fetchCoalIndexRatioSince.mockResolvedValue(1.152);
     mocks.getBackend.mockResolvedValue({
       solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
@@ -286,12 +286,20 @@ describe("TodayScreen 报价时效提示", () => {
     });
 
     render(<TodayScreen onNavigate={vi.fn()} />);
-    await screen.findByText("1000", { selector: ".cost-int" });
 
-    // fob 900 * 1.152 + frt 100 = 1136.8 -> 1137; 运费不参与漂移
-    const estimate = await screen.findByText(/随焦煤现货指数/);
-    expect(estimate.textContent).toContain("+15.2%");
-    expect(estimate.textContent).toContain("1137");
+    // fob 900 * 1.152 + frt 100 = 1136.8 -> 主数字变成 1136, 不再是原始 1000
+    await screen.findByText("1136", { selector: ".cost-int" });
+    expect(screen.queryByText("1000", { selector: ".cost-int" })).toBeNull();
+
+    const badge = await screen.findByText(/预测 \+15\.2%/);
+    expect(badge.className).toContain("badge");
+
+    const note = await screen.findByText(/原报价 1000\.00 元\/吨/);
+    expect(note.textContent).toContain("2026-07-17");
+    expect(note.className).not.toContain("cost-warn");
+
+    expect(screen.queryByText(/报价停留在/)).toBeNull();
+    expect(screen.getByText(/总额约/)).toBeTruthy();
   });
 
   it("现货指数拿不到时只显示时效提示, 不编造估算", async () => {
