@@ -37,6 +37,13 @@ supabase db query --linked \
 2. 推送 GitHub `main`。
 3. Railway 自动读取根目录 `Dockerfile` 构建并健康检查。
 
+**CI 不是部署门禁，这是有意的。** `ci.yml` 与部署并行跑，测试红了不会阻止发布。
+之所以不加 CD 门禁：Docker 构建里的 `tsc` 和 `cargo build` 已经挡住类型/编译错误，
+`railway.json` 的 `/api/health`（同时探 Supabase）挡住起不来的版本，两者重合度很高；
+门禁多出来的只有测试和 clippy，代价却是部署周期翻倍加一个要轮换的 token。
+CI 仍在每次 push 时跑，坏逻辑几分钟内会亮红叉，配合 Railway 一键回滚足够。
+等到有付费焦化厂在线上跑，再考虑分支保护 + PR（比 CD 门禁更对症）。
+
 不要再发布 GitHub Pages；Web 版依赖同源 Rust API，静态 Pages 无法独立运行。
 不要在 Railway PostgreSQL 与 Supabase 之间双写。旧 Railway PostgreSQL
 以及原东京、美国西部 Supabase 项目暂时保留为回滚资源，确认新加坡项目稳定
