@@ -578,12 +578,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   }
 
   const cost = result.cost!;
-  // 没有锚点(driftedCount===0)且拿到现货指数时, 预测价比几十天前的原报价更接近
-  // 真实成本, 提升为主显示; 导出/保存仍固定用 cost 原值, 不把估算写进记录。
-  const hasIndexEstimate = (price?.driftedCount ?? 0) === 0 && indexEstimate != null;
-  const displayCif = hasIndexEstimate ? indexEstimate! : cost.cif_per_ton;
-  const displayTotal = hasIndexEstimate ? indexTotal : cost.total_cif;
-  const { int: costInt, dec: costDec } = formatPrice(displayCif);
+  const { int: costInt, dec: costDec } = formatPrice(cost.cif_per_ton);
   const contractChecks = result.indicator_check.filter(isContractIndicator);
   const totalIndicators = contractChecks.length;
   const passing = contractChecks.filter(isIndicatorPassing).length;
@@ -685,19 +680,12 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           <span className="badge">
             质量：{QUALITY_STATUS_LABEL[qualityStatus]}
           </span>
-          {hasIndexEstimate && indexRatio != null && (
-            <span className="badge">
-              预测 {indexRatio >= 1 ? "+" : "−"}
-              {(Math.abs(indexRatio - 1) * 100).toFixed(1)}%
-            </span>
-          )}
           <span style={{ opacity: 0.85 }}>
             {enabledCount} 种煤可选
           </span>
-          {displayTotal != null && (
+          {cost.total_cif != null && (
             <span style={{ opacity: 0.85 }}>
-              {hasIndexEstimate ? "总额约 " : "总额 "}
-              {Math.round(displayTotal).toLocaleString("zh-CN")} 元
+              总额 {Math.round(cost.total_cif).toLocaleString("zh-CN")} 元
             </span>
           )}
         </div>
@@ -713,19 +701,24 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
                 {price.anchors.length > 0 &&
                   ` · 锚点 ${price.anchors.join("、")}`}
               </>
-            ) : hasIndexEstimate ? (
-              <div>
-                原报价 {cost.cif_per_ton.toFixed(2)} 元/吨 ·{" "}
-                {price.oldestQuotedAt}
-                {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
-              </div>
             ) : (
-              <div className={quoteStale ? "cost-warn" : undefined}>
-                {quoteStale && "⚠ "}
-                报价停留在 {price.oldestQuotedAt}
-                {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
-                {" · 未按市场校正"}
-              </div>
+              <>
+                <div className={quoteStale ? "cost-warn" : undefined}>
+                  {quoteStale && "⚠ "}
+                  报价停留在 {price.oldestQuotedAt}
+                  {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
+                  {" · 未按市场校正"}
+                </div>
+                {indexEstimate != null && indexRatio != null && (
+                  <div style={{ marginTop: 4 }}>
+                    参考 · 随焦煤现货指数 {indexRatio >= 1 ? "+" : "−"}
+                    {(Math.abs(indexRatio - 1) * 100).toFixed(1)}% · 到厂价约{" "}
+                    <b>{indexEstimate.toFixed(0)}</b> 元/吨
+                    {indexTotal != null &&
+                      ` · 总额约 ${Math.round(indexTotal).toLocaleString("zh-CN")} 元`}
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
