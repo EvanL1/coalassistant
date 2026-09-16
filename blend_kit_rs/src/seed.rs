@@ -146,120 +146,149 @@ impl CoalMasterEntry {
     }
 }
 
+/// 这里的测试只覆盖**代码行为**, 一律用 fixture 构造输入.
+///
+/// 具体煤源的字段值、座数、状态分布、版本号属于**数据内容**, 由
+/// `scripts/check_master_data.mjs` 负责校验 —— 更新煤库数据不应该让这里变红.
+/// 唯一碰真实 master 的是 `test_embedded_master_deserializes`, 它测的也只是
+/// "嵌入的 JSON 接得上当前 struct 定义", 与具体数值无关.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 按 JSON 造一条 master 记录, 避免为测试给 struct 开构造器.
+    fn entry(json: &str) -> CoalMasterEntry {
+        serde_json::from_str(json).expect("fixture 解析失败")
+    }
+
+    /// 10 字段俱全的样板煤.
+    fn full_entry() -> CoalMasterEntry {
+        entry(
+            r#"{
+                "name": "样板煤", "status": "verified",
+                "props": { "S": 2.0, "A": 6.0, "V": 22, "G": 93,
+                           "Y": 17, "petro": 0.08, "CSR": 70, "M": 11 },
+                "fob": 1425, "frt": 25,
+                "confidence": { "S": "high", "petro": "low" }
+            }"#,
+        )
+    }
+
+    /// 嵌入的 master JSON 必须能反序列化成当前 struct —— 只测 schema 对得上.
     #[test]
-    fn test_load_embedded() {
+    fn test_embedded_master_deserializes() {
         let master = CoalMaster::load_embedded().expect("master 加载失败");
-        assert!(!master.coals.is_empty());
-        assert_eq!(master.version, "2.2");
+        assert!(!master.coals.is_empty(), "coals 不应为空");
         assert!(
-            master.coals.len() >= 60,
-            "煤种数 {} 异常",
-            master.coals.len()
+            !master.default_contract.specs.is_empty(),
+            "默认合同不应为空"
         );
     }
 
-    /// 4 种主力煤都应该是 verified + production_ready.
+    /// has_basic 只认 S/A/V/G 四项.
     #[test]
-    fn test_main_coals_production_ready() {
-        let master = CoalMaster::load_embedded().unwrap();
-        for name in &["临北", "古交浮精", "豹子沟", "大佛寺"] {
-            let entry = master.find(name).expect(name);
-            assert_eq!(
-                entry.status,
-                MasterStatus::Verified,
-                "{} 应为 verified",
-                name
-            );
-            assert!(entry.is_production_ready(), "{} 应有完整 10 字段", name);
-            assert!(entry.has_full_indicators(), "{} 应有 8 项指标", name);
-        }
+    fn test_has_basic_requires_savg() {
+        assert!(full_entry().has_basic());
+
+        let missing_g = entry(
+            r#"{ "name": "缺G", "status": "active",
+                 "props": { "S": 1.0, "A": 9.0, "V": 20 } }"#,
+        );
+        assert!(!missing_g.has_basic(), "缺 G 不应算基础齐全");
+        assert!(!missing_g.has_full_indicators());
     }
 
-    /// 临北字段精确值检查.
+    /// has_full_indicators 要 8 项; is_production_ready 还要 fob/frt.
     #[test]
-    fn test_linbei_exact_values() {
-        let master = CoalMaster::load_embedded().unwrap();
-        let lb = master.find("临北").unwrap();
-        assert_eq!(lb.props.get("S"), Some(&2.0));
-        assert_eq!(lb.props.get("A"), Some(&6.0));
-        assert_eq!(lb.props.get("V"), Some(&22.0));
-        assert_eq!(lb.props.get("G"), Some(&93.0));
-        assert_eq!(lb.props.get("Y"), Some(&17.0));
-        assert_eq!(lb.props.get("petro"), Some(&0.08));
-        assert_eq!(lb.props.get("CSR"), Some(&70.0));
-        assert_eq!(lb.props.get("M"), Some(&11.0));
-        assert_eq!(lb.fob, Some(1425.0));
-        assert_eq!(lb.frt, Some(25.0));
-        // 可信度: S/A/V/G/CSR/fob/frt 高, petro 低
-        assert_eq!(lb.confidence.get("S"), Some(&Confidence::High));
-        assert_eq!(lb.confidence.get("petro"), Some(&Confidence::Low));
-        assert!(lb.is_low_confidence("petro"));
-        assert!(!lb.is_low_confidence("S"));
+    fn test_production_ready_needs_indicators_and_prices() {
+        let full = full_entry();
+        assert!(full.has_full_indicators());
+        assert!(full.is_production_ready());
+
+        let no_price = entry(
+            r#"{ "name": "无价", "status": "active",
+                 "props": { "S": 2.0, "A": 6.0, "V": 22, "G": 93,
+                            "Y": 17, "petro": 0.08, "CSR": 70, "M": 11 } }"#,
+        );
+        assert!(no_price.has_full_indicators(), "8 项指标是齐的");
+        assert!(!no_price.is_production_ready(), "缺 fob/frt 不算可直接生产");
     }
 
-    /// to_coal 转换 + CIF 计算.
+    /// to_coal 的闸门是 has_basic, 不是 status —— 缺基础指标一律转不出来.
     #[test]
-    fn test_linbei_to_coal_uses_master_price() {
-        let master = CoalMaster::load_embedded().unwrap();
-        let lb = master.find("临北").unwrap();
-        let coal = lb.to_coal(None, None).unwrap();
+    fn test_to_coal_rejects_without_basic_indicators() {
+        let bare = entry(r#"{ "name": "待录入", "status": "incomplete", "props": {} }"#);
+        assert!(!bare.has_basic());
+        assert!(
+            bare.to_coal(Some(1000.0), Some(30.0)).is_none(),
+            "即便外部给了价格, 缺 S/A/V/G 也不能进煤池"
+        );
+    }
+
+    /// 缺价且外部不补价时也转不出来.
+    #[test]
+    fn test_to_coal_requires_price_from_somewhere() {
+        let no_price = entry(
+            r#"{ "name": "无价", "status": "active",
+                 "props": { "S": 2.0, "A": 6.0, "V": 22, "G": 93 } }"#,
+        );
+        assert!(no_price.to_coal(None, None).is_none(), "无价应转不出");
+        assert!(
+            no_price.to_coal(Some(1200.0), Some(30.0)).is_some(),
+            "外部补价后应可转"
+        );
+    }
+
+    /// to_coal 价格优先级: override > master, 且两个价互不影响.
+    #[test]
+    fn test_to_coal_price_override_precedence() {
+        let e = full_entry();
+
+        let coal = e.to_coal(None, None).unwrap();
         assert_eq!(coal.fob, 1425.0);
         assert_eq!(coal.frt, 25.0);
-        assert_eq!(coal.cif(), 1450.0);
+        assert_eq!(coal.cif(), 1450.0, "cif 应为 fob+frt");
 
-        // override 覆盖 master 价
-        let coal2 = lb.to_coal(Some(1300.0), None).unwrap();
-        assert_eq!(coal2.fob, 1300.0);
-        assert_eq!(coal2.frt, 25.0); // frt 仍走 master
+        let overridden = e.to_coal(Some(1300.0), None).unwrap();
+        assert_eq!(overridden.fob, 1300.0, "fob 应被覆盖");
+        assert_eq!(overridden.frt, 25.0, "frt 未覆盖时仍走 master");
+
+        let both = e.to_coal(Some(1300.0), Some(40.0)).unwrap();
+        assert_eq!(both.cif(), 1340.0);
     }
 
-    /// 默认合同模板含 8 条 spec.
+    /// is_low_confidence 只对显式标 low 的字段为真.
     #[test]
-    fn test_default_contract() {
-        let master = CoalMaster::load_embedded().unwrap();
-        let c = &master.default_contract;
-        assert_eq!(c.specs.len(), 8);
-        // 验证关键约束
-        let s_spec = c.specs.iter().find(|s| s.indicator == "S").unwrap();
-        assert_eq!(s_spec.max, Some(2.5));
-        let v_spec = c.specs.iter().find(|s| s.indicator == "V").unwrap();
-        // 用户最新合同: V ≤ 23 (Upper), 不是 Range
-        assert_eq!(v_spec.max, Some(23.0));
-        let csr_spec = c.specs.iter().find(|s| s.indicator == "CSR").unwrap();
-        assert_eq!(csr_spec.min, Some(62.0));
+    fn test_is_low_confidence() {
+        let e = full_entry();
+        assert!(e.is_low_confidence("petro"), "petro 标了 low");
+        assert!(!e.is_low_confidence("S"), "S 标的是 high");
+        assert!(!e.is_low_confidence("CSR"), "CSR 没标, 不算 low");
     }
 
-    /// incomplete 煤无法转 Coal.
+    /// by_status / verified / find 的过滤行为.
     #[test]
-    fn test_incomplete_cannot_convert() {
-        let master = CoalMaster::load_embedded().unwrap();
-        let xjg = master.find("兴家沟").unwrap();
-        assert_eq!(xjg.status, MasterStatus::Incomplete);
-        assert!(!xjg.has_basic());
-        assert!(xjg.to_coal(Some(1000.0), Some(30.0)).is_none());
-    }
+    fn test_lookup_and_status_filters() {
+        let master: CoalMaster = serde_json::from_str(
+            r#"{
+                "version": "9.9", "updated_at": "2026-01-01", "description": "fixture",
+                "default_contract": { "name": "测试合同", "specs": [
+                    { "indicator": "S", "direction": "Upper", "max": 2.5 } ] },
+                "coals": [
+                    { "name": "甲", "status": "verified", "props": {} },
+                    { "name": "乙", "status": "active",   "props": {} },
+                    { "name": "丙", "status": "active",   "props": {} },
+                    { "name": "丁", "status": "archived", "props": {} }
+                ]
+            }"#,
+        )
+        .expect("fixture master 解析失败");
 
-    /// 状态分布健全.
-    #[test]
-    fn test_status_distribution() {
-        let master = CoalMaster::load_embedded().unwrap();
-        let verified = master.verified().count();
-        let active = master.by_status(MasterStatus::Active).count();
-        let draft = master.by_status(MasterStatus::Draft).count();
-        let incomplete = master.by_status(MasterStatus::Incomplete).count();
-        let archived = master.by_status(MasterStatus::Archived).count();
-        assert_eq!(
-            verified, 4,
-            "verified 应正好 4 种 (主力煤): 实际 {}",
-            verified
-        );
-        assert!(active >= 50, "active 应 ≥ 50");
-        assert!(draft >= 2, "draft 应包含沙曲/贺西等");
-        assert!(incomplete >= 5);
-        assert!(archived >= 1, "archived 应含古交-原");
+        assert_eq!(master.find("乙").map(|c| c.name.as_str()), Some("乙"));
+        assert!(master.find("不存在").is_none());
+        assert_eq!(master.verified().count(), 1);
+        assert_eq!(master.by_status(MasterStatus::Active).count(), 2);
+        assert_eq!(master.by_status(MasterStatus::Archived).count(), 1);
+        assert_eq!(master.by_status(MasterStatus::Incomplete).count(), 0);
     }
 }

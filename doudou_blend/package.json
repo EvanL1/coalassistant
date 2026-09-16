@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "check:consistency": "node ../scripts/check_repository_consistency.mjs",
+    "check:data": "node ../scripts/check_master_data.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",

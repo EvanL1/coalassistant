@@ -308,3 +308,65 @@ pub struct SeedReport {
     pub indicators_written: usize,
     pub default_contract_inserted: bool,
 }
+
+/// 纯函数单测: 只喂 fixture, 不碰真实煤库.
+#[cfg(test)]
+mod tests {
+    use super::split_region;
+
+    #[test]
+    fn test_split_region_known_province() {
+        assert_eq!(
+            split_region(Some("山西吕梁")),
+            (Some("山西".into()), Some("吕梁".into()))
+        );
+        assert_eq!(
+            split_region(Some("内蒙古乌海")),
+            (Some("内蒙古".into()), Some("乌海".into()))
+        );
+    }
+
+    /// 只有省名, 没有市.
+    #[test]
+    fn test_split_region_province_only() {
+        assert_eq!(split_region(Some("山西")), (Some("山西".into()), None));
+    }
+
+    /// 省名后带空格应被 trim.
+    #[test]
+    fn test_split_region_trims_city() {
+        assert_eq!(
+            split_region(Some("山西  临汾")),
+            (Some("山西".into()), Some("临汾".into()))
+        );
+    }
+
+    /// 认不出省名时整串当 city, province 留空.
+    #[test]
+    fn test_split_region_unknown_province() {
+        assert_eq!(
+            split_region(Some("火星基地")),
+            (None, Some("火星基地".into()))
+        );
+    }
+
+    /// 空值与空串都返回 (None, None).
+    #[test]
+    fn test_split_region_empty() {
+        assert_eq!(split_region(None), (None, None));
+        assert_eq!(split_region(Some("")), (None, None));
+    }
+
+    /// "内蒙古" 必须先于 "蒙" 之类短前缀匹配, 且不被 "河南/河北" 串味.
+    #[test]
+    fn test_split_region_longest_province_wins() {
+        assert_eq!(
+            split_region(Some("黑龙江鸡西")),
+            (Some("黑龙江".into()), Some("鸡西".into()))
+        );
+        assert_eq!(
+            split_region(Some("河南平顶山")),
+            (Some("河南".into()), Some("平顶山".into()))
+        );
+    }
+}

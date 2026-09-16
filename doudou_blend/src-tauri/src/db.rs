@@ -97,26 +97,40 @@ mod tests {
     use rusqlite::params;
     use tempfile::TempDir;
 
-    /// 全链路: open_and_init → schema → seed master → 表里能查到 4 主力煤.
+    /// 全链路: open_and_init → schema → seed master → 表里能查到东西.
+    ///
+    /// 期望值一律从 master **推导**, 不写死煤名/座数/版本号 —— 这个测试验证的是
+    /// "seed 代码把 master 正确搬进了 SQLite", 换任何一份合法煤库都应该通过.
+    /// 煤库内容本身由 `scripts/check_master_data.mjs` 负责校验.
     #[test]
     fn test_seed_writes_verified_coals() {
+        let master = blend_kit::CoalMaster::load_embedded().expect("master 加载失败");
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("test.db");
         let conn = open_and_init(&path).expect("初始化失败");
 
-        // 验证 4 主力煤都在
-        for name in &["临北", "古交浮精", "豹子沟", "大佛寺"] {
+        // master 里每一条都应落进 mines 表, 且状态一致
+        for entry in &master.coals {
             let status: String = conn
                 .query_row(
                     "SELECT status FROM mines WHERE name = ?1",
-                    params![name],
+                    params![entry.name],
                     |row| row.get(0),
                 )
-                .unwrap_or_else(|_| panic!("找不到 {}", name));
-            assert_eq!(status, "verified", "{} 状态应为 verified", name);
+                .unwrap_or_else(|_| panic!("mines 表找不到 {}", entry.name));
+            assert_eq!(
+                status,
+                format!("{:?}", entry.status).to_lowercase(),
+                "{} 状态应与 master 一致",
+                entry.name
+            );
         }
 
-        // 验证临北的指标写进 mines 宽表 + 生成列 cif + region 拆成省/市
+        // 挑一条 verified 煤, 验证指标/价格/region 都正确落表
+        let sample = master
+            .verified()
+            .next()
+            .expect("master 至少应有一条 verified 煤");
         let (s, fob, frt, cif, province, city): (
             Option<f64>,
             Option<f64>,
@@ -127,7 +141,7 @@ mod tests {
         ) = conn
             .query_row(
                 "SELECT s, fob, frt, cif, province, city FROM mines WHERE name = ?1",
-                params!["临北"],
+                params![sample.name],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -140,29 +154,47 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(s, Some(2.0), "临北 S 应为 2.0");
+        assert_eq!(
+            s,
+            sample.props.get("S").copied(),
+            "{} 的 S 应与 master 一致",
+            sample.name
+        );
+        assert_eq!(fob, sample.fob, "{} 的 fob 应与 master 一致", sample.name);
+        assert_eq!(frt, sample.frt, "{} 的 frt 应与 master 一致", sample.name);
         assert_eq!(
             cif,
             Some(fob.unwrap() + frt.unwrap()),
             "cif 生成列应等于 fob+frt"
         );
-        assert_eq!(
-            province.as_deref(),
-            Some("山西"),
-            "临北 region 应拆出省=山西"
+        // region 拆成省/市后应能拼回原串 (拆分规则本身在 db_seed 里单测)
+        let recombined = format!(
+            "{}{}",
+            province.unwrap_or_default(),
+            city.unwrap_or_default()
         );
-        assert_eq!(city.as_deref(), Some("吕梁"), "临北 region 应拆出市=吕梁");
+        assert_eq!(
+            recombined,
+            sample.region.clone().unwrap_or_default(),
+            "{} 的 province+city 应能拼回 master 的 region",
+            sample.name
+        );
 
         // 可信度写入 mine_field_confidence
         let conf_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM mine_field_confidence
                  WHERE mine_id = (SELECT id FROM mines WHERE name = ?1)",
-                params!["临北"],
+                params![sample.name],
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(conf_count >= 8, "临北可信度字段数 {} < 8", conf_count);
+        assert_eq!(
+            conf_count as usize,
+            sample.confidence.len(),
+            "{} 的可信度字段数应与 master 一致",
+            sample.name
+        );
 
         // 验证默认合同已 seed
         let contract_count: i64 = conn
@@ -173,7 +205,11 @@ mod tests {
         let spec_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM contract_specs", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(spec_count, 8, "默认合同应 8 条 spec");
+        assert_eq!(
+            spec_count as usize,
+            master.default_contract.specs.len(),
+            "contract_specs 条数应与 master 默认合同一致"
+        );
 
         // master_version 写入
         let version: String = conn
@@ -183,7 +219,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2.2");
+        assert_eq!(version, master.version, "meta 里应记录 master 的版本号");
     }
 
     /// 幂等: 二次调用 open_and_init 不应重复插入合同, 不破坏数据.

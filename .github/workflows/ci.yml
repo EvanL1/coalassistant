@@ -26,6 +26,9 @@ jobs:
       - name: Check repository consistency
         run: node scripts/check_repository_consistency.mjs
 
+      - name: Check master data
+        run: node scripts/check_master_data.mjs
+
       - name: Test frontend
         working-directory: doudou_blend
         run: npm test
