@@ -24,7 +24,7 @@ GET /api/master
 ## 1. 接口
 
 ```
-POST https://<域名>/api/master/coals
+POST https://doudou-blend.up.railway.app/api/master/coals
 Header: X-API-Key: <密钥>
 Header: Content-Type: application/json
 ```
@@ -170,10 +170,10 @@ Header: Content-Type: application/json
 
 ```bash
 # 看覆盖层里现在有什么（排查"这个值哪来的"）
-curl https://<域名>/api/master/overrides -H "X-API-Key: $KEY"
+curl https://doudou-blend.up.railway.app/api/master/overrides -H "X-API-Key: $KEY"
 
 # 回滚一个值到基线状态
-curl -X DELETE "https://<域名>/api/master/coals/铁新/CSR" -H "X-API-Key: $KEY"
+curl -X DELETE "https://doudou-blend.up.railway.app/api/master/coals/铁新/CSR" -H "X-API-Key: $KEY"
 ```
 
 覆盖层里没有这一条时返回 `404`。
