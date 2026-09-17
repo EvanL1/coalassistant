@@ -1,7 +1,7 @@
 {
   "version": "2.2",
-  "updated_at": "2026-09-15",
-  "description": "豆哥配煤 master 数据库 v2: 10 字段 + per-field 可信度. 2026-05-28 增补 38 条市场报价 (灵石本地 / 大家沟 / 沁源 / 大同 / 内蒙古乌海). 2026-06-30 为 103 个有化验数据但缺岩相的煤补默认岩相 0.1 (纯估值, confidence 不标). 2026-09-15 并入调研表 煤矿数据汇总_20260910 (Mysteel 2026-09-09 企业规格): 新增 75 项 Y/CSR/M, 只填空不覆盖; 岩相列无有效数据未并入; 5 座原空白矿仅记入 note (区域参考值非化验单), 状态维持 incomplete.",
+  "updated_at": "2026-09-17",
+  "description": "豆哥配煤 master 数据库 v2: 10 字段 + per-field 可信度. 2026-05-28 增补 38 条市场报价 (灵石本地 / 大家沟 / 沁源 / 大同 / 内蒙古乌海). 2026-06-30 为 103 个有化验数据但缺岩相的煤补默认岩相 0.1 (纯估值, confidence 不标). 2026-09-15 并入调研表 煤矿数据汇总_20260910 (Mysteel 2026-09-09 企业规格): 新增 75 项 Y/CSR/M, 只填空不覆盖; 岩相列无有效数据未并入; 5 座原空白矿仅记入 note (区域参考值非化验单), 状态维持 incomplete. 2026-09-17 并入调研表更新版: 补 9 项 Y/CSR/M; 岩相列本次被污染 (11 个年份 2026 + 10.5/2200/9), 整列跳过; 运费 106 处更新目的地均为唐山/日照港等外省口岸, 与 frt 语义 (到厂运费) 不符, 未采用.",
   "schema": {
     "fields": {
       "S":     "硫 %",
@@ -120,9 +120,9 @@
       "status": "active", "props": { "S": 2.2, "A": 7.5, "V": 18, "G": 75, "Y": 10, "CSR": 45, "M": 10, "petro": 0.1 },
       "note": "暂排除. | 2026-09 调研: Y≥10 CSR≥45 M≤10" },
 
-    { "name": "铁新",     "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 3.2, "A": 6.5,  "V": 21, "G": 92, "petro": 0.1 } },
+    { "name": "铁新",     "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 3.2, "A": 6.5, "V": 21, "G": 92, "Y": 16, "CSR": 60, "M": 12, "petro": 0.1 }, "note": "2026-09-17 调研: Y≥16 CSR≥60 M≤12" },
     { "name": "安益",     "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 3.3, "A": 7.28, "V": 18.1, "G": 81, "M": 12, "petro": 0.1 }, "note": "2026-05 报价" },
-    { "name": "筛精",     "region": "山西临汾",  "coal_type": "主焦煤", "status": "active", "props": { "S": 3.9, "A": 9.5,  "V": 25, "G": 100, "petro": 0.1 } },
+    { "name": "筛精",     "region": "山西临汾",  "coal_type": "主焦煤", "status": "active", "props": { "S": 3.9, "A": 9.5, "V": 25, "G": 100, "Y": 36, "M": 10, "petro": 0.1 }, "note": "2026-09-17 调研: Y≥36 M≤10" },
     { "name": "孟子峪",   "region": "山西吕梁",  "coal_type": "主焦煤", "status": "active", "props": { "S": 2.0, "A": 9.2, "V": 17.5, "G": 75, "M": 12, "petro": 0.1 }, "note": "2026-05 报价 现货 1500 吨" },
     { "name": "神州-A",   "region": "山西大同",  "coal_type": "主焦煤", "status": "active", "props": { "S": 1.7, "A": 12,   "V": 18, "G": 62, "petro": 0.1 }, "note": "第一批次" },
     { "name": "神州-B",   "region": "山西大同",  "coal_type": "主焦煤", "status": "active", "props": { "S": 2.1, "A": 11.5, "V": 19, "G": 53, "petro": 0.1 }, "note": "第二批次" },
@@ -177,7 +177,7 @@
     { "name": "赵家庄",   "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 1.1, "A": 10,   "V": 21, "G": 80, "petro": 0.1 } },
     { "name": "金地",     "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 0.82, "A": 14.78, "V": 21, "G": 88, "M": 13, "petro": 0.1 }, "note": "2026-05 报价" },
     { "name": "东泰金源", "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 2.03,"A": 11.84,"V": 34.41, "G": 97.8, "petro": 0.1 }, "note": "焦渣 7" },
-    { "name": "东泰鑫源", "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 3.8, "A": 10.2, "V": 25.49, "G": 98, "petro": 0.1 }, "note": "水分 11.2%" },
+    { "name": "东泰鑫源", "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 3.8, "A": 10.2, "V": 25.49, "G": 98, "Y": 30, "CSR": 70, "petro": 0.1 }, "note": "水分 11.2% | 2026-09-17 调研: Y≥30 CSR≥70" },
     { "name": "东泰永宁", "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 1.8, "A": 11.5, "V": 24,    "G": 90, "petro": 0.1 } },
     { "name": "背沟",     "region": "山西",      "coal_type": "主焦煤", "status": "active", "props": { "S": 1.3, "A": 12,   "V": 22,    "G": 85, "petro": 0.1 } },
 
@@ -203,7 +203,7 @@
     { "name": "水牛沟",     "region": "山西灵石",    "coal_type": "主焦煤", "status": "active", "props": { "S": 1.3,  "A": 11,   "V": 33,   "G": 91, "petro": 0.1 }, "note": "2026-05 大家沟 焦渣7 现货 500 吨" },
     { "name": "灵石水牛沟4号", "region": "山西灵石", "coal_type": "主焦煤", "status": "active", "props": { "S": 1.2,  "A": 10.5, "V": 35,   "G": 92, "Y": 24, "CSR": 63, "petro": 0.1 }, "note": "2026-05 报价 现货 3500 吨" },
     { "name": "沁源新能",   "region": "山西沁源",    "coal_type": "气煤",   "status": "active", "props": { "S": 2, "A": 8.5, "V": 16, "G": 15, "Y": 12, "CSR": 65, "M": 11, "petro": 0.1 }, "note": "2026-05 报价 G=15 弱粘 | 2026-09 调研: Y≥12 CSR≥65" },
-    { "name": "沁园",       "region": "山西沁源",    "coal_type": "气煤",   "status": "active", "props": { "S": 2,    "A": 8.6,  "V": 15,   "G": 15, "M": 10, "petro": 0.1 }, "note": "2026-05 报价 弱粘" },
+    { "name": "沁园",       "region": "山西沁源",    "coal_type": "气煤",   "status": "active", "props": { "S": 2, "A": 8.6, "V": 15, "G": 15, "Y": 12, "CSR": 65, "M": 10, "petro": 0.1 }, "note": "2026-05 报价 弱粘 | 2026-09-17 调研: Y≥12 CSR≥65" },
     { "name": "明鑫",       "region": "山西",        "coal_type": "主焦煤", "status": "active", "props": { "S": 0.55, "A": 10.5, "V": 15, "G": 65, "Y": 9, "CSR": 65, "M": 11, "petro": 0.1 }, "note": "2026-05 报价 焦渣5 | 2026-09 调研: Y≥9 CSR≥65 M≤11" },
     { "name": "神州精煤",   "region": "山西大同",    "coal_type": "主焦煤", "status": "active", "props": { "S": 2.53, "A": 10.2, "V": 16.89, "G": 65, "CSR": 55, "M": 11, "petro": 0.1 }, "note": "2026-05 报价 全水 11 干基灰 10.2" },
     { "name": "黄土坡",     "region": "山西",        "coal_type": "主焦煤", "status": "active", "props": { "S": 1.95, "A": 8.5, "V": 14, "G": 18, "CSR": 50, "M": 11.5, "petro": 0.1 }, "note": "2026-05 报价 弱粘 | 2026-09 调研: CSR≥50" },
