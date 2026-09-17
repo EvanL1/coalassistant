@@ -22,11 +22,21 @@ GET /api/master
 
 ## 鉴权
 
-所有接口要求请求头 `X-API-Key`，值为环境变量 `DATA_API_KEY`（至少 32 字符）。
+所有接口要求请求头 `X-API-Key`。服务端在 `DATA_API_KEYS` 里配了一组**具名**密钥
+（格式 `名字:密钥,名字:密钥`），**一个持有者一把**。
 
-- 未配置 `DATA_API_KEY` → 整组接口返回 **503**，不是放行
+- 未配置任何密钥 → 整组接口返回 **503**，不是放行
 - 密钥错或缺失 → **401**
 - 用户登录的会话 Cookie **不能**替代这把密钥，反之亦然
+
+密钥对应的名字会作为 `updated_by` 落库，**由服务端推导，调用方伪造不了**——请求体里
+塞 `updated_by` 不起作用。成功响应会回显你的身份：
+
+```json
+{"ok": true, "applied": 2, "updated_by": "friend"}
+```
+
+撤销某个持有者只需从 `DATA_API_KEYS` 里删掉他那一段并重启，其他人不受影响。
 
 密钥检查发生在**请求体被解析之前**：畸形 JSON、类型错误、缺 `Content-Type` 的未鉴权请求
 一律只拿到 401/503，不会回显字段名或类型错误。（这点有测试钉着：
@@ -38,10 +48,9 @@ GET /api/master
 
 ```bash
 curl -X POST https://<host>/api/master/coals \
-  -H "X-API-Key: $DATA_API_KEY" \
+  -H "X-API-Key: $MY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "updated_by": "survey-bot",
     "updates": [
       { "coal": "铁新", "field": "Y",   "value": 16,
         "source": "2026-09-17 Mysteel 规格 Y≥16",   "confidence": "medium" },
@@ -60,13 +69,14 @@ curl -X POST https://<host>/api/master/coals \
 | `value` | 是 | 数值，须落在该指标物理量程内（见下） |
 | `source` | 是 | 来源与口径，不能为空，≤ 200 字符。**保留原始 `≥`/`≤` 符号** |
 | `confidence` | 否 | `high` / `medium` / `low`，默认 `medium` |
-| `updated_by` | 否 | 调用方标识，≤ 64 字符，只用于落库留痕 |
+
+`updated_by` 不用填也填不了——服务端从你的密钥推导。
 
 限额：单批 **≤ 300 条**，请求体 **≤ 256KB**。合法批次天然封顶——基线 112 座煤 × 8 项
 减去已填的，最多两百余条空缺，所以 300 不会误伤正常用法。`source` 封顶是因为它会写进
 `note`，而 `note` 每次 `GET /api/master` 都要回给前端，不封顶等于让主数据请求被永久撑大。
 
-成功：`{"ok": true, "applied": 2}`
+成功：`{"ok": true, "applied": 2, "updated_by": "friend"}`
 
 ## 三条必须知道的规则
 
@@ -103,7 +113,7 @@ Mysteel 规格界限（`≥`/`≤`）。让界限值盖过实测值，求解器�
 看当前覆盖层里有什么——排查"这个值到底哪来的"。
 
 ```bash
-curl https://<host>/api/master/overrides -H "X-API-Key: $DATA_API_KEY"
+curl https://<host>/api/master/overrides -H "X-API-Key: $MY_API_KEY"
 ```
 
 ## DELETE /api/master/coals/{coal}/{field}
@@ -112,7 +122,7 @@ curl https://<host>/api/master/overrides -H "X-API-Key: $DATA_API_KEY"
 
 ```bash
 curl -X DELETE "https://<host>/api/master/coals/铁新/CSR" \
-  -H "X-API-Key: $DATA_API_KEY"
+  -H "X-API-Key: $MY_API_KEY"
 ```
 
 覆盖层里没有这一条时返回 404。
@@ -126,7 +136,7 @@ curl -X DELETE "https://<host>/api/master/coals/铁新/CSR" \
 | 401 | `X-API-Key` 缺失或错误 |
 | 404 | DELETE 的目标不在覆盖层里 |
 | 422 | 数据不合法，`errors` 数组逐条说明。整批未写入 |
-| 503 | 未配置 `DATA_API_KEY`，或数据库不可用 |
+| 503 | 未配置 `DATA_API_KEYS`，或数据库不可用 |
 
 ## 什么该走这里，什么不该
 
