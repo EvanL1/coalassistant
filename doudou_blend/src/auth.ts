@@ -1,22 +1,12 @@
 /**
- * Web 认证由 Rust 服务端通过 HttpOnly Cookie 管理.
- * Tauri 开发模式也复用本地 HTTP 服务，避免把密码写进前端产物.
+ * 认证由 Rust 服务端通过 HttpOnly Cookie 管理, 密码不进前端产物.
  */
 
 function notifyAuthChanged(): void {
   window.dispatchEvent(new CustomEvent("doudou:auth_changed"));
 }
 
-function detectTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
 export async function isLoggedIn(): Promise<boolean> {
-  if (detectTauri()) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<boolean>("is_authenticated");
-  }
-
   try {
     const response = await fetch("/api/auth/session", {
       credentials: "same-origin",
@@ -34,16 +24,6 @@ export async function tryLogin(
   username: string,
   password: string,
 ): Promise<boolean> {
-  if (detectTauri()) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const authenticated = await invoke<boolean>("login", {
-      username: username.trim(),
-      password,
-    });
-    if (authenticated) notifyAuthChanged();
-    return authenticated;
-  }
-
   const response = await fetch("/api/auth/login", {
     method: "POST",
     credentials: "same-origin",
@@ -58,15 +38,10 @@ export async function tryLogin(
 
 export async function logout(): Promise<void> {
   try {
-    if (detectTauri()) {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("logout");
-    } else {
-      await fetch("/api/auth/logout", {
-        method: "POST",
-        credentials: "same-origin",
-      });
-    }
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+    });
   } finally {
     notifyAuthChanged();
   }

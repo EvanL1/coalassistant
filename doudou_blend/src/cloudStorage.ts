@@ -11,10 +11,6 @@ interface RemoteUserStorage extends UserStorageSnapshot {
   initialized: boolean;
 }
 
-function detectTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
 async function request(path: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(`/api/${path}`, {
     credentials: "same-origin",
@@ -71,11 +67,9 @@ async function importLocalHistory(): Promise<void> {
 
 /**
  * 登录后加载 PostgreSQL 状态并启动本地缓存写回。
- * 返回清理函数；Tauri 路径保持原生 SQLite/localStorage 行为。
+ * 返回清理函数。
  */
 export async function initializeCloudStorage(): Promise<() => void> {
-  if (detectTauri()) return () => undefined;
-
   const response = await request("storage", { cache: "no-store" });
   const remote = parseRemoteStorage(await response.json());
   if (remote.initialized) {

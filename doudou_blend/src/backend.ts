@@ -1,18 +1,15 @@
 /**
- * 双后端适配器: Tauri 桌面/移动用 IPC, Web 用同源 Rust HTTP API.
+ * 后端适配器: 统一走同源 Rust HTTP API.
  *
  * 设计原则:
- *   - 统一异步接口, 防止前端代码因运行时不同而分叉
- *   - 启动时探测一次, 之后缓存
- *   - Web 使用同源 API, 避免额外的 CORS 和环境变量配置
+ *   - 统一异步接口, 屏蔽传输细节
+ *   - 初始化一次, 之后缓存
+ *   - 使用同源 API, 避免额外的 CORS 和环境变量配置
  */
 
 import type { BlendResult, HistoryRecord, MeasuredQuality, MixedIndicators } from './types';
 
-type BackendKind = 'tauri' | 'http';
-
 interface Backend {
-  kind: BackendKind;
   solveJson: (input: string) => Promise<string>;
   getMasterJson: () => Promise<string>;
   getVersion: () => Promise<string>;
@@ -50,85 +47,6 @@ function deriveMixed(result: BlendResult): MixedIndicators | null {
 
 let cached: Backend | null = null;
 
-/** 探测当前运行环境. Tauri 注入 __TAURI_INTERNALS__ 全局, 浏览器没有. */
-function detectTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-}
-
-async function makeTauriBackend(): Promise<Backend> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  return {
-    kind: 'tauri',
-    solveJson: async (input) => invoke<string>('solve_blend', { inputJson: input }),
-    getMasterJson: async () => invoke<string>('get_master_json'),
-    getVersion: async () => invoke<string>('version'),
-    saveHistory: async (result, contractName, quantity) => {
-      await invoke('save_history', {
-        occurredAt: new Date().toISOString(),
-        contractName,
-        costCif: result.cost?.cif_per_ton ?? 0,
-        totalQuantity: quantity,
-        resultJson: JSON.stringify(result),
-      });
-      notifyHistoryChanged();
-    },
-    countHistory: async () => {
-      const status = await invoke<{ history: number }>('db_status');
-      return status.history;
-    },
-    listHistory: async () => {
-      const rows = await invoke<Array<{
-        id: number;
-        occurred_at: string;
-        contract_name: string;
-        cost_cif: number;
-        result_json: string;
-        csr_measured: number | null;
-        s_measured: number | null;
-        a_measured: number | null;
-        v_measured: number | null;
-        g_measured: number | null;
-        y_measured: number | null;
-        m_measured: number | null;
-      }>>('list_history');
-      return rows.map((r) => {
-        let recipe: Record<string, number> = {};
-        let mixed: MixedIndicators | null = null;
-        try {
-          const res = JSON.parse(r.result_json) as BlendResult;
-          recipe = res.recipe ?? {};
-          mixed = deriveMixed(res);
-        } catch {
-          // result_json 损坏 → 当旧记录处理 (无 recipe/mixed)
-        }
-        return {
-          id: String(r.id),
-          occurred_at: r.occurred_at,
-          contract_name: r.contract_name,
-          cost_cif: r.cost_cif,
-          recipe,
-          mixed,
-          csr_measured: r.csr_measured ?? null,
-          s_measured: r.s_measured ?? null,
-          a_measured: r.a_measured ?? null,
-          v_measured: r.v_measured ?? null,
-          g_measured: r.g_measured ?? null,
-          y_measured: r.y_measured ?? null,
-          m_measured: r.m_measured ?? null,
-        };
-      });
-    },
-    setMeasuredQuality: async (id, measured) => {
-      await invoke('set_measured_quality', { id: Number(id), measured });
-      notifyHistoryChanged();
-    },
-    clearHistory: async () => {
-      await invoke('clear_history');
-      notifyHistoryChanged();
-    },
-  };
-}
-
 async function requestApi(path: string, init?: RequestInit): Promise<string> {
   const response = await fetch(`/api/${path}`, init);
   const body = await response.text();
@@ -156,7 +74,6 @@ async function makeHttpBackend(): Promise<Backend> {
   };
 
   return {
-    kind: 'http',
     solveJson: async (input) =>
       requestApi('solve', {
         method: 'POST',
@@ -230,14 +147,14 @@ async function makeHttpBackend(): Promise<Backend> {
  */
 export async function getBackend(): Promise<Backend> {
   if (cached) return cached;
-  cached = detectTauri() ? await makeTauriBackend() : await makeHttpBackend();
+  cached = await makeHttpBackend();
   return cached;
 }
 
-/** 强制使用特定后端 (主要给测试用). */
-export async function forceBackend(kind: BackendKind): Promise<Backend> {
-  cached = kind === 'tauri' ? await makeTauriBackend() : await makeHttpBackend();
+/** 丢掉缓存重新建一个后端 (主要给测试用). */
+export async function forceBackend(): Promise<Backend> {
+  cached = await makeHttpBackend();
   return cached;
 }
 
-export type { Backend, BackendKind };
+export type { Backend };

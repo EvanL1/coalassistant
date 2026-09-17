@@ -1,5 +1,5 @@
 /**
- * 登录屏 - Web 使用服务端 HttpOnly 会话，Tauri 使用原生内存会话.
+ * 登录屏 - 使用服务端 HttpOnly 会话.
  *
  * 设计:
  *   - 单页 form, 居中

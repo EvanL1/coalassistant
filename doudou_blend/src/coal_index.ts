@@ -8,8 +8,7 @@
  * 跳空**(现货指数不拼合约), 因此不再需要任何复权逻辑. 仍与用户中高硫山西煤有
  * 基差, 定位仍是参考锚而非成交价.
  *
- * Tauri 端没有这个 Rust 服务, fetch 相对路径会失败 → 返回 null, 参考估算不显示
- * (报价时效警告是纯前端, 不受影响).
+ * 服务不可用时返回 null, 参考估算不显示 (报价时效警告是纯前端, 不受影响).
  */
 
 export interface CoalIndexPoint {
@@ -112,7 +111,7 @@ async function fetchSeries(): Promise<CoalIndexPoint[] | null> {
 
 /**
  * 焦煤现货指数自 `date` 起的涨跌比例, 供今日屏参考估算.
- * 拿不到数据(Tauri 端 / 源站不可用)返回 null, 界面就不显示这条参考.
+ * 拿不到数据(源站不可用)返回 null, 界面就不显示这条参考.
  */
 export async function fetchCoalIndexRatioSince(
   date: string,

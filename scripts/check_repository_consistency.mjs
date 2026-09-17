@@ -201,12 +201,8 @@ if (!rustIndicatorsDeclaration || !typescriptIndicatorOrder) {
 const versionEntries = [
   ["blend_kit_rs/Cargo.toml", readCargoPackageVersion("blend_kit_rs/Cargo.toml")],
   ["blend_kit_wasm/Cargo.toml", readCargoPackageVersion("blend_kit_wasm/Cargo.toml")],
-  ["doudou_blend/src-tauri/Cargo.toml", readCargoPackageVersion("doudou_blend/src-tauri/Cargo.toml")],
+  ["blend_kit_server/Cargo.toml", readCargoPackageVersion("blend_kit_server/Cargo.toml")],
   ["doudou_blend/package.json", JSON.parse(readRepositoryFile("doudou_blend/package.json")).version],
-  [
-    "doudou_blend/src-tauri/tauri.conf.json",
-    JSON.parse(readRepositoryFile("doudou_blend/src-tauri/tauri.conf.json")).version,
-  ],
 ];
 const canonicalVersion = versionEntries[0][1];
 for (const [relativePath, version] of versionEntries) {
@@ -225,7 +221,7 @@ if (existsSync(staticMasterPath)) {
 
 const coreLibrarySource = readRepositoryFile("blend_kit_rs/src/lib.rs");
 const wasmLibrarySource = readRepositoryFile("blend_kit_wasm/src/lib.rs");
-const tauriLibrarySource = readRepositoryFile("doudou_blend/src-tauri/src/lib.rs");
+const serverLibrarySource = readRepositoryFile("blend_kit_server/src/lib.rs");
 const backendSource = readRepositoryFile("doudou_blend/src/backend.ts");
 if (!/pub\s+fn\s+master_json\s*\(/.test(coreLibrarySource)) {
   recordFailure("blend_kit 未提供统一 master_json() 入口");
@@ -233,11 +229,14 @@ if (!/pub\s+fn\s+master_json\s*\(/.test(coreLibrarySource)) {
 if (!/blend_kit::master_json\s*\(/.test(wasmLibrarySource)) {
   recordFailure("WASM 未复用 blend_kit::master_json()");
 }
-if (!/fn\s+get_master_json\s*\(/.test(tauriLibrarySource)) {
-  recordFailure("Tauri 未提供 get_master_json command");
+if (!/blend_kit::master_json\s*\(/.test(serverLibrarySource)) {
+  recordFailure("Web 服务端未复用 blend_kit::master_json()");
 }
-if (!/invoke<string>\(\s*["']get_master_json["']\s*\)/.test(backendSource)) {
-  recordFailure("Tauri 前端未通过 IPC 读取统一 Master");
+if (!/["']\/api\/master["']/.test(serverLibrarySource)) {
+  recordFailure("Web 服务端未暴露 /api/master 路由");
+}
+if (!/requestApi\(\s*["']master["']\s*\)/.test(backendSource)) {
+  recordFailure("前端未通过 /api/master 读取统一 Master");
 }
 
 const licensePath = join(repositoryRoot, "LICENSE");
@@ -261,8 +260,8 @@ const licenseEntries = [
   ["blend_kit_rs/Cargo.toml", readCargoPackageLicense("blend_kit_rs/Cargo.toml")],
   ["blend_kit_wasm/Cargo.toml", readCargoPackageLicense("blend_kit_wasm/Cargo.toml")],
   [
-    "doudou_blend/src-tauri/Cargo.toml",
-    readCargoPackageLicense("doudou_blend/src-tauri/Cargo.toml"),
+    "blend_kit_server/Cargo.toml",
+    readCargoPackageLicense("blend_kit_server/Cargo.toml"),
   ],
   ["doudou_blend/package.json", packageManifest.license ?? null],
   ["doudou_blend/package-lock.json", packageLock.packages?.[""]?.license ?? null],

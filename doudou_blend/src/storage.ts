@@ -2,7 +2,6 @@
  * 用户数据存储层.
  *
  * Web 端: localStorage 作为同步缓存，登录后由 PostgreSQL 状态覆盖并持续写回
- * Tauri 端: 后续接 SQLite (user_overrides / user_coal_prefs 表) - 当前先 fallback localStorage
  *
  * 设计:
  *   - master 是只读的(blend_kit_rs 嵌入 JSON)

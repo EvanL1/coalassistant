@@ -1,7 +1,7 @@
 /**
  * 期货行情窄条数据层 (大商所焦煤 / 焦炭主力连续) — 纯前端.
  *
- * 数据源: 东方财富, 响应回显 Origin 带 CORS 头, 浏览器 / Tauri webview 均可直接 fetch.
+ * 数据源: 东方财富, 响应回显 Origin 带 CORS 头, 浏览器可直接 fetch.
  *   - 实时接口 push2  : 最新价 + 涨跌额/涨跌幅
  *   - 日K接口 push2his: 近 30 日收盘, 画 sparkline
  *

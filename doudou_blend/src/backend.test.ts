@@ -1,11 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { forceBackend } from "./backend";
 
-const { invoke } = vi.hoisted(() => ({
-  invoke: vi.fn(),
-}));
-
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 function makeStorage(): Storage {
   const values = new Map<string, string>();
   return {
@@ -25,7 +20,6 @@ function makeStorage(): Storage {
 }
 
 beforeEach(() => {
-  invoke.mockReset();
   vi.stubGlobal("window", new EventTarget());
   vi.stubGlobal("localStorage", makeStorage());
   vi.stubGlobal("fetch", vi.fn());
@@ -46,34 +40,6 @@ afterEach(() => {
 });
 
 describe("Backend 历史契约", () => {
-  it("Tauri 历史数量复用 SQLite db_status", async () => {
-    invoke.mockImplementation(async (command: string) => {
-      if (command === "db_status") return { history: 7 };
-      return undefined;
-    });
-
-    const backend = await forceBackend("tauri");
-
-    await expect(backend.countHistory()).resolves.toBe(7);
-    expect(invoke).toHaveBeenCalledWith("db_status");
-  });
-
-  it("Tauri 仅在清空成功后派发统一历史变更事件", async () => {
-    const backend = await forceBackend("tauri");
-    let changes = 0;
-    window.addEventListener("doudou:history_changed", () => {
-      changes += 1;
-    });
-
-    invoke.mockResolvedValueOnce(undefined);
-    await backend.clearHistory();
-    expect(changes).toBe(1);
-
-    invoke.mockRejectedValueOnce(new Error("SQLite 写入失败"));
-    await expect(backend.clearHistory()).rejects.toThrow("SQLite 写入失败");
-    expect(changes).toBe(1);
-  });
-
   it("Web 历史数量读取 PostgreSQL API", async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response('{"count":2}', {
@@ -82,7 +48,7 @@ describe("Backend 历史契约", () => {
       }),
     );
 
-    const backend = await forceBackend("http");
+    const backend = await forceBackend();
 
     await expect(backend.countHistory()).resolves.toBe(2);
     expect(fetch).toHaveBeenCalledWith("/api/history/count", undefined);
@@ -95,7 +61,7 @@ describe("Backend 历史契约", () => {
         headers: { "Content-Type": "application/json" },
       }),
     );
-    const backend = await forceBackend("http");
+    const backend = await forceBackend();
     let changes = 0;
     window.addEventListener("doudou:history_changed", () => {
       changes += 1;
@@ -131,7 +97,7 @@ describe("Backend 历史契约", () => {
         headers: { "Content-Type": "application/json" },
       }),
     );
-    const backend = await forceBackend("http");
+    const backend = await forceBackend();
     const input = '{"coals":[],"specs":[]}';
 
     await expect(backend.solveJson(input)).resolves.toBe('{"ok":true}');
@@ -146,7 +112,7 @@ describe("Backend 历史契约", () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response("服务暂不可用", { status: 503 }),
     );
-    const backend = await forceBackend("http");
+    const backend = await forceBackend();
 
     await expect(backend.getMasterJson()).rejects.toThrow("服务暂不可用");
   });
