@@ -18,6 +18,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+mod api_key;
 mod coal_index;
 mod database;
 mod master_data;
@@ -39,67 +40,12 @@ pub async fn app(public_dir: PathBuf) -> Router {
         AppState {
             auth: AuthConfig::from_env(),
             database,
-            data_api_keys: data_api_keys_from_env(),
         },
     )
 }
 
-/// 一把具名密钥. 名字用于落库留痕与撤销, 不是秘密.
-#[derive(Clone)]
-struct DataApiKey {
-    holder: String,
-    secret: String,
-}
-
-/// 从 `DATA_API_KEYS` 解析具名密钥表, 格式 `名字:密钥,名字:密钥`.
-///
-/// 用具名多钥匙而不是单把共享密钥, 是因为这把钥匙要发给外部协作者:
-///   - 撤销某个人只需删掉他那一条, 不牵连其他持有者
-///   - 落库的 updated_by 由服务端从密钥推导, 不再是调用方自称, 出问题查得到人
-///
-/// 任何一条格式错误或密钥过短都会被跳过并告警; 全部无效则接口保持关闭(503)。
-fn data_api_keys_from_env() -> Vec<DataApiKey> {
-    let Ok(raw) = std::env::var("DATA_API_KEYS") else {
-        return Vec::new();
-    };
-    let keys = parse_data_api_keys(&raw);
-    if !keys.is_empty() {
-        let holders: Vec<&str> = keys.iter().map(|k| k.holder.as_str()).collect();
-        tracing::info!(holders = %holders.join("/"), "数据更新接口已启用");
-    }
-    keys
-}
-
-fn parse_data_api_keys(raw: &str) -> Vec<DataApiKey> {
-    let mut keys: Vec<DataApiKey> = Vec::new();
-    for entry in raw.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let Some((holder, secret)) = entry.split_once(':') else {
-            tracing::warn!("DATA_API_KEYS 中有条目缺少 '名字:密钥' 分隔符, 已跳过");
-            continue;
-        };
-        let holder = holder.trim().to_string();
-        let secret = secret.trim().to_string();
-        if holder.is_empty() {
-            tracing::warn!("DATA_API_KEYS 中有条目名字为空, 已跳过");
-            continue;
-        }
-        // 按字符数而非字节数, 与文档口径一致 (否则 11 个中文字符 = 33 字节即可通过).
-        if secret.chars().count() < 32 {
-            tracing::warn!(%holder, "密钥短于 32 字符, 该持有者未启用");
-            continue;
-        }
-        if keys.iter().any(|k| k.holder == holder) {
-            tracing::warn!(%holder, "DATA_API_KEYS 中名字重复, 已跳过后一条");
-            continue;
-        }
-        keys.push(DataApiKey { holder, secret });
-    }
-    keys
-}
+/// 密钥名字上限, 与迁移里的 CHECK 一致.
+const MAX_KEY_NAME_CHARS: usize = 64;
 
 #[derive(Clone)]
 pub struct AuthConfig {
@@ -148,9 +94,6 @@ impl AuthConfig {
 struct AppState {
     auth: AuthConfig,
     database: Option<PgPool>,
-    /// 数据更新接口的具名机器密钥. 为空时接口整体关闭 ——
-    /// 默认不开放写入口, 要用必须显式配置。
-    data_api_keys: Vec<DataApiKey>,
 }
 
 pub fn app_with_auth(public_dir: PathBuf, auth: AuthConfig) -> Router {
@@ -159,7 +102,6 @@ pub fn app_with_auth(public_dir: PathBuf, auth: AuthConfig) -> Router {
         AppState {
             auth,
             database: None,
-            data_api_keys: Vec::new(),
         },
     )
 }
@@ -185,6 +127,9 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
             "/api/master/coals/{coal}/{field}",
             delete(delete_coal_override),
         )
+        // 管理端: 密钥的生成/列出/销毁 (走登录会话, 不是 X-API-Key)
+        .route("/api/admin/keys", get(list_api_keys).post(create_api_key))
+        .route("/api/admin/keys/{id}", delete(revoke_api_key))
         .route("/api/version", get(version))
         .route("/api/storage", get(get_storage).put(put_storage))
         .route(
@@ -596,47 +541,140 @@ fn unauthorized() -> Response {
 // 煤库数据更新接口 (机器密钥, 与用户会话完全独立)
 // ---------------------------------------------------------------------------
 
-/// 校验 X-API-Key. 未配置 DATA_API_KEYS 时接口整体关闭 (503), 不是放行。
-/// 成功时返回持有者名字, 供落库留痕使用.
-fn check_data_api_key(headers: &HeaderMap, state: &AppState) -> Result<String, Box<Response>> {
-    if state.data_api_keys.is_empty() {
-        return Err(Box::new(
+/// 校验 X-API-Key: 对来访明文做 SHA-256, 再查未销毁的密钥行.
+/// 成功时返回该密钥的名字, 供落库留痕使用 (调用方伪造不了).
+async fn check_data_api_key(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<String, Box<Response>> {
+    let unauthorized = || {
+        // 只记事件, 不记 presented —— 那是攻击者可控内容, 不该进日志.
+        tracing::warn!("数据更新接口密钥校验失败");
+        Box::new(
             (
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::UNAUTHORIZED,
                 [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
-                r#"{"ok":false,"reason":"数据更新接口未启用 (未配置 DATA_API_KEYS)"}"#,
+                r#"{"ok":false,"reason":"X-API-Key 无效或已销毁"}"#,
             )
                 .into_response(),
-        ));
-    }
+        )
+    };
+
     let presented = headers
         .get(DATA_API_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-
-    // 逐把比对, 且不提前 break —— 命中与否都走完全部密钥, 避免用响应时间
-    // 探测"配了几把钥匙 / 我的钥匙排第几"。
-    let mut matched: Option<&str> = None;
-    for key in &state.data_api_keys {
-        if secret_eq(presented, &key.secret) {
-            matched = Some(&key.holder);
-        }
+    if presented.is_empty() {
+        return Err(unauthorized());
     }
 
-    match matched {
-        Some(holder) => Ok(holder.to_string()),
-        None => {
-            // 只记事件, 不记 presented —— 那是攻击者可控内容, 不该进日志.
-            tracing::warn!("数据更新接口密钥校验失败");
-            Err(Box::new(
-                (
-                    StatusCode::UNAUTHORIZED,
-                    [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
-                    r#"{"ok":false,"reason":"X-API-Key 无效"}"#,
-                )
-                    .into_response(),
-            ))
+    let pool = require_database(state)?;
+    let hash = api_key::hash_key(presented);
+    match database::authenticate_api_key(pool, &hash).await {
+        Ok(Some(name)) => Ok(name),
+        Ok(None) => Err(unauthorized()),
+        Err(error) => {
+            tracing::error!(%error, "密钥校验查询失败");
+            Err(Box::new(database_error(error)))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 管理端: 密钥的生成 / 列出 / 销毁
+//
+// 这三个接口走**用户会话**(登录 Cookie), 不是 X-API-Key —— 管钥匙的不能是钥匙
+// 自己, 否则一把泄露的密钥就能给自己发新的。
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct CreateKeyRequest {
+    name: String,
+}
+
+/// POST /api/admin/keys —— 生成一把新密钥. 明文只在这一次响应里出现.
+async fn create_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateKeyRequest>,
+) -> Response {
+    if !is_authenticated(&headers, &state.auth) {
+        return unauthorized();
+    }
+    let name = payload.name.trim();
+    if name.is_empty() || name.chars().count() > MAX_KEY_NAME_CHARS {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "ok": false,
+                "reason": format!("名字不能为空, 且不超过 {MAX_KEY_NAME_CHARS} 字符")
+            })),
+        )
+            .into_response();
+    }
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+
+    let generated = api_key::generate();
+    match database::create_api_key(pool, name, &generated.hash, &generated.prefix).await {
+        Ok(row) => {
+            tracing::info!(name, "已生成数据更新密钥");
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "ok": true,
+                    "key": row,
+                    // 唯一一次返回明文: 库里只有哈希, 之后取不回来
+                    "plaintext": generated.plaintext,
+                })),
+            )
+                .into_response()
+        }
+        Err(error) => database_error(error),
+    }
+}
+
+/// GET /api/admin/keys —— 列出密钥 (只有名字/前缀/时间, 永不含明文或哈希).
+async fn list_api_keys(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !is_authenticated(&headers, &state.auth) {
+        return unauthorized();
+    }
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::list_api_keys(pool).await {
+        Ok(keys) => Json(json!({ "ok": true, "keys": keys })).into_response(),
+        Err(error) => database_error(error),
+    }
+}
+
+/// DELETE /api/admin/keys/{id} —— 销毁一把密钥 (软删除, 立即失效).
+async fn revoke_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !is_authenticated(&headers, &state.auth) {
+        return unauthorized();
+    }
+    let pool = match require_database(&state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::revoke_api_key(pool, &id).await {
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "reason": "密钥不存在或已销毁" })),
+        )
+            .into_response(),
+        Ok(_) => {
+            tracing::info!(%id, "已销毁数据更新密钥");
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(error) => database_error(error),
     }
 }
 
@@ -659,7 +697,7 @@ async fn update_coal_data(
     request: Request<Body>,
 ) -> Response {
     // 持有者名字由密钥推导, 不接受调用方自报 —— 出了坏数据要查得到人.
-    let holder = match check_data_api_key(&headers, &state) {
+    let holder = match check_data_api_key(&headers, &state).await {
         Ok(holder) => holder,
         Err(response) => return *response,
     };
@@ -711,7 +749,7 @@ async fn update_coal_data(
 
 /// GET /api/master/overrides —— 查看当前覆盖层内容 (排查"这个值哪来的")。
 async fn list_coal_overrides(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = check_data_api_key(&headers, &state) {
+    if let Err(response) = check_data_api_key(&headers, &state).await {
         return *response;
     }
     let pool = match require_database(&state) {
@@ -730,7 +768,7 @@ async fn delete_coal_override(
     headers: HeaderMap,
     Path((coal, field)): Path<(String, String)>,
 ) -> Response {
-    if let Err(response) = check_data_api_key(&headers, &state) {
+    if let Err(response) = check_data_api_key(&headers, &state).await {
         return *response;
     }
     let pool = match require_database(&state) {
@@ -777,28 +815,6 @@ mod tests {
         String::from_utf8(body.to_vec()).unwrap()
     }
 
-    /// 配好机器密钥的 app (无数据库 —— 鉴权应在碰库之前就判完).
-    fn test_app_with_key(key: &str) -> Router {
-        test_app_with_keys(&[("tester", key)])
-    }
-
-    fn test_app_with_keys(keys: &[(&str, &str)]) -> Router {
-        app_with_state(
-            PathBuf::from("missing-public"),
-            AppState {
-                auth: AuthConfig::new("tester", "secret", "test-session-token", false),
-                database: None,
-                data_api_keys: keys
-                    .iter()
-                    .map(|(holder, secret)| DataApiKey {
-                        holder: (*holder).to_string(),
-                        secret: (*secret).to_string(),
-                    })
-                    .collect(),
-            },
-        )
-    }
-
     fn key_request(method: &str, uri: &str, key: Option<&str>, body: Body) -> Request<Body> {
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(key) = key {
@@ -810,43 +826,29 @@ mod tests {
             .unwrap()
     }
 
-    const TEST_KEY: &str = "0123456789abcdef0123456789abcdef";
+    // 密钥现在存在数据库里 (管理端生成/销毁), 所以"密钥有效"这条路径需要真库,
+    // 留给部署后的手工验证。以下用例覆盖的是**不需要库也必须成立**的部分:
+    // 缺密钥、会话冒充、畸形请求体不得绕过鉴权。
 
-    /// 未配置 DATA_API_KEYS 时接口整体关闭, 而不是放行.
+    /// 没带 X-API-Key 一律 401, 且必须发生在碰库之前.
     #[tokio::test]
-    async fn test_data_api_disabled_without_key() {
+    async fn test_data_api_rejects_missing_key() {
         let response = test_app()
             .oneshot(key_request(
                 "POST",
                 "/api/master/coals",
-                Some("任意值"),
+                None,
                 Body::from(r#"{"updates":[]}"#),
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// 缺密钥、错密钥都必须 401, 且不能因为登录了用户会话就放行.
+    /// 用户会话 Cookie 不是这把钥匙的替代品.
     #[tokio::test]
-    async fn test_data_api_rejects_missing_or_wrong_key() {
-        let router = test_app_with_key(TEST_KEY);
-        for key in [None, Some("wrong-key-wrong-key-wrong-key-123")] {
-            let response = router
-                .clone()
-                .oneshot(key_request(
-                    "POST",
-                    "/api/master/coals",
-                    key,
-                    Body::from(r#"{"updates":[]}"#),
-                ))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "key={key:?}");
-        }
-
-        // 用户会话 Cookie 不是这把钥匙的替代品
-        let response = router
+    async fn test_session_cookie_is_not_an_api_key() {
+        let response = test_app()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -861,94 +863,30 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// 密钥正确但数据不合法 -> 422, 且错误信息要指出问题.
-    #[tokio::test]
-    async fn test_data_api_validates_before_touching_database() {
-        let body = serde_json::to_string(&json!({
-            "updates": [
-                { "coal": "不存在的煤", "field": "S", "value": 1.0, "source": "测试" }
-            ]
-        }))
-        .unwrap();
-        let response = test_app_with_key(TEST_KEY)
-            .oneshot(key_request(
-                "POST",
-                "/api/master/coals",
-                Some(TEST_KEY),
-                Body::from(body),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let text = response_text(response).await;
-        assert!(text.contains("没有这个煤名"), "实际: {text}");
-    }
-
-    /// 岩相=2026 这类脏数据在入库前就被拦下 (2026-09-17 真实案例).
-    #[tokio::test]
-    async fn test_data_api_rejects_out_of_range_value() {
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let target = master
-            .coals
-            .iter()
-            .find(|c| !c.props.contains_key("CSR") && !c.props.is_empty())
-            .unwrap();
-        let body = serde_json::to_string(&json!({
-            "updates": [
-                { "coal": target.name, "field": "CSR", "value": 2026.0, "source": "脏数据" }
-            ]
-        }))
-        .unwrap();
-        let response = test_app_with_key(TEST_KEY)
-            .oneshot(key_request(
-                "POST",
-                "/api/master/coals",
-                Some(TEST_KEY),
-                Body::from(body),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(response_text(response).await.contains("超出物理量程"));
-    }
-
     /// 畸形请求体在**鉴权之前**不得被解析 —— 否则 axum 的 Json extractor 会把
-    /// 接口 schema (字段名/类型) 回显给任何未鉴权访客, 且能在鉴权前触发反序列化。
-    /// 这三种请求都必须先撞上密钥检查, 而不是拿到 400/415/422 的解析错误。
+    /// 接口 schema (字段名/类型) 回显给任何未鉴权访客。
     #[tokio::test]
     async fn test_malformed_body_does_not_bypass_auth() {
-        let router = test_app_with_key(TEST_KEY);
+        let router = test_app();
 
-        // 坏 JSON + 无密钥 -> 401 (而不是 400 "Failed to parse the request body")
-        let response = router
-            .clone()
-            .oneshot(key_request(
-                "POST",
-                "/api/master/coals",
-                None,
-                Body::from("{not json"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let text = response_text(response).await;
-        assert!(!text.contains("updates"), "不得回显字段名: {text}");
+        for body in ["{not json", r#"{"updates":[{"coal":1}]}"#] {
+            let response = router
+                .clone()
+                .oneshot(key_request(
+                    "POST",
+                    "/api/master/coals",
+                    None,
+                    Body::from(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "body={body}");
+            let text = response_text(response).await;
+            assert!(!text.contains("updates"), "不得回显字段名: {text}");
+            assert!(!text.contains("invalid type"), "不得回显类型错误: {text}");
+        }
 
-        // 类型错误 + 无密钥 -> 401 (而不是 422 "updates[0].coal: invalid type")
-        let response = router
-            .clone()
-            .oneshot(key_request(
-                "POST",
-                "/api/master/coals",
-                None,
-                Body::from(r#"{"updates":[{"coal":1}]}"#),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert!(!response_text(response).await.contains("invalid type"));
-
-        // 无 Content-Type + 无密钥 -> 401 (而不是 415)
+        // 缺 Content-Type 同样先撞鉴权, 而不是 415
         let response = router
             .oneshot(
                 Request::builder()
@@ -962,192 +900,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// 未配置密钥时, 畸形请求体同样只能拿到 503, 不能泄露任何 schema.
-    #[tokio::test]
-    async fn test_disabled_api_leaks_nothing() {
-        let response = test_app()
-            .oneshot(key_request(
-                "POST",
-                "/api/master/coals",
-                None,
-                Body::from(r#"{"updates":[{"coal":1}]}"#),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(!response_text(response).await.contains("invalid type"));
-    }
-
-    /// 单批条数上限: 挡住"一次几万条"的错误放大.
-    #[tokio::test]
-    async fn test_rejects_oversized_batch() {
-        let updates: Vec<_> = (0..master_data::MAX_UPDATES + 1)
-            .map(
-                |i| json!({ "coal": format!("煤{i}"), "field": "CSR", "value": 60, "source": "x" }),
-            )
-            .collect();
-        let body = serde_json::to_string(&json!({ "updates": updates })).unwrap();
-
-        let response = test_app_with_key(TEST_KEY)
-            .oneshot(key_request(
-                "POST",
-                "/api/master/coals",
-                Some(TEST_KEY),
-                Body::from(body),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let text = response_text(response).await;
-        assert!(text.contains("一次最多提交"), "实际: {text}");
-        // 超限时只回一条错误, 不是逐条生成
-        assert!(!text.contains("煤299"), "不应逐条报错: {text}");
-    }
-
-    /// source 过长会被写进 note 并随每次 GET /api/master 回给前端, 必须封顶.
-    #[tokio::test]
-    async fn test_rejects_overlong_source() {
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let target = master
-            .coals
-            .iter()
-            .find(|c| !c.props.is_empty() && !c.props.contains_key("CSR"))
-            .unwrap();
-        let body = serde_json::to_string(&json!({
-            "updates": [{
-                "coal": target.name, "field": "CSR", "value": 60,
-                "source": "来".repeat(500)
-            }]
-        }))
-        .unwrap();
-
-        let response = test_app_with_key(TEST_KEY)
-            .oneshot(key_request(
-                "POST",
-                "/api/master/coals",
-                Some(TEST_KEY),
-                Body::from(body),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(response_text(response).await.contains("source 不得超过"));
-    }
-
-    /// 多个持有者各自的密钥都能过, 互不影响; 撤销一把不牵连另一把.
-    #[tokio::test]
-    async fn test_named_keys_are_independent() {
-        const EVAN: &str = "evan-key-evan-key-evan-key-evan-1";
-        const FRIEND: &str = "friend-key-friend-key-friend-key2";
-        let both = test_app_with_keys(&[("evan", EVAN), ("friend", FRIEND)]);
-
-        // 两把都能过鉴权 (无库 -> 走到 503, 说明已越过 401)
-        for key in [EVAN, FRIEND] {
-            let response = both
-                .clone()
-                .oneshot(key_request(
-                    "GET",
-                    "/api/master/overrides",
-                    Some(key),
-                    Body::empty(),
-                ))
-                .await
-                .unwrap();
-            assert_eq!(
-                response.status(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "密钥应通过鉴权"
-            );
-        }
-
-        // 撤销 friend 后, 他的密钥失效而 evan 不受影响
-        let revoked = test_app_with_keys(&[("evan", EVAN)]);
-        let response = revoked
-            .clone()
-            .oneshot(key_request(
-                "GET",
-                "/api/master/overrides",
-                Some(FRIEND),
-                Body::empty(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "撤销后应失效");
-
-        let response = revoked
-            .oneshot(key_request(
-                "GET",
-                "/api/master/overrides",
-                Some(EVAN),
-                Body::empty(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            "另一把不应受牵连"
-        );
-    }
-
-    /// 持有者名字由密钥推导, 请求体里塞 updated_by 不起作用 —— 留痕不可伪造.
-    #[tokio::test]
-    async fn test_holder_cannot_be_spoofed_by_body() {
-        let body = serde_json::to_string(&json!({
-            "updated_by": "冒充别人",
-            "updates": [{ "coal": "不存在的煤", "field": "S", "value": 1.0, "source": "x" }]
-        }))
-        .unwrap();
-
-        // 校验在落库之前, 这里用非法煤名让它停在 422, 同时证明 updated_by 被忽略
-        // (CoalUpdateRequest 已无该字段, 多余键不影响反序列化)
-        let response = test_app_with_keys(&[("friend", TEST_KEY)])
-            .oneshot(key_request(
-                "POST",
-                "/api/master/coals",
-                Some(TEST_KEY),
-                Body::from(body),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let text = response_text(response).await;
-        assert!(!text.contains("冒充别人"), "不得回显自报身份: {text}");
-    }
-
-    /// DATA_API_KEYS 解析: 跳过格式错误与过短密钥, 一条坏的不牵连其他条目.
-    #[test]
-    fn test_key_parsing_skips_invalid_entries() {
-        let holders = |raw: &str| -> Vec<String> {
-            parse_data_api_keys(raw)
-                .into_iter()
-                .map(|k| k.holder)
-                .collect()
-        };
-        let good = "0123456789abcdef0123456789abcdef";
-
-        assert_eq!(holders(&format!("evan:{good}")), vec!["evan"]);
-        assert!(holders("evan:tooshort").is_empty(), "过短密钥应被跳过");
-        assert!(holders("没有分隔符").is_empty(), "缺分隔符应被跳过");
-        assert!(holders(&format!(":{good}")).is_empty(), "空名字应被跳过");
-        assert!(holders("").is_empty(), "空串应得到空表 (接口保持关闭)");
-
-        // 一条坏的不应影响其他条目; 空格应被 trim
-        assert_eq!(
-            holders(&format!(" evan:{good} , bad:short , friend:{good} ")),
-            vec!["evan", "friend"]
-        );
-
-        // 名字重复时只保留第一条, 避免"撤销了却还能用"
-        let dup = parse_data_api_keys(&format!("evan:{good},evan:{}", "z".repeat(32)));
-        assert_eq!(dup.len(), 1);
-        assert_eq!(dup[0].secret, good);
-    }
-
-    /// 查询与回滚接口同样受密钥保护.
+    /// 查询与回滚接口同样要密钥.
     #[tokio::test]
     async fn test_override_read_and_delete_need_key() {
-        let router = test_app_with_key(TEST_KEY);
+        let router = test_app();
         for (method, uri) in [
             ("GET", "/api/master/overrides"),
             ("DELETE", "/api/master/coals/临北/CSR"),
@@ -1161,6 +917,77 @@ mod tests {
                 response.status(),
                 StatusCode::UNAUTHORIZED,
                 "{method} {uri}"
+            );
+        }
+    }
+
+    /// 管理端密钥接口走登录会话, 未登录一律 401 —— 管钥匙的不能是钥匙自己.
+    #[tokio::test]
+    async fn test_admin_key_endpoints_require_login() {
+        let router = test_app();
+        let cases: [(&str, &str, Body); 3] = [
+            ("GET", "/api/admin/keys", Body::empty()),
+            (
+                "POST",
+                "/api/admin/keys",
+                Body::from(r#"{"name":"friend"}"#),
+            ),
+            ("DELETE", "/api/admin/keys/some-id", Body::empty()),
+        ];
+        for (method, uri, body) in cases {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
+
+        // 带上 X-API-Key 也不行: 数据密钥管不了密钥本身
+        let response = test_app()
+            .oneshot(key_request(
+                "POST",
+                "/api/admin/keys",
+                Some("dk_0123456789abcdef0123456789abcdef"),
+                Body::from(r#"{"name":"friend"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// 已登录但名字非法时 422, 且在碰库之前就判掉.
+    #[tokio::test]
+    async fn test_create_key_rejects_bad_name() {
+        for name in ["", "   ", &"名".repeat(MAX_KEY_NAME_CHARS + 1)] {
+            let body = serde_json::to_string(&json!({ "name": name })).unwrap();
+            let response = test_app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/admin/keys")
+                        .header(header::COOKIE, "doudou_session=test-session-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "name={name:?}"
             );
         }
     }

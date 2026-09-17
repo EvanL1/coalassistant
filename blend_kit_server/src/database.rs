@@ -411,6 +411,107 @@ pub fn count_response(count: i64) -> Value {
     json!({ "count": count })
 }
 
+/// 管理端列表里的一把密钥. 不含明文, 也不含哈希.
+#[derive(Debug, Serialize)]
+pub struct ApiKeyRow {
+    pub id: String,
+    pub name: String,
+    pub key_prefix: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+/// 新建一把密钥, 只落哈希. 明文由调用方持有并返回给管理端一次.
+pub async fn create_api_key(
+    pool: &PgPool,
+    name: &str,
+    hash: &str,
+    prefix: &str,
+) -> Result<ApiKeyRow, sqlx::Error> {
+    let id = Uuid::new_v4().to_string();
+    let row = sqlx::query(
+        r#"
+        INSERT INTO data_api_keys (id, name, key_hash, key_prefix)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, name, key_prefix, created_at, last_used_at, revoked_at
+        "#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(hash)
+    .bind(prefix)
+    .fetch_one(pool)
+    .await?;
+    api_key_row(row)
+}
+
+/// 列出全部密钥 (含已销毁的, 用于追溯历史归属). 永远不返回哈希或明文.
+pub async fn list_api_keys(pool: &PgPool) -> Result<Vec<ApiKeyRow>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name, key_prefix, created_at, last_used_at, revoked_at
+        FROM data_api_keys
+        ORDER BY revoked_at IS NOT NULL, created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(api_key_row).collect()
+}
+
+/// 销毁一把密钥. 软删除: 保留行, 只置 revoked_at, 以免历史 updated_by 失去出处.
+/// 已销毁的再销毁返回 0, 让调用方能区分"刚销毁"和"本就不存在".
+pub async fn revoke_api_key(pool: &PgPool, id: &str) -> Result<u64, sqlx::Error> {
+    // 非法 UUID 直接当作"不存在", 不必区分 —— 调用方拿到的都是 404.
+    if Uuid::parse_str(id).is_err() {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "UPDATE data_api_keys SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// 用哈希查一把未销毁的密钥, 命中则返回它的名字并刷新 last_used_at.
+///
+/// 查询按 key_hash 走索引: 攻击者控制的是明文, 拿不到哈希的比较时序信息
+/// (要利用得先有 SHA-256 的原像)。
+pub async fn authenticate_api_key(
+    pool: &PgPool,
+    hash: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        UPDATE data_api_keys SET last_used_at = NOW()
+        WHERE key_hash = $1 AND revoked_at IS NULL
+        RETURNING name
+        "#,
+    )
+    .bind(hash)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| row.try_get("name")).transpose()
+}
+
+fn api_key_row(row: sqlx::postgres::PgRow) -> Result<ApiKeyRow, sqlx::Error> {
+    let id: String = row.try_get("id")?;
+    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+    let last_used_at: Option<DateTime<Utc>> = row.try_get("last_used_at")?;
+    let revoked_at: Option<DateTime<Utc>> = row.try_get("revoked_at")?;
+    Ok(ApiKeyRow {
+        id,
+        name: row.try_get("name")?,
+        key_prefix: row.try_get("key_prefix")?,
+        created_at: created_at.to_rfc3339(),
+        last_used_at: last_used_at.map(|t| t.to_rfc3339()),
+        revoked_at: revoked_at.map(|t| t.to_rfc3339()),
+    })
+}
+
 /// 读出全部煤库覆盖层, 供 GET /api/master 叠加到基线上.
 pub async fn list_coal_overrides(pool: &PgPool) -> Result<Vec<StoredOverride>, sqlx::Error> {
     let rows = sqlx::query(

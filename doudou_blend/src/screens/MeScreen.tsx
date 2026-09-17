@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import { logout } from "../auth";
 import { getBackend } from "../backend";
+import { ApiKeyCard } from "./ApiKeyCard";
 import {
   clearAllCoalPrefs,
   clearUserContract,
@@ -178,6 +179,9 @@ export function MeScreen() {
           </div>
         )}
       </div>
+
+      {/* 数据更新密钥 */}
+      <ApiKeyCard />
 
       {/* 危险区 */}
       <div className="card">
