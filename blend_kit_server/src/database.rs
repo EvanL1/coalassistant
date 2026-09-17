@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use uuid::Uuid;
 
+use crate::master_data::{CoalUpdate, StoredOverride};
+
 const DEFAULT_QUANTITY: f64 = 3700.0;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -407,6 +409,82 @@ pub async fn clear_history(pool: &PgPool, username: &str) -> Result<u64, sqlx::E
 
 pub fn count_response(count: i64) -> Value {
     json!({ "count": count })
+}
+
+/// 读出全部煤库覆盖层, 供 GET /api/master 叠加到基线上.
+pub async fn list_coal_overrides(pool: &PgPool) -> Result<Vec<StoredOverride>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT coal_name, field, value, source, confidence, updated_at
+        FROM coal_overrides
+        ORDER BY coal_name, field
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| -> Result<StoredOverride, sqlx::Error> {
+            let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
+            Ok(StoredOverride {
+                coal_name: row.try_get("coal_name")?,
+                field: row.try_get("field")?,
+                value: row.try_get("value")?,
+                source: row.try_get("source")?,
+                confidence: row.try_get("confidence")?,
+                updated_at: updated_at.to_rfc3339(),
+            })
+        })
+        .collect()
+}
+
+/// 整批 upsert 覆盖层. 走事务: 校验已在应用层整批做过, 落库也要么全成要么全不成.
+pub async fn upsert_coal_overrides(
+    pool: &PgPool,
+    updates: &[CoalUpdate],
+    updated_by: &str,
+) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let mut affected = 0;
+    for u in updates {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO coal_overrides (coal_name, field, value, source, confidence, updated_by)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (coal_name, field) DO UPDATE SET
+                value      = EXCLUDED.value,
+                source     = EXCLUDED.source,
+                confidence = EXCLUDED.confidence,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&u.coal)
+        .bind(&u.field)
+        .bind(u.value)
+        .bind(&u.source)
+        .bind(&u.confidence)
+        .bind(updated_by)
+        .execute(&mut *tx)
+        .await?;
+        affected += result.rows_affected();
+    }
+    tx.commit().await?;
+    Ok(affected)
+}
+
+/// 删除一条覆盖 = 把该指标回滚到基线状态.
+pub async fn delete_coal_override(
+    pool: &PgPool,
+    coal: &str,
+    field: &str,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM coal_overrides WHERE coal_name = $1 AND field = $2")
+        .bind(coal)
+        .bind(field)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
 }
 
 fn default_quantity() -> f64 {

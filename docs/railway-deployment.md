@@ -12,6 +12,20 @@
 - `DATABASE_URL`：Supabase Session pooler 连接串，使用 5432 端口并启用
   `sslmode=require`。不要把连接串提交到 Git。
 
+可选变量：
+
+- `DATA_API_KEY`：煤库数据更新接口的机器密钥，至少 32 字符。**不配置则该组
+  接口整体返回 503**（默认不开放写入口）。短于 32 字符视同未配置，启动日志会
+  告警。生成方式：
+
+  ```bash
+  openssl rand -hex 32
+  ```
+
+  这把密钥与 `AUTH_*` 那套用户登录完全独立：它只能写煤库覆盖层，碰不到用户
+  数据与配煤历史；反过来，登录会话也调不动数据更新接口。轮换时直接改
+  Railway 变量并重启，无需改代码。
+
 Railway 自动注入 `PORT`，服务监听 `0.0.0.0:$PORT`。`railway.json`
 将 `/api/health` 配置为部署健康检查；服务启动时自动执行
 `blend_kit_server/migrations/` 中的数据库迁移。
