@@ -20,7 +20,7 @@ pub use optimizer::{solve, solve_with_evaluators};
 
 /// 返回编译进核心 crate 的 Master JSON 原文.
 ///
-/// WASM、Tauri 和 SQLite seed 都必须通过这个入口读取，避免维护静态副本.
+/// WASM 与 HTTP 服务端都必须通过这个入口读取，避免维护静态副本.
 pub fn master_json() -> &'static str {
     include_str!("../data/coal_master.json")
 }

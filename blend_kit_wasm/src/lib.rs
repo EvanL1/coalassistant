@@ -18,7 +18,7 @@ fn init_panic_hook() {
 fn init_panic_hook() {}
 
 /// 主求解入口. 输入 BlendRequest JSON, 输出 BlendResult JSON.
-/// 完全等价于 Tauri 后端的 `solve_blend` command.
+/// 完全等价于 HTTP 服务端的 `POST /api/solve`.
 #[wasm_bindgen(js_name = solveJson)]
 pub fn solve_json(input_json: &str) -> String {
     init_panic_hook();

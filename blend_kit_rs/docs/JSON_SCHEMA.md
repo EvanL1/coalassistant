@@ -1,6 +1,6 @@
 # 豆哥配煤 JSON API 契约
 
-最后更新：2026-07-17。`blend_kit::solve_json` 是 WASM 与 Tauri 共用的
+最后更新：2026-07-17。`blend_kit::solve_json` 是 WASM 与 HTTP 服务端共用的
 JSON 字符串边界；字段使用 Rust `serde` 默认的 `snake_case`。
 
 ## 请求：`BlendRequest`

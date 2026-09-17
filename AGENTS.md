@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository contains four independent Rust crates, not a Cargo workspace. `blend_kit_rs/` is the business core: models, optimizer, prediction, embedded data, tests, and examples. `blend_kit_wasm/` is the legacy browser wrapper through `wasm-bindgen`. `blend_kit_server/` exposes the core through an HTTP API and serves the production web build. `doudou_blend/` contains the React 19/TypeScript UI in `src/` and the Tauri 2/SQLite backend in `src-tauri/`. Design references are in `docs/` and `mockup/`; the live native schema is `doudou_blend/src-tauri/src/db_schema.rs`.
+This repository contains three independent Rust crates, not a Cargo workspace. `blend_kit_rs/` is the business core: models, optimizer, prediction, embedded data, tests, and examples. `blend_kit_wasm/` is the legacy browser wrapper through `wasm-bindgen`, kept as a standalone build target but no longer used by the app. `blend_kit_server/` exposes the core through an HTTP API, owns PostgreSQL persistence and auth, and serves the production web build. `doudou_blend/` contains the React 19/TypeScript UI in `src/`. Design references are in `docs/` and `mockup/`; the live database schema lives in `blend_kit_server/migrations/`.
 
 ## Build, Test, and Development Commands
 
@@ -25,14 +25,14 @@ cd ../doudou_blend
 npm install
 npm run dev             # Vite web app on port 1420
 npm run build           # Type-check and create dist/
-npm run tauri dev       # Native desktop development
+npm run check:data      # master 数据自检
 ```
 
 The production web frontend calls the Rust HTTP API and no longer requires the generated WASM package. Run `blend_kit_server` with `DATABASE_URL` alongside `npm run dev`; Vite proxies `/api` to port 3000 by default. Database schema changes belong in `blend_kit_server/migrations/` and run automatically at server startup.
 
 ## Coding Style & Naming Conventions
 
-Use `rustfmt` defaults and idiomatic Rust `snake_case`; keep tests near their modules under `#[cfg(test)]`. TypeScript uses strict compiler checks, two-space indentation, `PascalCase` for React components, and `camelCase` for variables and functions. Keep comments and user-facing text in Chinese. Preserve the JSON-string boundary exposed by `blend_kit::solve_json`; update Tauri, HTTP, and any retained WASM adapters when adding backend capabilities.
+Use `rustfmt` defaults and idiomatic Rust `snake_case`; keep tests near their modules under `#[cfg(test)]`. TypeScript uses strict compiler checks, two-space indentation, `PascalCase` for React components, and `camelCase` for variables and functions. Keep comments and user-facing text in Chinese. Preserve the JSON-string boundary exposed by `blend_kit::solve_json`; update the HTTP and any retained WASM adapters when adding backend capabilities.
 
 ## Testing Guidelines
 
@@ -44,4 +44,4 @@ Follow the existing Conventional Commit style, usually with Chinese descriptions
 
 ## Data Synchronization
 
-`blend_kit_rs/data/coal_master.json` is the sole Master source for HTTP, WASM, Tauri, and SQLite seed. After changing shared Rust models or versions, update TypeScript as needed and run `npm run check:consistency` from `doudou_blend/`.
+`blend_kit_rs/data/coal_master.json` is the sole Master source for the HTTP API and the WASM wrapper. Data content is validated by `scripts/check_master_data.mjs` (`npm run check:data`); Rust tests use fixtures and must never assert master contents, so a data update never requires a code change. After changing shared Rust models or versions, update TypeScript as needed and run `npm run check:consistency` from `doudou_blend/`.

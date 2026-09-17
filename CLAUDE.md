@@ -6,45 +6,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 豆哥配煤 (Doudou Blend) — a coking-coal blend optimizer. It takes a pool of coals (each with 8 quality
 indicators + an FOB/FRT price split) plus quality specs, and solves a linear program for the cheapest blend
-ratio that satisfies every constraint. Ships as a mobile/desktop Tauri app **and** a browser web app from one
-React codebase.
+ratio that satisfies every constraint. Ships as a browser web app: a React frontend against a Rust HTTP
+server.
 
 ## Repository layout (three independent Rust crates — NOT a cargo workspace)
 
 | Path | Crate / package | Role |
 |------|-----------------|------|
-| `blend_kit_rs/` | `blend_kit` | Pure LP core. Clarabel solver, embedded master data. Zero Tauri/WASM/web deps. |
-| `blend_kit_wasm/` | `blend_kit_wasm` | Thin `wasm-bindgen` wrapper. Re-exposes the core to JS. Depends on `blend_kit` by path. |
-| `doudou_blend/src-tauri/` | `doudou_blend` | Tauri 2.0 native backend. SQLite persistence + Tauri commands. Depends on `blend_kit` by path. |
+| `blend_kit_rs/` | `blend_kit` | Pure LP core. Clarabel solver, embedded master data. Zero web/WASM deps. |
+| `blend_kit_server/` | `blend_kit_server` | Axum HTTP server. Serves `/api/*`, PostgreSQL persistence, auth. Depends on `blend_kit` by path. |
+| `blend_kit_wasm/` | `blend_kit_wasm` | Thin `wasm-bindgen` wrapper. Depends on `blend_kit` by path. **Currently unused by the app** — the frontend talks to the server, not WASM. Kept as a standalone build target. |
 | `doudou_blend/src/` | (npm) `doudou_blend` | React 19 + TypeScript + Vite frontend. |
 
 Each crate has its own `Cargo.toml` and `Cargo.lock`; build them from inside their own directory.
 
-Repo-root loose files: `schema.sql` / `mines.db` / `migrate_json_to_sqlite.mjs` are the *design artifacts* for
-the mines wide-table migration (SQL draft, sample DB, one-off JSON→SQL converter) — the **live** native schema
-is `doudou_blend/src-tauri/src/db_schema.rs` (`SCHEMA_V1`), not root `schema.sql`. `mockup/` is the original
-HTML visual mockup of the six screens.
+Repo-root loose files: `schema.sql` / `mines.db` / `migrate_json_to_sqlite.mjs` were the design artifacts for
+the mines wide-table migration in the (now removed) Tauri/SQLite backend. They are **orphaned** — nothing
+builds or reads them. `mockup/` is the original HTML visual mockup of the six screens.
 
 ## Architecture — the parts that span files
 
-**One algorithm, three callers.** The entire core is reached through a single string-in/string-out function,
-`blend_kit::solve_json(&str) -> String` (`blend_kit_rs/src/lib.rs`). It is invoked three ways:
-- directly in tests/examples,
-- via `wasm-bindgen` as `solveJson` (`blend_kit_wasm/src/lib.rs`),
-- via a `#[tauri::command] solve_blend` (`doudou_blend/src-tauri/src/lib.rs`).
+**One algorithm, two callers.** The entire core is reached through a single string-in/string-out function,
+`blend_kit::solve_json(&str) -> String` (`blend_kit_rs/src/lib.rs`). It is invoked:
+- directly in tests/examples and by the server (`POST /api/solve`),
+- via `wasm-bindgen` as `solveJson` (`blend_kit_wasm/src/lib.rs`) — built, but not wired into the app.
 
-Keeping every boundary at "JSON string in, JSON string out" is what lets the same React app run on two
-runtimes. Don't add typed cross-boundary APIs; extend the JSON request/result shapes instead.
+Keeping every boundary at "JSON string in, JSON string out" is what keeps the core independent of transport.
+Don't add typed cross-boundary APIs; extend the JSON request/result shapes instead.
 
-**Dual backend, picked at runtime.** `doudou_blend/src/backend.ts` detects the `__TAURI_INTERNALS__` global:
-present → route to Tauri IPC; absent → load the WASM module directly. Both expose the *same async* interface
-(`solveJson` / `getMasterJson` / `getVersion`, plus blend history: `saveHistory` / `listHistory` /
-`setMeasuredQuality` / `clearHistory`), so screen code never branches on runtime. When adding a backend
-capability, add it to **both** `makeTauriBackend` and `makeWasmBackend`. History persistence runs through this
-seam too — native → SQLite `blend_history`, web → `localStorage` — and both normalize to a uniform
-`HistoryRecord` DTO (the TS adapter parses the stored `result_json` to derive recipe + the 6 mixed indicators;
-the Rust side stays dumb, storing an opaque blob + the `csr_measured` / `*_measured` columns — the backfill
-covers the full assay sheet CSR + S/A/V/G/Y/M, feeding both the CSR regression and the future G-correction fit).
+**Single backend seam.** `doudou_blend/src/backend.ts` exposes one async interface (`solveJson` /
+`getMasterJson` / `getVersion`, plus blend history: `saveHistory` / `countHistory` / `listHistory` /
+`setMeasuredQuality` / `clearHistory`) over same-origin `fetch('/api/...')`, so screen code never touches
+transport details. History persists to PostgreSQL through the server and normalizes to a uniform
+`HistoryRecord` DTO (the TS adapter derives recipe + the 6 mixed indicators from the stored result; the Rust
+side stays dumb, storing an opaque blob + the `csr_measured` / `*_measured` columns — the backfill covers the
+full assay sheet CSR + S/A/V/G/Y/M, feeding both the CSR regression and the future G-correction fit).
 
 **Data flow inside the core** (`blend_kit_rs/src/`):
 `model.rs` (Coal/Spec/BlendRequest/BlendResult types, 8-indicator constant) →
@@ -58,27 +54,22 @@ real purchase-qty input, export orders, save-to-history, input-summary panel), �
 (enable/hide + price + assay overrides), 合同 `ContractScreen` (quality specs), 历史 `HistoryScreen` (saved
 blends + measured-CSR backfill), 我的 `MeScreen`. Tabs mount/unmount on switch (`App.tsx`
 `{tab === ... && <Screen/>}`), so each screen reloads its data on entry — relevant for async backend reads.
-The whole app sits behind a lightweight login gate: `App.tsx` renders `LoginScreen` until `tryLogin`
-(`storage.ts`, hardcoded local credentials + a `localStorage` flag) succeeds — remember this when driving the
-web app in a browser. Screens read master data through `master_loader.ts`'s `loadMaster()` module cache; call
+The whole app sits behind a login gate: `App.tsx` renders `LoginScreen` until `tryLogin` (`auth.ts`) succeeds
+— credentials are checked server-side and the session is an HttpOnly cookie, so no password ships in the
+frontend bundle. Screens read master data through `master_loader.ts`'s `loadMaster()` module cache; call
 `invalidateMaster()` after anything that changes master data.
 
-**Master vs. user data split.** `coal_master.json` (embedded in `blend_kit_rs/data/`, served read-only) is the
-canonical coal set and is never mutated. User edits (enable/hide, price overrides, assay overrides) persist
-separately: `localStorage` on web (`doudou_blend/src/storage.ts`) and SQLite tables `user_coal_prefs` /
-`user_overrides` on native (`doudou_blend/src-tauri/src/db_*.rs`). On native, master rows land in the `mines`
-wide table (one row per coal source, CHECK-constrained columns, generated `cif` column, NULL for unmeasured
-indicators); `db_seed.rs` self-seeds it idempotently on first open, keyed by `meta.master_version`, and
-`db_queries.rs` layers user overrides on top when building coal views.
+**Master vs. user data split.** `coal_master.json` (embedded in `blend_kit_rs/data/`, served read-only via
+`GET /api/master`) is the canonical coal set and is never mutated. User edits (enable/hide, price overrides,
+assay overrides) persist separately: `localStorage` acts as a synchronous cache (`doudou_blend/src/storage.ts`)
+and `cloudStorage.ts` mirrors it to PostgreSQL through `GET/PUT /api/storage` after login.
 
-**Blend history & the CSR data loop.** Saved blends persist to `blend_history` (native SQLite) / `localStorage`
-(web) via the backend seam above, keeping the full `BlendResult` JSON. The History screen lets the user backfill
-the lab-measured coke CSR onto a past blend — pairing that blend's mixed indicators (regression **X**, recovered
-from the stored result) with the measured CSR (regression **y**) into a `CsrObservation`. This is the
-data-collection half of the loop; **the observations are not yet fed into `solve_json`** (deferred until enough
-accumulate), at which point `predict.rs`'s gated regression activates. Schema changes to `blend_history` use the
-idempotent `add_column_if_missing` helper in `db.rs` — there is **no migration framework**: fresh installs get
-columns from `SCHEMA_V1`'s `CREATE TABLE`, existing DBs get them via guarded `ALTER TABLE`.
+**Blend history & the CSR data loop.** Saved blends persist to PostgreSQL via `/api/history`, keeping the full
+`BlendResult` JSON. The History screen lets the user backfill the lab-measured coke CSR onto a past blend —
+pairing that blend's mixed indicators (regression **X**, recovered from the stored result) with the measured
+CSR (regression **y**) into a `CsrObservation`. This is the data-collection half of the loop; **the
+observations are not yet fed into `solve_json`** (deferred until enough accumulate), at which point
+`predict.rs`'s gated regression activates.
 
 ## Build & test commands
 
@@ -93,31 +84,36 @@ cargo clippy --release -- -D warnings
 cargo fmt
 ```
 
-**WASM package** (required before any frontend build — see gotcha below):
+**Web server** (`cd blend_kit_server`):
+```bash
+cargo test --locked
+cargo clippy --release -- -D warnings
+cargo run                                      # needs AUTH_* + DATABASE_URL env (see docs/railway-deployment.md)
+```
+
+**WASM package** (standalone — not needed for the app):
 ```bash
 cd blend_kit_wasm
 wasm-pack build --target web --out-dir pkg --release
 node test_wasm_solve.mjs                       # smoke-test the built .wasm
 ```
 
-**Frontend / Tauri** (`cd doudou_blend`, needs Node 22+):
+**Frontend** (`cd doudou_blend`, needs Node 22+):
 ```bash
 npm install
-npm run dev          # web dev server (Vite, :1420) — WASM pkg must already be built
+npm run dev          # Vite dev server; proxies /api to the local blend_kit_server
 npm run build        # tsc && vite build → dist/
-npm run tauri dev    # native dev
-npm run tauri build  # native bundle
-npx @tauri-apps/cli android init && npx @tauri-apps/cli android build --apk --target aarch64
+npm test             # vitest
+npm run check:data   # master 数据自检
 ```
 
 ## Critical gotchas
 
-- **Always run `wasm-pack build` before any `npm install`/`build`/`tauri build`.** `package.json` declares
-  `"blend-kit-wasm": "file:../blend_kit_wasm/pkg"`, and that `pkg/` directory is gitignored. Even Tauri builds
-  (which use IPC, not WASM, at runtime) fail to resolve the TypeScript import until `pkg/` exists. This is the
-  #1 source of "fresh checkout won't build". Every CI job builds WASM first for exactly this reason.
 - **`blend_kit_rs/data/coal_master.json` is the only Master source.** `blend_kit::master_json()` serves the
-  same embedded bytes to the WASM wrapper, Tauri IPC, and SQLite seed. Do not add a frontend static copy.
+  same embedded bytes to the server (`GET /api/master`) and the WASM wrapper. Do not add a frontend static copy.
+- **Data changes must not require code changes.** Rust tests use fixtures and never assert master contents;
+  data invariants live in `scripts/check_master_data.mjs` (`npm run check:data`). If a data update turns a
+  Rust test red, fix the test's coupling, not the data.
 - **`doudou_blend/src/types.ts` mirrors the Rust schema.** Change a shared Rust struct, serde field, enum, or
   indicator ordering together with its TypeScript definition. Run `npm run check:consistency` from
   `doudou_blend/`; CI compares shared fields, enum values, indicator order, versions, documentation, and license.
@@ -125,18 +121,13 @@ npx @tauri-apps/cli android init && npx @tauri-apps/cli android build --apk --ta
   re-enable it. Size is already controlled via `opt-level="z"` + LTO.
 - **`Direction::Upper` ignores `spec.min`; `Direction::Lower` ignores `spec.max`** by design — only `Range`
   uses both bounds. There are regression tests pinning this (`test_direction_upper_ignores_min`).
-- **`npm run dev` needs `server.fs.allow` to include the repo root** (`vite.config.ts` sets `[".", ".."]`).
-  `blend-kit-wasm` is a `file:../blend_kit_wasm/pkg` dep, so its `.wasm` lives outside `doudou_blend/` and Vite's
-  dev file-serving allowlist rejects it by default → `WebAssembly.compile` fails ("HTTP status code is not ok")
-  and the app white-screens. `vite build` bundles the wasm so production/CI never catch it — only the dev server does.
+## CI / deploy
 
-## CI / release
-
-- `ci.yml` (push/PR): tests + builds the `blend_kit_rs` examples + clippy/fmt (warn-only). Tauri is **not**
-  tested in CI (system deps); leave end-to-end builds to release.
-- `release.yml` (push a `v*.*.*` tag): builds Android APK (arm64 + armv7) and macOS universal DMG, attaches to
-  a published GitHub Release. To cut a release: `git tag v0.1.0 && git push origin v0.1.0`.
-- `deploy-web.yml` (push to `main`): builds WASM → Vite bundle → GitHub Pages at `/coalassistant/` base path.
+- `ci.yml` (push/PR) is the only workflow: consistency + master-data checks, frontend test/build,
+  `blend_kit` tests + examples, `blend_kit_server` tests, fmt and clippy.
+- Production deploy is **Railway + Supabase** via the repo-root `Dockerfile` (Node stage builds React, Rust
+  stage builds `blend_kit_server`, final image ships the server + static assets). See
+  `docs/railway-deployment.md` for the required `AUTH_*` / `DATABASE_URL` env vars.
 
 ## Conventions
 
