@@ -5,6 +5,7 @@ import type {
   MasterCoalEntry,
 } from "../types";
 import { INDICATOR_ORDER } from "../types";
+import { mergePurchaseTerms, type PenaltyTemplate } from "../penalty";
 import { normalizeCoalName } from "./coalName";
 import { driftedFob, type PriceAnchor } from "./priceDrift";
 
@@ -335,4 +336,44 @@ export function summarizePriceStatus(
     avgRatio,
     anchors: [...anchors],
   };
+}
+
+/** 采购扣款模板缺失告警 (Step 8): 一种煤 + 它匹配不到条款的那些指标. */
+export interface OrphanedGuaranteeWarning {
+  coal: string;
+  indicators: string[];
+}
+
+/**
+ * 扫描启用的煤, 找出"有采购保证值却在模板+覆盖里都找不到条款"的煤。
+ *
+ * 全局扣款模板只存 localStorage, 不跟 coal_prefs 一起同步到服务端
+ * (见 penaltyStorage.ts); 换设备登录后每种煤的 purchase_guarantees 正常
+ * 同步过来了, 但模板没有 —— 这些煤本该计价却被 mergePurchaseTerms 静默
+ * 按无扣款处理, 两台设备算出的成本不一致但界面上什么都不会报错。
+ *
+ * 只看 `effectiveEnabled` 的煤: 用户已经停用/隐藏的煤即使配置不完整也不是
+ * 当前会影响到的钱, 不该吓用户。
+ */
+export function collectOrphanedGuarantees(
+  pool: readonly ResolvedCoal[],
+  prefs: CoalPrefs,
+  template: PenaltyTemplate | null,
+): OrphanedGuaranteeWarning[] {
+  const warnings: OrphanedGuaranteeWarning[] = [];
+  for (const coal of pool) {
+    if (!coal.effectiveEnabled) continue;
+    const pref = prefs[coal.name];
+    const guarantees = pref?.purchase_guarantees;
+    if (!guarantees || Object.keys(guarantees).length === 0) continue;
+    const { orphanedGuarantees } = mergePurchaseTerms(
+      template,
+      pref?.purchase_override,
+      guarantees,
+    );
+    if (orphanedGuarantees.length > 0) {
+      warnings.push({ coal: coal.name, indicators: orphanedGuarantees });
+    }
+  }
+  return warnings;
 }

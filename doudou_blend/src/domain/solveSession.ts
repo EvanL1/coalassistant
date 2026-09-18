@@ -1,5 +1,5 @@
 import type { BlendRequest, BlendResult } from "../types";
-import type { PriceStatus } from "./resolvedCoal";
+import type { OrphanedGuaranteeWarning, PriceStatus } from "./resolvedCoal";
 
 export interface SolveSnapshot {
   requestId: number;
@@ -9,6 +9,8 @@ export interface SolveSnapshot {
   enabledCount: number;
   /** 本次求解所用价格的可信度摘要(报价时效 + 是否推算) */
   price?: PriceStatus | null;
+  /** 采购扣款模板缺失告警 (Step 8); 空数组 = 没发现孤儿保证值. */
+  orphanedGuarantees?: OrphanedGuaranteeWarning[];
 }
 
 export class LatestRequestTracker {

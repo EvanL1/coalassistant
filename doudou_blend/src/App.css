@@ -127,36 +127,22 @@ button {
 }
 
 /* ========== Cost Card (今日屏蓝色大卡) ========== */
+/* .today-cost 包一个 CostCard(报价/扣款明细) + 一个状态卡(数值界内/质量/报价时效),
+   两张蓝卡上下堆叠, 靠 flex + gap 控制间距, 而不是各自的 margin-bottom. */
+.today-cost {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.today-cost > .cost-card {
+  margin-bottom: 0;
+}
 .cost-card {
   background: linear-gradient(135deg, var(--c-primary), var(--c-primary-dark));
   border-radius: var(--radius);
   padding: 20px;
   color: white;
   margin-bottom: 16px;
-}
-.cost-label {
-  font-size: 13px;
-  opacity: 0.85;
-  margin-bottom: 6px;
-}
-.cost-amount {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-.cost-int {
-  font-size: 44px;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -1px;
-}
-.cost-dec {
-  font-size: 22px;
-  font-weight: 700;
-}
-.cost-unit {
-  font-size: 14px;
-  opacity: 0.85;
 }
 .cost-meta {
   display: flex;
@@ -171,6 +157,51 @@ button {
   padding: 4px 10px;
   border-radius: 999px;
   font-weight: 600;
+}
+
+/* ========== Cost Card 明细行 (到厂价/买入修正/预计扣款/净成本) ========== */
+.cost-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 14px;
+  padding: 4px 0;
+}
+.cost-row--adjust span:last-child {
+  color: #bbf7d0;
+}
+.cost-row--penalty span:last-child {
+  color: #ffd666;
+}
+.cost-row--net {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.3);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+/* 采购扣款模板缺失告警: 后果是花钱算错, 要显眼, 不能是角落里的小字 */
+.cost-orphan-warning {
+  background: rgba(153, 27, 27, 0.35);
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.cost-orphan-warning-title {
+  font-weight: 700;
+  color: #ffe4e6;
+  margin-bottom: 2px;
+}
+.cost-orphan-warning-body {
+  opacity: 0.95;
+}
+.cost-orphan-warning-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
 }
 
 /* ========== Recipe ========== */
@@ -287,6 +318,17 @@ button {
 .evaluation-fail {
   background: #fee2e2;
   color: #991b1b;
+}
+/* 计价指标: 偏离合同按条款扣钱, 不是简单的通过/未通过二元判定 */
+.indicator-penalty {
+  flex-shrink: 0;
+  padding: 2px 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 600;
+  background: #ffedd5;
+  color: #9a3412;
+  white-space: nowrap;
 }
 
 /* ========== Action Buttons ========== */

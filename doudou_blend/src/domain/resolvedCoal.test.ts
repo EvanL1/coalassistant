@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { CoalPref } from "../storage";
+import type { CoalPref, CoalPrefs } from "../storage";
 import type { MasterCoalEntry } from "../types";
+import type { PenaltyTemplate } from "../penalty";
 import {
+  collectOrphanedGuarantees,
   resolveCoal,
   resolveCoalPool,
   summarizePriceStatus,
@@ -413,5 +415,83 @@ describe("summarizePriceStatus", () => {
       drift,
     );
     expect(summarizePriceStatus(pool, []).oldestQuotedAt).toBe("2026-06-30");
+  });
+});
+
+describe("collectOrphanedGuarantees (Step 8: 采购扣款模板缺失告警)", () => {
+  const secondCoal: MasterCoalEntry = {
+    ...masterCoal,
+    name: "第二煤",
+    fob: 800,
+  };
+
+  it("启用煤有保证值但模板/覆盖里找不到条款时计入警告", () => {
+    const prefs: CoalPrefs = {
+      测试主煤: { purchase_guarantees: { S: 0.5 } },
+    };
+    const pool = resolveCoalPool([masterCoal], [], prefs);
+
+    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([
+      { coal: "测试主煤", indicators: ["S"] },
+    ]);
+  });
+
+  it("模板能匹配到条款时不产出警告", () => {
+    const prefs: CoalPrefs = {
+      测试主煤: { purchase_guarantees: { S: 0.5 } },
+    };
+    const template: PenaltyTemplate = {
+      clauses: [
+        {
+          indicator: "S",
+          direction: "Upper",
+          penalty: { tiers: [{ rate: 80 }], reject: 1.5 },
+        },
+      ],
+    };
+    const pool = resolveCoalPool([masterCoal], [], prefs);
+
+    expect(collectOrphanedGuarantees(pool, prefs, template)).toEqual([]);
+  });
+
+  it("没有保证值的煤不计入警告 (没配置不是配置丢了)", () => {
+    const prefs: CoalPrefs = {};
+    const pool = resolveCoalPool([masterCoal], [], prefs);
+
+    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([]);
+  });
+
+  it("停用/隐藏的煤即使有孤儿保证值也不计入警告", () => {
+    const prefs: CoalPrefs = {
+      测试主煤: { enabled: false, purchase_guarantees: { S: 0.5 } },
+    };
+    const pool = resolveCoalPool([masterCoal], [], prefs);
+
+    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([]);
+  });
+
+  it("多种煤各自的孤儿指标分别列出", () => {
+    const prefs: CoalPrefs = {
+      测试主煤: { purchase_guarantees: { S: 0.5, A: 10 } },
+      第二煤: { purchase_guarantees: { G: 70 } },
+    };
+    const pool = resolveCoalPool([masterCoal, secondCoal], [], prefs);
+
+    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([
+      { coal: "测试主煤", indicators: ["S", "A"] },
+      { coal: "第二煤", indicators: ["G"] },
+    ]);
+  });
+
+  it("单煤显式排除的指标不计入警告", () => {
+    const prefs: CoalPrefs = {
+      测试主煤: {
+        purchase_guarantees: { S: 0.5 },
+        purchase_override: { excluded_indicators: ["S"] },
+      },
+    };
+    const pool = resolveCoalPool([masterCoal], [], prefs);
+
+    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([]);
   });
 });
