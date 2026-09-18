@@ -23,7 +23,10 @@ function indicatorLabel(indicator: string): string {
  * 本该让用户看见的数字重新藏起来). 没有计价条款时 net_per_ton === cif_per_ton,
  * 大字号数值跟老界面完全一致, 标签(最低到厂价)也不变.
  *
- * 买入修正/预计扣款为 0 时隐藏该行.
+ * 三行明细 (到厂价/买入修正/预计扣款) 都在"没内容"时隐藏: 买入修正/预计扣款
+ * 为 0 时各自隐藏; 到厂价则是当它跟大字号净成本相等时隐藏(此时再列一行纯属
+ * 重复), 也就是 `!detailed` 时明细行整体不渲染 —— 没配置计价条款的用户看到的
+ * 就是过去那一个大数字, 一行明细都不多.
  *
  * `orphanedGuarantees` (Step 8): 有采购保证值却匹配不到扣款条款的煤 ——
  * 通常是全局扣款模板没同步到这台设备 (模板只存 localStorage, 见
@@ -39,6 +42,7 @@ export function CostCard({
 }) {
   const hasAdjust = Math.abs(cost.purchase_adjust_per_ton ?? 0) > 1e-6;
   const hasPenalty = Math.abs(cost.penalty_per_ton ?? 0) > 1e-6;
+  const detailed = hasAdjust || hasPenalty;
   const netPerTon = cost.net_per_ton ?? cost.cif_per_ton;
   const { int: costInt, dec: costDec } = formatPrice(netPerTon);
 
@@ -63,15 +67,19 @@ export function CostCard({
         </div>
       )}
       <div className="cost-label">最低到厂价</div>
-      <div className="cost-amount">
+      <div className="cost-amount" data-testid="cost-headline">
         <span className="cost-int">{costInt}</span>
         <span className="cost-dec">.{costDec}</span>
         <span className="cost-unit">元/吨</span>
       </div>
-      <div className="cost-row">
-        <span>到厂价</span>
-        <span data-testid="cost-cif">{YUAN(cost.cif_per_ton)}</span>
-      </div>
+      {/* 到厂价明细行只在净成本偏离报价时才有意义; 没有计价条款时两者相等,
+          再列一行纯属重复大字号, 索性不渲染 —— 界面跟没有这个功能时完全一样. */}
+      {detailed && (
+        <div className="cost-row">
+          <span>到厂价</span>
+          <span data-testid="cost-cif">{YUAN(cost.cif_per_ton)}</span>
+        </div>
+      )}
       {hasAdjust && (
         <div className="cost-row cost-row--adjust">
           <span>买入修正</span>

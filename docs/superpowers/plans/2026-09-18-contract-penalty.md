@@ -2241,10 +2241,16 @@ formatPrice"会连这部分一起删掉。**执行时发现后立即停下汇报
   净成本才是 LP 实际求最优的数字，到厂价条款生效后只是报价，大字号主位必须
   跟着净成本走，否则这个功能要展示的数字反而被继续藏起来。没有计价条款时
   `net_per_ton === cif_per_ton`，大字号数值和老界面完全一致，界面观感不变。
-- 大字号下方是明细行：到厂价（`cost.cif_per_ton`，恒定展示）、买入修正、
-  预计扣款（后两行 `Math.abs(...) > 1e-6` 时才显示，值为 0/缺失就隐藏）。
+- 大字号下方是明细行：到厂价、买入修正、预计扣款。三行都在"没内容"时不渲染：
+  买入修正/预计扣款各自 `Math.abs(...) > 1e-6` 时才显示；到厂价则挂在
+  `detailed = hasAdjust || hasPenalty` 上 —— 没有计价条款时它跟大字号净成本
+  完全相等，再列一行纯属重复，索性不渲染。也就是说：**没配置计价条款的用户,
+  明细行一行都不出现, 卡片就是过去那一个大数字**，跟启用条款前像素级一致。
 - 额外加了 Step 8（孤儿保证值告警，见下方），`orphanedGuarantees` 非空时在卡片
   顶部插入 `role="alert"` 的红色告警块，点名煤种和指标。
+- 大字号主位加了 `data-testid="cost-headline"`，跟三行明细各自的 testid
+  （`cost-cif`/`cost-adjust`/`cost-penalty`）一样，是为了避免"到厂价"和"净成本"
+  可能渲染出相同文本时用 `getByText` 查出歧义。
 
 ```tsx
 import { INDICATOR_LABEL } from "../types";
@@ -2272,6 +2278,7 @@ export function CostCard({
 }) {
   const hasAdjust = Math.abs(cost.purchase_adjust_per_ton ?? 0) > 1e-6;
   const hasPenalty = Math.abs(cost.penalty_per_ton ?? 0) > 1e-6;
+  const detailed = hasAdjust || hasPenalty;
   const netPerTon = cost.net_per_ton ?? cost.cif_per_ton;
   const { int: costInt, dec: costDec } = formatPrice(netPerTon);
 
@@ -2283,15 +2290,17 @@ export function CostCard({
         </div>
       )}
       <div className="cost-label">最低到厂价</div>
-      <div className="cost-amount">
+      <div className="cost-amount" data-testid="cost-headline">
         <span className="cost-int">{costInt}</span>
         <span className="cost-dec">.{costDec}</span>
         <span className="cost-unit">元/吨</span>
       </div>
-      <div className="cost-row">
-        <span>到厂价</span>
-        <span>{YUAN(cost.cif_per_ton)}</span>
-      </div>
+      {detailed && (
+        <div className="cost-row">
+          <span>到厂价</span>
+          <span>{YUAN(cost.cif_per_ton)}</span>
+        </div>
+      )}
       {hasAdjust && (
         <div className="cost-row cost-row--adjust">
           <span>买入修正</span>
@@ -2601,7 +2610,8 @@ cd doudou_blend && npm test && npm run build && npm run check:consistency && npm
 启动本地服务与前端，在合同屏按本合同录入：灰 ≤10% 计价 80 元/吨·%、拒收 11.5；
 粘结 ≥85 计价 5 元/吨·点、拒收 80。求解后确认：
 
-- 成本卡出现"预计扣款"与"净成本"两行
+- 成本卡大字号主位变成净成本（不再等于到厂价），下方出现"到厂价"与"预计扣款"
+  两行明细（没有计价条款的煤池对照组应该看不到任何明细行，只有大字号）
 - 粘结指标显示"扣 N 元/吨"而非红色不合格
 - 配方相对全硬约束时更便宜（净成本更低）
 
@@ -2617,6 +2627,14 @@ cd /Users/lyf/dev/coalassistant && git diff main...HEAD --stat
 ```bash
 git add -A && git commit -m "test: 合同扣款建模全量验证" || echo "无待提交改动"
 ```
+
+**遗留清理候选（Task 7 执行时顺带发现，不在本计划范围内，留给后续单独的清理改动）：**
+`doudou_blend/src/storage.ts` 里的 `HistoryEntry` / `getHistory` / `appendHistory`
+（对应 `KEY_HISTORY = "doudou_blend.history.v1"` 这个 localStorage key）是死代码 ——
+历史方案早就全部走 `backend.ts` 的 HTTP 接口 + PostgreSQL 了，`HistoryScreen.tsx`
+/ `MeScreen.tsx` 只调用 `backend.clearHistory` / `backend.setMeasuredQuality`，
+没有任何屏幕调用这三个 `storage.ts` 导出。删除前建议单独确认没有遗留用户数据
+依赖这个 key，且这类删除应该单独一次改动、单独审查，不要夹在功能改动里。
 
 ---
 
