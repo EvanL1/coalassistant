@@ -592,15 +592,19 @@ fn validate_penalty(
                 ));
             }
         }
-        Direction::Range => {
-            unreachable!("两处调用方 (validate_request / validate_purchase_terms) 已提前拒绝 Range")
-        }
+        Direction::Range => return Err(format!("{label} 区间型指标不支持计价")),
     }
     Ok(())
 }
 ```
 
 `validate_penalty` 不需要 `pub(crate)`：两处调用方都在同一文件内。
+
+`Direction::Range` 分支保持显式 `return Err(...)`，不要用 `unreachable!()`：两个 crate 的
+release profile 都设了 `panic = "abort"`（`blend_kit_rs/Cargo.toml` / `blend_kit_server/Cargo.toml`），
+一个可达的 panic 会直接 abort 整个服务进程、`CatchPanicLayer` 也拦不住，所有 in-flight 请求一起死。
+校验函数属于请求边界代码，永远不能有这种失败模式；换成显式 `match` 分支（而非 `_ =>` 通配）已经能
+让编译器在 `Direction` 新增变体时报错，`unreachable!()` 在这里没有额外收益，只有下行风险。
 
 - [ ] **Step 4: 运行测试**
 

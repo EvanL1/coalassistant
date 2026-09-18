@@ -483,9 +483,7 @@ fn validate_penalty(
                 ));
             }
         }
-        Direction::Range => {
-            unreachable!("两处调用方 (validate_request / validate_purchase_terms) 已提前拒绝 Range")
-        }
+        Direction::Range => return Err(format!("{label} 区间型指标不支持计价")),
     }
     Ok(())
 }
