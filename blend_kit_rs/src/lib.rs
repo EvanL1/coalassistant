@@ -7,6 +7,7 @@
 //!   → 3 个业务视图 (成本结构 / 实物订单 / 指标体检)
 pub mod model;
 pub mod optimizer;
+mod penalty;
 pub mod petrography;
 pub mod predict;
 mod quality;
@@ -1775,6 +1776,412 @@ mod tests {
             result.quality_status,
             QualityStatus::NeedsReview,
             "正确配方不应被盖上需要复核"
+        );
+    }
+
+    // ========================================================================
+    // 买入侧: 按采购合同扣款与水分折算修正到厂价
+    // ========================================================================
+
+    fn purchase_ash_terms(guarantee: f64, rate: f64, reject: f64) -> PurchaseTerms {
+        PurchaseTerms {
+            clauses: vec![PurchaseClause {
+                indicator: "A".into(),
+                direction: Direction::Upper,
+                guarantee,
+                penalty: Penalty {
+                    tiers: vec![PenaltyTier { width: None, rate }],
+                    reject,
+                },
+            }],
+            contract_moisture: None,
+            moisture_excess_double_threshold: None,
+        }
+    }
+
+    /// 买入侧扣款是折扣: 让净成本**下降**, 与卖出侧方向相反.
+    #[test]
+    fn test_purchase_deduction_lowers_net_cost() {
+        let mut coal = coal_from_tuple(
+            "甲",
+            (1.0, 10.5, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 100.0),
+        );
+        coal.purchase_terms = Some(purchase_ash_terms(10.0, 80.0, 12.0));
+
+        let request = BlendRequest {
+            coals: vec![coal],
+            specs: Vec::new(),
+            total_quantity: Some(10.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "应可解: {:?}", result.reason);
+
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            (cost.cif_per_ton - 1100.0).abs() < 1e-6,
+            "cif 应保持报价原值"
+        );
+        assert!(
+            (cost.purchase_adjust_per_ton + 40.0).abs() < 1e-6,
+            "买入修正应为 −40, 实得 {}",
+            cost.purchase_adjust_per_ton
+        );
+        assert!(
+            (cost.net_per_ton - 1060.0).abs() < 1e-6,
+            "净成本应为 1060, 实得 {}",
+            cost.net_per_ton
+        );
+        assert!(
+            cost.total_net
+                .is_some_and(|value| (value - 10600.0).abs() < 1e-4),
+            "净成本总额应为 10600, 实得 {:?}",
+            cost.total_net
+        );
+        assert!(
+            cost.total_purchase_adjust
+                .is_some_and(|value| (value + 400.0).abs() < 1e-4),
+            "买入修正总额应为 −400, 实得 {:?}",
+            cost.total_purchase_adjust
+        );
+
+        let order = result.orders.first().expect("应有订单");
+        assert!(
+            (order.cif_eff_per_ton - 1060.0).abs() < 1e-6,
+            "订单单价应为修正后价, 实得 {}",
+            order.cif_eff_per_ton
+        );
+    }
+
+    /// 越过采购合同拒收线的煤被剔出煤池并留下 warning.
+    #[test]
+    fn test_coal_beyond_purchase_reject_is_dropped() {
+        let mut dirty = coal_from_tuple(
+            "脏煤",
+            (1.0, 13.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 900.0, 0.0),
+        );
+        dirty.purchase_terms = Some(purchase_ash_terms(10.0, 80.0, 12.0));
+        let clean = coal_from_tuple(
+            "好煤",
+            (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1200.0, 0.0),
+        );
+
+        let request = BlendRequest {
+            coals: vec![dirty, clean],
+            specs: Vec::new(),
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "剩余煤应仍可解");
+        assert!(
+            !result.recipe.contains_key("脏煤"),
+            "越拒收线的煤不应入配方"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("脏煤")),
+            "应有剔除警告, 实得 {:?}",
+            result.warnings
+        );
+    }
+
+    /// 符号哨兵: 买入扣款把钱**少付**掉, 修正额必须严格为负、净成本严格低于到厂价.
+    /// 符号写反时每个数字都仍然"看着合理", 只有这条断言会响.
+    #[test]
+    fn test_purchase_adjust_sign_is_strictly_a_discount() {
+        let mut coal = coal_from_tuple(
+            "甲",
+            (1.0, 11.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 100.0),
+        );
+        coal.purchase_terms = Some(purchase_ash_terms(10.0, 80.0, 12.0));
+
+        let request = BlendRequest {
+            coals: vec![coal],
+            specs: Vec::new(),
+            total_quantity: Some(100.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "应可解: {:?}", result.reason);
+
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            cost.purchase_adjust_per_ton < 0.0,
+            "买入修正必须是折扣(负数), 实得 {}",
+            cost.purchase_adjust_per_ton
+        );
+        assert!(
+            cost.net_per_ton < cost.cif_per_ton,
+            "被扣款的煤净成本必须低于到厂价, 实得 net {} vs cif {}",
+            cost.net_per_ton,
+            cost.cif_per_ton
+        );
+        assert!(
+            cost.total_purchase_adjust.is_some_and(|value| value < 0.0),
+            "买入修正总额同样必须为负, 实得 {:?}",
+            cost.total_purchase_adjust
+        );
+        assert!(
+            cost.total_net < cost.total_cif,
+            "净成本总额必须低于到厂价总额, 实得 {:?} vs {:?}",
+            cost.total_net,
+            cost.total_cif
+        );
+    }
+
+    /// 修正必须进 LP 目标, 不能只进报表: 报价更贵但扣款后更便宜的煤应被选中.
+    /// 只改三视图、忘了改成本系数时, 上面几条仍会全绿, 只有这条会红.
+    #[test]
+    fn test_purchase_discount_changes_lp_choice() {
+        let cheap_quote = coal_from_tuple(
+            "报价便宜",
+            (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+        );
+        let mut discounted = coal_from_tuple(
+            "扣款后便宜",
+            (1.0, 11.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1050.0, 0.0),
+        );
+        // 灰分超保证 1.0, 80 元/吨·% ⇒ 扣 80 ⇒ 到厂价 1050 → 970, 反超 1000.
+        discounted.purchase_terms = Some(purchase_ash_terms(10.0, 80.0, 12.0));
+
+        let request = BlendRequest {
+            coals: vec![cheap_quote, discounted],
+            specs: Vec::new(),
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "应可解: {:?}", result.reason);
+        assert!(
+            result
+                .recipe
+                .get("扣款后便宜")
+                .is_some_and(|ratio| (ratio - 1.0).abs() < 1e-4),
+            "LP 应按修正后价选煤, 实得配方 {:?}",
+            result.recipe
+        );
+
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            (cost.net_per_ton - 970.0).abs() < 1e-3,
+            "净成本应为 970, 实得 {}",
+            cost.net_per_ton
+        );
+    }
+
+    /// 两侧同时生效: 买入折扣与卖出扣款方向相反, 净成本必须是三项代数和.
+    /// 甲 A=10.5: 买入保证 10.0 扣 0.5×80 = 40 (降), 卖出合同界 10.0 扣 0.5×30 = 15 (升).
+    #[test]
+    fn test_both_sides_compose_in_opposite_directions() {
+        let mut coal = coal_from_tuple(
+            "甲",
+            (1.0, 10.5, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+        );
+        coal.purchase_terms = Some(purchase_ash_terms(10.0, 80.0, 12.0));
+
+        let request = BlendRequest {
+            coals: vec![coal],
+            specs: vec![priced_upper_spec(
+                "A",
+                10.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 30.0,
+                }],
+                13.0,
+            )],
+            total_quantity: Some(100.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "两侧同开应可解: {:?}", result.reason);
+
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            (cost.cif_per_ton - 1000.0).abs() < 1e-6,
+            "cif 应保持报价原值, 实得 {}",
+            cost.cif_per_ton
+        );
+        assert!(
+            (cost.purchase_adjust_per_ton + 40.0).abs() < 1e-3,
+            "买入修正应为 −40, 实得 {}",
+            cost.purchase_adjust_per_ton
+        );
+        assert!(
+            (cost.penalty_per_ton - 15.0).abs() < 1e-3,
+            "卖出扣款应为 +15, 实得 {}",
+            cost.penalty_per_ton
+        );
+        // 方向相反: 一负一正, 不是同号叠加.
+        assert!(
+            cost.purchase_adjust_per_ton < 0.0 && cost.penalty_per_ton > 0.0,
+            "两侧应反向, 实得 买入 {} / 卖出 {}",
+            cost.purchase_adjust_per_ton,
+            cost.penalty_per_ton
+        );
+        assert!(
+            (cost.net_per_ton
+                - (cost.cif_per_ton + cost.purchase_adjust_per_ton + cost.penalty_per_ton))
+                .abs()
+                < 1e-6,
+            "净成本必须是三项代数和, 实得 {}",
+            cost.net_per_ton
+        );
+        assert!(
+            (cost.net_per_ton - 975.0).abs() < 1e-3,
+            "净成本应为 1000 − 40 + 15 = 975, 实得 {}",
+            cost.net_per_ton
+        );
+    }
+
+    /// 水分折算只打 fob 的折, 运费按实收湿重全额付 —— 湿煤是净亏运费, 不是中性.
+    #[test]
+    fn test_moisture_discounts_fob_but_not_freight_end_to_end() {
+        let mut coal = coal_from_tuple(
+            "湿煤",
+            (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 10.0, 1000.0, 100.0),
+        );
+        coal.purchase_terms = Some(PurchaseTerms {
+            clauses: Vec::new(),
+            contract_moisture: Some(8.0),
+            moisture_excess_double_threshold: None,
+        });
+
+        let request = BlendRequest {
+            coals: vec![coal],
+            specs: Vec::new(),
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "应可解: {:?}", result.reason);
+
+        let cost = result.cost.expect("应有成本");
+        // 只折 fob: 1000×(0.90/0.92) + 100 = 1078.2609; 若连运费一起折则是 1100×(0.90/0.92) = 1076.0870.
+        let fob_only = 1000.0 * (0.90 / 0.92) + 100.0;
+        let if_freight_also_discounted = 1100.0 * (0.90 / 0.92);
+        assert!(
+            (cost.net_per_ton - fob_only).abs() < 1e-4,
+            "净成本应为 {fob_only} (只折 fob), 实得 {}",
+            cost.net_per_ton
+        );
+        assert!(
+            (cost.net_per_ton - if_freight_also_discounted).abs() > 1.0,
+            "净成本不应等于连运费一起折的 {if_freight_also_discounted}"
+        );
+        assert!(
+            (cost.frt_per_ton - 100.0).abs() < 1e-9,
+            "运费展示值必须是报价原值, 实得 {}",
+            cost.frt_per_ton
+        );
+        assert!(
+            (cost.purchase_adjust_per_ton - 1000.0 * (0.90 / 0.92 - 1.0)).abs() < 1e-4,
+            "修正额应恰等于 fob 的折扣部分, 实得 {}",
+            cost.purchase_adjust_per_ton
+        );
+    }
+
+    /// 无采购条款时买入修正必须是**精确** 0, 不是 1e-13 量级的浮点渣.
+    ///
+    /// Σ(fob+frt)·x 与 Σfob·x + Σfrt·x 数学上相等、浮点上不等; 两个千元级大数相减
+    /// 得到的"零"会带上残差, 再乘以总吨数放大. 修正额必须逐煤按 (修正价−报价) 算,
+    /// 无条款时每项恰为 0.0·x = 0.0, 求和仍是精确 0.
+    #[test]
+    fn test_no_purchase_terms_yields_exactly_zero_adjust() {
+        let request = BlendRequest {
+            coals: vec![
+                coal_from_tuple(
+                    "甲",
+                    (1.0, 12.3, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.39, 77.21),
+                ),
+                coal_from_tuple(
+                    "乙",
+                    (1.0, 6.1, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1400.87, 120.33),
+                ),
+            ],
+            specs: vec![Spec::upper("A", 8.7)],
+            total_quantity: Some(123457.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "应可解: {:?}", result.reason);
+        assert_eq!(result.recipe.len(), 2, "本用例须真正混配才有意义");
+
+        let cost = result.cost.expect("应有成本");
+        assert_eq!(
+            cost.purchase_adjust_per_ton, 0.0,
+            "无采购条款时买入修正必须精确为 0, 实得 {:e}",
+            cost.purchase_adjust_per_ton
+        );
+        assert_eq!(cost.total_purchase_adjust, Some(0.0));
+        assert_eq!(
+            cost.net_per_ton, cost.cif_per_ton,
+            "净成本应与到厂价逐位相等"
+        );
+    }
+
+    /// 买入侧修正必须穿过 solve_json 的字符串契约 —— 这是 server/WASM 实际走的唯一入口.
+    ///
+    /// 上面几条测的是 Rust 结构体路径; 存量测试只覆盖了 purchase_terms **缺席**的老 JSON,
+    /// 它**在场**时的 serde 字段名从未被验证过. 任一字段名对不上, 结构体路径全绿而
+    /// 线上静默按报价原值求解.
+    /// 甲: 水分 10% 超双倍阈值 9% ⇒ M_eff = 2×10−9 = 11%; 灰分超保证 0.5 ⇒ 扣 40.
+    /// 到厂价 = 1000×(0.89/0.92) + 100 − 40 = 1027.3913.
+    #[test]
+    fn test_solve_json_applies_purchase_terms() {
+        let payload = r#"{
+            "coals": [
+                {
+                    "name":"甲",
+                    "props":{"S":1.0,"A":10.5,"V":24.0,"G":88.0,"Y":16.0,"petro":0.10,"CSR":65.0,"M":10.0},
+                    "fob":1000.0,
+                    "frt":100.0,
+                    "purchase_terms":{
+                        "clauses":[{
+                            "indicator":"A",
+                            "direction":"Upper",
+                            "guarantee":10.0,
+                            "penalty":{"tiers":[{"rate":80.0}],"reject":12.0}
+                        }],
+                        "contract_moisture":8.0,
+                        "moisture_excess_double_threshold":9.0
+                    }
+                }
+            ],
+            "specs": [],
+            "total_quantity": 100.0,
+            "truncate_decimal": false
+        }"#;
+        let output = solve_json(payload);
+        let result: BlendResult = serde_json::from_str(&output).expect("结果应可反序列化");
+        assert!(result.ok, "应可求解: {:?}", result.reason);
+
+        let expected_cif_eff = 1000.0 * (0.89 / 0.92) + 100.0 - 40.0;
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            (cost.cif_per_ton - 1100.0).abs() < 1e-6,
+            "cif 应保持报价原值, 实得 {}",
+            cost.cif_per_ton
+        );
+        assert!(
+            (cost.net_per_ton - expected_cif_eff).abs() < 1e-6,
+            "净成本应为 {expected_cif_eff}, 实得 {} —— 为 1100 说明 purchase_terms 没被解析",
+            cost.net_per_ton
+        );
+        assert!(
+            (cost.purchase_adjust_per_ton - (expected_cif_eff - 1100.0)).abs() < 1e-6,
+            "买入修正应为 {}, 实得 {}",
+            expected_cif_eff - 1100.0,
+            cost.purchase_adjust_per_ton
+        );
+        let order = result.orders.first().expect("应有订单");
+        assert!(
+            (order.cif_eff_per_ton - expected_cif_eff).abs() < 1e-6,
+            "订单单价应为修正后价, 实得 {}",
+            order.cif_eff_per_ton
         );
     }
 }

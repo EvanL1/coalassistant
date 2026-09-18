@@ -4,6 +4,7 @@
 //! 显式接收已训练且通过门控的评估器，岩相在 LP 后按全方差定律复验并收紧重算。
 
 use crate::model::*;
+use crate::penalty::effective_cif;
 use crate::petrography::{self, Petrography, NOTCH_WINDOW};
 use crate::predict::EvaluatorSet;
 use crate::quality::{
@@ -98,7 +99,12 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
             .filter(|indicator| !coal.has(indicator))
             .collect();
         if missing.is_empty() {
-            kept.push(coal);
+            // 自身化验值越过采购合同拒收线的煤根本收不进来, 与缺指标同样剔出煤池.
+            if effective_cif(coal).is_none() {
+                warnings.push(format!("剔除 {}: 化验值越过采购合同拒收线", coal.name));
+            } else {
+                kept.push(coal);
+            }
         } else {
             warnings.push(format!(
                 "剔除 {}: 缺指标 {}",
@@ -581,7 +587,11 @@ fn solve_once(
     mut warnings: Vec<String>,
 ) -> Option<(BlendResult, Vec<f64>)> {
     let count = coals.len();
-    let mut costs: Vec<f64> = coals.iter().map(|coal| coal.cif()).collect();
+    // 买入侧扣款与水分折算已折进成本系数; 越拒收线的煤在候选筛选阶段已剔除, 此处兜底用报价.
+    let mut costs: Vec<f64> = coals
+        .iter()
+        .map(|coal| effective_cif(coal).unwrap_or_else(|| coal.cif()))
+        .collect();
     let mut inequalities = Vec::new();
     let mut bounds = Vec::new();
 
@@ -658,6 +668,16 @@ fn solve_once(
         .map(|(coal, ratio)| coal.frt * ratio)
         .sum();
     let cif_per_ton = fob_per_ton + frt_per_ton;
+    // 逐煤先算"修正价 − 报价"再加权, 而不是拿两个千元级总额相减.
+    // 无采购条款时每一项恰是 0.0·x, 求和仍是精确 0; 相减形式数学上等价, 浮点上会留下
+    // 1e-13 量级残差, 再乘以总吨数放大成一笔并不存在的买入修正.
+    let purchase_adjust_per_ton: f64 = coals
+        .iter()
+        .zip(&ratios)
+        .map(|(coal, ratio)| {
+            (effective_cif(coal).unwrap_or_else(|| coal.cif()) - coal.cif()) * ratio
+        })
+        .sum();
     let cost = CostBreakdown {
         fob_per_ton,
         frt_per_ton,
@@ -671,16 +691,18 @@ fn solve_once(
         total_cif: request
             .total_quantity
             .map(|quantity| quantity * cif_per_ton),
-        purchase_adjust_per_ton: 0.0,
+        purchase_adjust_per_ton,
         penalty_per_ton,
-        net_per_ton: cif_per_ton + penalty_per_ton,
-        total_purchase_adjust: request.total_quantity.map(|_| 0.0),
+        net_per_ton: cif_per_ton + purchase_adjust_per_ton + penalty_per_ton,
+        total_purchase_adjust: request
+            .total_quantity
+            .map(|quantity| quantity * purchase_adjust_per_ton),
         total_penalty: request
             .total_quantity
             .map(|quantity| quantity * penalty_per_ton),
         total_net: request
             .total_quantity
-            .map(|quantity| quantity * (cif_per_ton + penalty_per_ton)),
+            .map(|quantity| quantity * (cif_per_ton + purchase_adjust_per_ton + penalty_per_ton)),
     };
     let mut orders: Vec<OrderItem> = coals
         .iter()
@@ -695,7 +717,7 @@ fn solve_once(
                 fob_amount: tons.map(|value| value * coal.fob),
                 frt_amount: tons.map(|value| value * coal.frt),
                 cif_amount: tons.map(|value| value * coal.cif()),
-                cif_eff_per_ton: coal.cif(),
+                cif_eff_per_ton: effective_cif(coal).unwrap_or_else(|| coal.cif()),
             }
         })
         .collect();
