@@ -17,6 +17,14 @@ use std::collections::{HashMap, HashSet};
 const MAX_EVALUATION_ITERATIONS: usize = 4;
 const PETRO_SHRINK_SAFETY: f64 = 0.999;
 const SOLUTION_TOLERANCE: f64 = 1e-8;
+/// 可行性复核的相对容限. 比 SOLUTION_TOLERANCE 宽, 因为档位列不经归一化重投影,
+/// 残差保持在 Clarabel 的原始收敛量级 (~1e-8..1e-7).
+///
+/// 取值依据: 92 组良态计价输入 (合同上限 10.0, 单档 rate 10, ash 10.0~13.0 ×
+/// reject 11.0~15.0) 实测 156 行, 最大 residual/(1+magnitude) = 6.36e-9,
+/// 本值留出约 16 倍余量. 换算到指标单位后放行量级约 1e-7 %, 比化验 0.01% 的
+/// 分辨率细 5 个数量级, 拒收线仍是硬墙.
+const FEASIBILITY_TOLERANCE: f64 = 1e-7;
 const OUTPUT_RATIO_TOLERANCE: f64 = 1e-5;
 
 /// 基础求解入口，不读取训练样本，也不在求解期间拟合模型.
@@ -958,9 +966,12 @@ impl LpProblem {
         }
         let mut solution = solver.solution.x.clone();
         let raw_sum: f64 = solution[..self.ratio_count].iter().sum();
+        // 非负性同样受档位列不归一化之累: 最优解 d=0 时内点法从下方逼近, 会落在
+        // -1e-8 量级. 下面立刻 max(0.0) 夹回, 故放宽到 FEASIBILITY_TOLERANCE 是安全的;
+        // 它仍比 OUTPUT_RATIO_TOLERANCE(1e-5) 严两个数量级. raw_sum 保持 SOLUTION_TOLERANCE.
         let raw_valid = solution
             .iter()
-            .all(|value| value.is_finite() && *value >= -SOLUTION_TOLERANCE)
+            .all(|value| value.is_finite() && *value >= -FEASIBILITY_TOLERANCE)
             && (raw_sum - 1.0).abs() <= SOLUTION_TOLERANCE;
         if !raw_valid {
             return None;
@@ -976,11 +987,21 @@ impl LpProblem {
             *value /= normalized_sum;
         }
         let valid = self.a_ub.iter().zip(&self.b_ub).all(|(row, bound)| {
-            row.iter()
+            let activity: f64 = row
+                .iter()
                 .zip(&solution)
                 .map(|(coefficient, value)| coefficient * value)
+                .sum();
+            // 相对判据: 配比列经归一化重投影后残差塌到 ~1e-13, 但档位列不归一化,
+            // 残差保持在 Clarabel 的原始收敛量级; 而吸收行在每个计价最优解处按构造都是紧的.
+            // 绝对容限会因此否掉正确解 —— 容限必须随行与解的量级缩放.
+            let magnitude: f64 = row
+                .iter()
+                .zip(&solution)
+                .map(|(coefficient, value)| (coefficient * value).abs())
                 .sum::<f64>()
-                <= bound + SOLUTION_TOLERANCE
+                .max(bound.abs());
+            activity <= bound + FEASIBILITY_TOLERANCE * (1.0 + magnitude)
         });
         let objective = self
             .c

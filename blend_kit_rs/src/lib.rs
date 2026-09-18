@@ -1621,4 +1621,104 @@ mod tests {
             "margin 1.0 把拒收线收紧到 11.0, 灰分 11.25 应判不可行"
         );
     }
+
+    /// 回归: 计价解曾被可行性复算误判为不可行.
+    ///
+    /// 机理: 吸收行在每个计价最优解处按构造都是紧的 (目标函数把 Σd 压到恰好等于偏离量);
+    /// 配比列经归一化重投影后残差塌到 ~1e-13, 但档位列不归一化, 残差保持在 Clarabel
+    /// 的原始收敛量级 ~1e-8..1e-7. 复算原本用绝对 1e-8, 于是把正确解判成越界 ——
+    /// 本例 ash=12.5/reject=13.0 曾解出 d=2.499999961849723, 吸收行残差 3.8e-8 > 1e-8,
+    /// 退化成 "约束冲突, LP 不可行". 相对判据 FEASIBILITY_TOLERANCE 修复.
+    #[test]
+    fn test_priced_solution_survives_feasibility_recheck() {
+        let request = BlendRequest {
+            coals: vec![coal_from_tuple(
+                "甲",
+                (1.0, 12.5, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+            )],
+            specs: vec![priced_upper_spec(
+                "A",
+                10.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 10.0,
+                }],
+                13.0,
+            )],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "计价解不应被复算误判不可行: {:?}", result.reason);
+
+        // 偏离 2.5 × 10 元 ⇒ 25 元/吨.
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            (cost.penalty_per_ton - 25.0).abs() < 1e-3,
+            "扣款应为 25 元/吨, 实得 {}",
+            cost.penalty_per_ton
+        );
+    }
+
+    /// 回归: 偏离恰为 0 时档位变量的最优解是 0, 内点法从下方逼近落在 -1e-8 量级,
+    /// 非负性门限 (同样因档位列不归一化) 曾据此判不可行. 煤正好压合同上限是常见情形.
+    #[test]
+    fn test_priced_zero_deviation_survives_nonnegativity_gate() {
+        let request = BlendRequest {
+            coals: vec![coal_from_tuple(
+                "甲",
+                (1.0, 10.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+            )],
+            specs: vec![priced_upper_spec(
+                "A",
+                10.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 10.0,
+                }],
+                14.0,
+            )],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "零偏离计价解应可行: {:?}", result.reason);
+
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            cost.penalty_per_ton.abs() < 1e-6,
+            "正好压合同上限不应有扣款, 实得 {}",
+            cost.penalty_per_ton
+        );
+    }
+
+    /// 放宽复算容限后拒收线仍须是硬墙: 超线 0.01% (化验一个刻度) 必须判不可行.
+    /// 相对判据的理论放行量约 1e-7 指标单位, 比化验分辨率细 5 个数量级;
+    /// 实测超线 1e-9 即被拦下, 正好压线则仍可行.
+    #[test]
+    fn test_reject_line_still_blocks_one_assay_increment() {
+        let solves = |ash: f64| -> bool {
+            let request = BlendRequest {
+                coals: vec![coal_from_tuple(
+                    "甲",
+                    (1.0, ash, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+                )],
+                specs: vec![priced_upper_spec(
+                    "A",
+                    10.0,
+                    vec![PenaltyTier {
+                        width: None,
+                        rate: 10.0,
+                    }],
+                    12.0,
+                )],
+                total_quantity: None,
+                truncate_decimal: false,
+            };
+            solve(&request).ok
+        };
+
+        assert!(solves(12.0), "正好压拒收线应可行");
+        assert!(!solves(12.01), "超拒收线 0.01% (化验一个刻度) 必须判不可行");
+    }
 }

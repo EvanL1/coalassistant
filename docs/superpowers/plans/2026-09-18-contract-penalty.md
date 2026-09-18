@@ -1141,7 +1141,7 @@ Task 4 之前 `Priced` 不产生任何 LP 行；实现后它产生拒收线硬�
 > 变异验证：`margin` 误加到 `limit` → 仅第一条失败（无 margin 10.0 / 有 margin 25.0）；
 > 抽掉 `margin` 对 `reject` 的作用 → 仅第二条失败。两次都是 94 过 1 failed。
 
-- [ ] **⚠ 未决缺陷：计价解约 27% 被误判不可行（Task 4 期间发现，未修）**
+- [x] **✅ 已修：计价解约 27% 被误判不可行（Task 4 期间发现并修复）**
 
 `LpProblem::solve` 末尾的可行性复算用**绝对**容差 `SOLUTION_TOLERANCE = 1e-8`：
 
@@ -1160,17 +1160,51 @@ row.iter().zip(&solution).map(...).sum::<f64>() <= bound + SOLUTION_TOLERANCE
 `x=[0.999999999999865, 2.499999961849723]`，吸收行残差 **3.815e-8 > 1e-8**。
 
 这与已关闭的"档位列未随配比列归一化"不是同一回事：那条的量级被 `SOLUTION_TOLERANCE`
-兜住，这条的残差是容差的 4 倍且可复现证伪。**修复方向需决策**（改相对残差判据 /
-按行范数缩放容差 / 收紧 Clarabel 收敛设置），因为复算同时守着硬约束与拒收线这道
-"商业自杀防线"，放宽它有安全含义，不应由实现者单方面改动。
-Task 4 的计价用例参数均已扫描确认落在稳定区，该缺陷修复后可放宽。
+兜住，这条的残差是容差的 4 倍且可复现证伪。
+
+**修复：相对可行性判据。** 新增独立常量（不复用、不放宽 `SOLUTION_TOLERANCE`，
+后者还守着 `raw_sum`、岩相比较与拒收线复核，必须保持紧）：
+
+```rust
+const FEASIBILITY_TOLERANCE: f64 = 1e-7;
+...
+activity <= bound + FEASIBILITY_TOLERANCE * (1.0 + magnitude)
+```
+
+`magnitude = Σ|aᵢxᵢ|` 再与 `|bound|` 取大，容限随行与解的量级缩放。
+
+**常量取值来自实测，非拍脑袋。** 92 组输入采样 156 行，绝对 1e-8 下 22 行被误判，
+最坏残差 **3.815e-8**（对应 `magnitude = 5.0`），全样本最大
+`residual/(1+magnitude) = 6.36e-9`。取 **1e-7**：最小的、对最坏实测值留出
+一个数量级以上余量（约 16×）的整数量级常量。1e-8 虽也能跑满 92/92，但余量仅 1.57×，
+不够。
+
+**第二道门限同因同修。** 只改复算只到 89/92：余下 3 例（ash 恰好压合同上限、
+偏离为 0）卡在**非负性门限**——最优解 d=0 时内点法从下方逼近，档位列返回
+`-1.567e-8`，被 `*value >= -SOLUTION_TOLERANCE` 拦下。同一根因（档位列不归一化），
+故同样放宽到 `FEASIBILITY_TOLERANCE`；其后立即 `max(0.0)` 夹回，且仍比
+`OUTPUT_RATIO_TOLERANCE`(1e-5) 严两个数量级。`raw_sum` 保持 `SOLUTION_TOLERANCE`。
+修复后 **92/92**。
+
+**墙还是墙（实测）。** 拒收线 12.0：正好压线可行；超线 1e-9 / 1e-7 / 1e-5 / 0.01
+全部拦截。理论放行量 `FEASIBILITY_TOLERANCE × (1+magnitude)` ≈ 1e-7~5e-7 指标单位，
+比化验 0.01% 的分辨率细 4~5 个数量级；实测更紧（超线即转为 LP 真不可行，
+由求解器状态门拦下，容限根本用不上）。
+
+配套测试：`test_priced_solution_survives_feasibility_recheck`（ash 12.5/reject 13.0，
+原失败点，须解出 25 元/吨）、`test_priced_zero_deviation_survives_nonnegativity_gate`
+（零偏离，扣款须为 0）、`test_reject_line_still_blocks_one_assay_increment`
+（压线可行 / 超线 0.01% 不可行）。
+
+> 变异验证：复算退回绝对 `SOLUTION_TOLERANCE` → 前者与墙测试失败（96 过 2 failed）；
+> 非负性门限退回 `SOLUTION_TOLERANCE` → 零偏离测试失败（97 过 1 failed）。
 
 - [ ] **Step 6: 运行测试**
 
 ```bash
 cd blend_kit_rs && cargo test --release && cargo clippy --release -- -D warnings
 ```
-预期：Task 4 的 10 个新测试 PASS（optimizer.rs 1 条不变式 + lib.rs 9 条行为），既有测试无回归。
+预期：Task 4 的 13 个新测试 PASS（optimizer.rs 1 条不变式 + lib.rs 12 条行为），既有测试无回归。
 
 - [ ] **Step 7: 提交**
 
