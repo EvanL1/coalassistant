@@ -4,7 +4,7 @@
 //! 显式接收已训练且通过门控的评估器，岩相在 LP 后按全方差定律复验并收紧重算。
 
 use crate::model::*;
-use crate::penalty::effective_cif;
+use crate::penalty::{cif_eff, cif_eff_or_quoted, clauses_missing_assay};
 use crate::petrography::{self, Petrography, NOTCH_WINDOW};
 use crate::predict::EvaluatorSet;
 use crate::quality::{
@@ -100,10 +100,31 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
             .collect();
         if missing.is_empty() {
             // 自身化验值越过采购合同拒收线的煤根本收不进来, 与缺指标同样剔出煤池.
-            if effective_cif(coal).is_none() {
-                warnings.push(format!("剔除 {}: 化验值越过采购合同拒收线", coal.name));
-            } else {
-                kept.push(coal);
+            match cif_eff(coal) {
+                Err(reason) => warnings.push(format!(
+                    "剔除 {}: {} 实测 {} 越过采购合同拒收线 {}",
+                    coal.name,
+                    label_zh(&reason.indicator),
+                    reason.value,
+                    reason.reject
+                )),
+                Ok(_) => {
+                    // 缺化验值的采购条款只是算不出扣款, 不该废掉这个煤 —— 全局模板下
+                    // 化验单缺项是常态. 留煤, 但要让用户知道这几项没计进扣款.
+                    let skipped = clauses_missing_assay(coal);
+                    if !skipped.is_empty() {
+                        warnings.push(format!(
+                            "{}: 采购条款缺化验值 {}, 本次不计买入扣款",
+                            coal.name,
+                            skipped
+                                .iter()
+                                .map(|indicator| label_zh(indicator))
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        ));
+                    }
+                    kept.push(coal);
+                }
             }
         } else {
             warnings.push(format!(
@@ -588,10 +609,7 @@ fn solve_once(
 ) -> Option<(BlendResult, Vec<f64>)> {
     let count = coals.len();
     // 买入侧扣款与水分折算已折进成本系数; 越拒收线的煤在候选筛选阶段已剔除, 此处兜底用报价.
-    let mut costs: Vec<f64> = coals
-        .iter()
-        .map(|coal| effective_cif(coal).unwrap_or_else(|| coal.cif()))
-        .collect();
+    let mut costs: Vec<f64> = coals.iter().map(|coal| cif_eff_or_quoted(coal)).collect();
     let mut inequalities = Vec::new();
     let mut bounds = Vec::new();
 
@@ -674,9 +692,7 @@ fn solve_once(
     let purchase_adjust_per_ton: f64 = coals
         .iter()
         .zip(&ratios)
-        .map(|(coal, ratio)| {
-            (effective_cif(coal).unwrap_or_else(|| coal.cif()) - coal.cif()) * ratio
-        })
+        .map(|(coal, ratio)| (cif_eff_or_quoted(coal) - coal.cif()) * ratio)
         .sum();
     let cost = CostBreakdown {
         fob_per_ton,
@@ -717,7 +733,8 @@ fn solve_once(
                 fob_amount: tons.map(|value| value * coal.fob),
                 frt_amount: tons.map(|value| value * coal.frt),
                 cif_amount: tons.map(|value| value * coal.cif()),
-                cif_eff_per_ton: effective_cif(coal).unwrap_or_else(|| coal.cif()),
+                cif_eff_per_ton: cif_eff_or_quoted(coal),
+                cif_eff_amount: tons.map(|value| value * cif_eff_or_quoted(coal)),
             }
         })
         .collect();

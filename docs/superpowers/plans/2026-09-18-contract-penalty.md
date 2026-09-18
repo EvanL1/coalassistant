@@ -35,7 +35,7 @@
 |---|---|---|
 | `blend_kit_rs/src/model.rs` | 修改 | 新增 `PenaltyTier` / `Penalty` / `PurchaseClause` / `PurchaseTerms`；`Enforcement::Priced`；`Spec.penalty`；`Coal.purchase_terms`；输出结构体新字段 |
 | `blend_kit_rs/src/quality.rs` | 修改 | `validate_request` 增加 7 条计价条款校验 |
-| `blend_kit_rs/src/penalty.rs` | **新建** | 买入侧扣款折算：`tiered_amount` / `effective_cif`。与 LP 无关的纯算术，独立成文件便于单测 |
+| `blend_kit_rs/src/penalty.rs` | **新建** | 买入侧扣款折算：`tiered_amount` / `cif_eff` / `cif_eff_or_quoted` / `clauses_missing_assay`。与 LP 无关的纯算术，独立成文件便于单测 |
 | `blend_kit_rs/src/optimizer.rs` | 修改 | `LpProblem` 支持档位列；计价约束行生成；罚款额回读；买入侧接线 |
 | `blend_kit_rs/src/lib.rs` | 修改 | `mod penalty;`；`coal_from_tuple` 补 `purchase_terms: None`；端到端测试 |
 | `doudou_blend/src/types.ts` | 修改 | 镜像上述 Rust 类型 |
@@ -305,7 +305,7 @@ export interface PurchaseTerms {
   total_penalty?: number | null;
   total_net?: number | null;
 ```
-`OrderItem` 末尾加 `cif_eff_per_ton?: number;` (同理标 `?`)
+`OrderItem` 末尾加 `cif_eff_per_ton?: number;` 与 `cif_eff_amount?: number | null;` (同理标 `?`)
 `IndicatorCheck` 末尾加 `penalty_per_ton?: number | null;`
 
 `scripts/check_repository_consistency.mjs` 的 `sharedStructs` (约 122-137 行) 补四条, 否则
@@ -1623,6 +1623,56 @@ cd blend_kit_rs && cargo test --release && cargo clippy --release -- -D warnings
 git add blend_kit_rs/src/penalty.rs blend_kit_rs/src/optimizer.rs blend_kit_rs/src/lib.rs
 git commit -m "feat(penalty): 买入侧按采购合同扣款与水分折算修正到厂价"
 ```
+
+- [ ] **Step 11: 实现修订 (质量复审后)**
+
+**以下条目优先于上面 Step 1~9 的代码块** —— 那些是初稿, 实现时按复审意见改了八处.
+Task 6~8 按本节的签名与字段写前端.
+
+1. **函数改名**: `effective_cif` → `cif_eff`, 与它喂的字段 `cif_eff_per_ton` 对齐
+   (改函数不改字段: 字段已序列化、已镜像进 TS, Task 1 已改过一次名).
+   `tiered_amount` 降为私有 `fn` (仅文件内单一调用方).
+
+2. **返回类型**: `cif_eff(coal) -> Result<f64, CullReason>`, 不再是 `Option`.
+   ```rust
+   pub(crate) struct CullReason { pub indicator: String, pub value: f64, pub reject: f64 }
+   ```
+   剔煤告警因此能指名道姓, 与同处的"缺指标"分支对齐:
+   `剔除 脏煤: 灰 实测 13 越过采购合同拒收线 12`.
+   另有 `cif_eff_or_quoted(coal) -> f64` 收敛三处 `unwrap_or_else(|_| coal.cif())` 兜底.
+
+3. **水分两机制互斥** (`quality.rs::validate_purchase_terms`): `contract_moisture.is_some()`
+   且存在 `indicator == "M"` 的条款时报错. 扣量(结算量折算)与扣价(元/吨)是真实合同里
+   二选一的两种写法, 同时配置会让每吨水分被扣两遍, 且账面完全合理、不报任何错 ——
+   全局模板一旦同时带上, 整个煤池被系统性低估.
+
+4. **缺化验值的条款只告警不剔煤**: `clauses_missing_assay(coal) -> Vec<&str>`, 在候选筛选
+   处发一次告警 (`甲: 采购条款缺化验值 硫, 本次不计买入扣款`). 全局模板把同一套条款套到
+   每个煤上, 化验单缺项是常态, 报错会连带废掉大批本可正常采购的货.
+
+5. **`OrderItem` 新增 `cif_eff_amount: Option<f64>`** (`#[serde(default)]`, 同步镜像进
+   `types.ts`). 原先 `cif_amount` 是报价口径而 `cif_eff_per_ton` 是修正口径, 同一行里
+   两种钱混着放, 前端取 `cif_amount` 当订单金额会静默吞掉买入折扣. 口径:
+   `Σ cif_eff_amount + 卖出扣款 = total_net`; `cif_amount` 仅作报价展示.
+
+6. **买入修正额逐煤算**, 而非两个千元级总额相减:
+   ```rust
+   let purchase_adjust_per_ton: f64 = coals.iter().zip(&ratios)
+       .map(|(coal, ratio)| (cif_eff_or_quoted(coal) - coal.cif()) * ratio)
+       .sum();
+   ```
+   相减形式 (`Σ(fob+frt)·x − (Σfob·x + Σfrt·x)`) 数学等价但浮点上不等: 实测 20 万组
+   无条款配方里 44% 残留 ~1e-13, 乘总吨数后放大成一笔并不存在的买入修正.
+   逐煤形式无条款时每项恰为 `0.0·x`, 求和仍是精确 0.
+
+7. **`solve_json` 测试断言实际 JSON 键**, 不反序列化回 `BlendResult`:
+   结构体往返会让 `#[serde(rename)]` 原样穿过, 测试照样绿而前端拿不到字段.
+   用 `serde_json::Value` 取 `cost.net_per_ton` / `cost.purchase_adjust_per_ton` /
+   `orders[0].cif_eff_per_ton` / `orders[0].cif_eff_amount` 四个键名并校值.
+
+8. **`Direction::Range` 保持 `continue`, 不改 `unreachable!()`**: 两个 crate 的 release
+   profile 都设了 `panic = "abort"`, 真被走到会直接崩掉整个 server 进程, `CatchPanicLayer`
+   接不住. 上游守卫写在注释里 (`quality.rs` 的 `Direction::Range` 分支).
 
 ---
 

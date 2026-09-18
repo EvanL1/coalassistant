@@ -399,6 +399,17 @@ fn validate_purchase_terms(coal_name: &str, terms: &PurchaseTerms) -> Result<(),
         )
         .map_err(|err| format!("{coal_name} {err}"))?;
     }
+    // 真实合同对水分二选一: 扣量(结算量 = 净重 ×(1−M实)/(1−M合))或扣价(元/吨).
+    // 两者同时配置会让每吨水分被扣两遍 —— 折价与折量各算一次, 账面数字仍然合理,
+    // 不会有任何报错. 全局模板一旦同时带上, 整个煤池被系统性低估.
+    if terms.contract_moisture.is_some()
+        && terms.clauses.iter().any(|clause| clause.indicator == "M")
+    {
+        return Err(format!(
+            "{coal_name} 水分不能同时按扣量和扣价计: 合同水分(contract_moisture)是扣量, \
+             水分条款是扣价, 两种机制互斥, 请只保留一种"
+        ));
+    }
     if terms
         .contract_moisture
         .is_some_and(|moisture| !moisture.is_finite() || !(0.0..=100.0).contains(&moisture))
@@ -997,6 +1008,73 @@ mod tests {
         assert!(
             validate_request(&request_with_purchase_terms(terms)).is_ok(),
             "合法买入侧条款应通过"
+        );
+    }
+
+    /// 水分两种机制互斥: contract_moisture 是扣量(折结算量), M 条款是扣价(元/吨).
+    /// 全局模板若同时带上两者, 每个煤都会被水分扣两遍, 且账面完全合理、不会报错.
+    #[test]
+    fn test_moisture_quantity_and_price_mechanisms_are_exclusive() {
+        let terms = PurchaseTerms {
+            clauses: vec![PurchaseClause {
+                indicator: "M".into(),
+                direction: Direction::Upper,
+                guarantee: 8.0,
+                penalty: Penalty {
+                    tiers: vec![PenaltyTier {
+                        width: None,
+                        rate: 50.0,
+                    }],
+                    reject: 12.0,
+                },
+            }],
+            contract_moisture: Some(8.0),
+            moisture_excess_double_threshold: None,
+        };
+        let error = validate_request(&request_with_purchase_terms(terms))
+            .expect_err("扣量与扣价同时配置应被拒绝");
+        assert!(
+            error.contains("乙") && error.contains("水分"),
+            "报错应点名煤种与水分, 实得 {error}"
+        );
+    }
+
+    /// 只用扣量(结算量折算)——我们样本合同的写法——应通过.
+    #[test]
+    fn test_moisture_quantity_mechanism_alone_passes() {
+        let terms = PurchaseTerms {
+            clauses: Vec::new(),
+            contract_moisture: Some(8.0),
+            moisture_excess_double_threshold: Some(12.0),
+        };
+        assert!(
+            validate_request(&request_with_purchase_terms(terms)).is_ok(),
+            "单用扣量机制应通过"
+        );
+    }
+
+    /// 只用扣价(元/吨 水分条款)应通过.
+    #[test]
+    fn test_moisture_price_mechanism_alone_passes() {
+        let terms = PurchaseTerms {
+            clauses: vec![PurchaseClause {
+                indicator: "M".into(),
+                direction: Direction::Upper,
+                guarantee: 8.0,
+                penalty: Penalty {
+                    tiers: vec![PenaltyTier {
+                        width: None,
+                        rate: 50.0,
+                    }],
+                    reject: 12.0,
+                },
+            }],
+            contract_moisture: None,
+            moisture_excess_double_threshold: None,
+        };
+        assert!(
+            validate_request(&request_with_purchase_terms(terms)).is_ok(),
+            "单用扣价机制应通过"
         );
     }
 }

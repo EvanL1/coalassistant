@@ -355,6 +355,12 @@ pub struct OrderItem {
     /// `#[serde(default)]`: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
     #[serde(default)]
     pub cif_eff_per_ton: f64,
+    /// 该煤买入侧修正后的订单金额 (元) = `cif_eff_per_ton × tons`.
+    /// 与 `cif_amount` 的差别是含买入扣款与水分折算; 结账金额看这项, `cif_amount`
+    /// 只是报价口径的展示值. Σ 本项 + 卖出扣款 = `CostBreakdown::total_net`.
+    /// `#[serde(default)]`: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
+    #[serde(default)]
+    pub cif_eff_amount: Option<f64>,
 }
 
 /// 视图 C: 单项指标的体检结果 (给质检/销售).

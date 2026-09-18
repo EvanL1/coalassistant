@@ -1135,6 +1135,7 @@ mod tests {
         assert_eq!(cost.penalty_per_ton, 0.0);
         assert_eq!(cost.net_per_ton, 0.0);
         assert_eq!(result.orders[0].cif_eff_per_ton, 0.0);
+        assert_eq!(result.orders[0].cif_eff_amount, None);
     }
 
     fn priced_upper_spec(
@@ -1878,13 +1879,15 @@ mod tests {
             !result.recipe.contains_key("脏煤"),
             "越拒收线的煤不应入配方"
         );
+        let warning = result
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("脏煤"))
+            .unwrap_or_else(|| panic!("应有剔除警告, 实得 {:?}", result.warnings));
+        // 与同处的"缺指标"分支对齐: 说清是哪条条款、实测多少、线在哪.
         assert!(
-            result
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("脏煤")),
-            "应有剔除警告, 实得 {:?}",
-            result.warnings
+            warning.contains("灰") && warning.contains("13") && warning.contains("12"),
+            "剔除告警应点名指标/实测值/拒收线, 实得 {warning}"
         );
     }
 
@@ -2156,32 +2159,230 @@ mod tests {
             "truncate_decimal": false
         }"#;
         let output = solve_json(payload);
-        let result: BlendResult = serde_json::from_str(&output).expect("结果应可反序列化");
-        assert!(result.ok, "应可求解: {:?}", result.reason);
-
         let expected_cif_eff = 1000.0 * (0.89 / 0.92) + 100.0 - 40.0;
-        let cost = result.cost.expect("应有成本");
+
+        // 断言必须落在**实际 JSON 键**上: 反序列化回 BlendResult 会让 #[serde(rename)]
+        // 原样往返, 测试照样绿而前端拿不到字段. 这个 core 的契约是字符串进字符串出,
+        // 契约就是这些键名本身.
+        let json: serde_json::Value = serde_json::from_str(&output).expect("输出应为合法 JSON");
+        let key = |value: &serde_json::Value, path: &[&str]| -> f64 {
+            let mut node = value;
+            for step in path {
+                node = node
+                    .get(step)
+                    .unwrap_or_else(|| panic!("输出 JSON 缺少键 {}", path.join(".")));
+            }
+            node.as_f64()
+                .unwrap_or_else(|| panic!("{} 应为数值, 实得 {node}", path.join(".")))
+        };
+
+        assert!(json["ok"].as_bool().unwrap_or(false), "应可求解: {output}");
         assert!(
-            (cost.cif_per_ton - 1100.0).abs() < 1e-6,
-            "cif 应保持报价原值, 实得 {}",
+            (key(&json, &["cost", "cif_per_ton"]) - 1100.0).abs() < 1e-6,
+            "cost.cif_per_ton 应保持报价原值"
+        );
+        assert!(
+            (key(&json, &["cost", "net_per_ton"]) - expected_cif_eff).abs() < 1e-6,
+            "cost.net_per_ton 应为 {expected_cif_eff} —— 为 1100 说明 purchase_terms 没被解析"
+        );
+        assert!(
+            (key(&json, &["cost", "purchase_adjust_per_ton"]) - (expected_cif_eff - 1100.0)).abs()
+                < 1e-6,
+            "cost.purchase_adjust_per_ton 应为 {}",
+            expected_cif_eff - 1100.0
+        );
+        let order = &json["orders"][0];
+        assert!(
+            (key(order, &["cif_eff_per_ton"]) - expected_cif_eff).abs() < 1e-6,
+            "orders[0].cif_eff_per_ton 应为修正后价"
+        );
+        assert!(
+            (key(order, &["cif_eff_amount"]) - expected_cif_eff * 100.0).abs() < 1e-4,
+            "orders[0].cif_eff_amount 应为修正后价 × 100 吨"
+        );
+
+        // 结构体路径同样要通, 且两条路径必须给出同一个数.
+        let result: BlendResult = serde_json::from_str(&output).expect("结果应可反序列化");
+        let cost = result.cost.expect("应有成本");
+        assert!((cost.net_per_ton - expected_cif_eff).abs() < 1e-6);
+    }
+
+    /// 订单金额口径必须自洽: 每行 cif_eff_amount = cif_eff_per_ton × tons,
+    /// 且 Σ cif_eff_amount + 卖出扣款 = total_net.
+    /// cif_amount 是报价口径展示值, 两者不可混用 —— 前端取错会静默吞掉买入折扣.
+    #[test]
+    fn test_order_effective_amount_reconciles_with_total_net() {
+        let mut coal = coal_from_tuple(
+            "甲",
+            (1.0, 10.5, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 100.0),
+        );
+        coal.purchase_terms = Some(purchase_ash_terms(10.0, 80.0, 12.0));
+        let clean = coal_from_tuple(
+            "乙",
+            (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1080.0, 0.0),
+        );
+
+        let request = BlendRequest {
+            coals: vec![coal, clean],
+            specs: vec![Spec::upper("A", 10.0)],
+            total_quantity: Some(200.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "应可解: {:?}", result.reason);
+
+        for order in &result.orders {
+            let tons = order.tons.expect("应有吨数");
+            let amount = order.cif_eff_amount.expect("应有修正后金额");
+            assert!(
+                (amount - order.cif_eff_per_ton * tons).abs() < 1e-6,
+                "{} 行内不自洽: {} ≠ {} × {}",
+                order.coal,
+                amount,
+                order.cif_eff_per_ton,
+                tons
+            );
+        }
+
+        let cost = result.cost.expect("应有成本");
+        let summed: f64 = result
+            .orders
+            .iter()
+            .map(|order| order.cif_eff_amount.unwrap_or(0.0))
+            .sum();
+        let total_net = cost.total_net.expect("应有净成本总额");
+        let total_penalty = cost.total_penalty.expect("应有卖出扣款总额");
+        assert!(
+            (summed + total_penalty - total_net).abs() < 1e-3,
+            "Σ cif_eff_amount({summed}) + 卖出扣款({total_penalty}) 应等于 total_net({total_net})"
+        );
+        // 报价口径的合计与净额不同 —— 正是前端取错字段会丢掉的那部分.
+        let quoted: f64 = result
+            .orders
+            .iter()
+            .map(|order| order.cif_amount.unwrap_or(0.0))
+            .sum();
+        assert!(
+            quoted > summed,
+            "报价口径合计({quoted})应高于修正后合计({summed}), 否则本用例没覆盖到折扣"
+        );
+    }
+
+    /// 同一份档位表, 卖出侧走 LP 档位列、买入侧走 tiered_amount 算术, 两条实现必须
+    /// 算出同样的钱. 不统一代码是刻意的(凸性这个共同前提已集中在 validate_penalty),
+    /// 但一致性得有东西钉着.
+    #[test]
+    fn test_buy_and_sell_sides_price_the_same_schedule_alike() {
+        let tiers = || {
+            vec![
+                PenaltyTier {
+                    width: Some(1.0),
+                    rate: 10.0,
+                },
+                PenaltyTier {
+                    width: None,
+                    rate: 30.0,
+                },
+            ]
+        };
+        // 灰分 11.5, 两侧界都是 10.0 ⇒ 偏离 1.5 ⇒ 一档 1.0×10 + 二档 0.5×30 = 25.
+        let mut coal = coal_from_tuple(
+            "甲",
+            (1.0, 11.5, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+        );
+        coal.purchase_terms = Some(PurchaseTerms {
+            clauses: vec![PurchaseClause {
+                indicator: "A".into(),
+                direction: Direction::Upper,
+                guarantee: 10.0,
+                penalty: Penalty {
+                    tiers: tiers(),
+                    reject: 13.0,
+                },
+            }],
+            contract_moisture: None,
+            moisture_excess_double_threshold: None,
+        });
+
+        let request = BlendRequest {
+            coals: vec![coal],
+            specs: vec![priced_upper_spec("A", 10.0, tiers(), 13.0)],
+            total_quantity: Some(100.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "应可解: {:?}", result.reason);
+
+        let cost = result.cost.expect("应有成本");
+        let bought = -cost.purchase_adjust_per_ton;
+        let sold = cost.penalty_per_ton;
+        assert!(
+            (bought - 25.0).abs() < 1e-3,
+            "买入侧算术扣款应为 25, 实得 {bought}"
+        );
+        assert!(
+            (sold - 25.0).abs() < 1e-3,
+            "卖出侧 LP 扣款应为 25, 实得 {sold}"
+        );
+        assert!(
+            (bought - sold).abs() < 1e-3,
+            "两条实现对同一份档位表必须逐分一致, 实得 买入 {bought} / 卖出 {sold}"
+        );
+        // 大小相等方向相反 ⇒ 净成本回到报价.
+        assert!(
+            (cost.net_per_ton - cost.cif_per_ton).abs() < 1e-3,
+            "两侧等额相消后净成本应回到 cif, 实得 {} vs {}",
+            cost.net_per_ton,
             cost.cif_per_ton
         );
-        assert!(
-            (cost.net_per_ton - expected_cif_eff).abs() < 1e-6,
-            "净成本应为 {expected_cif_eff}, 实得 {} —— 为 1100 说明 purchase_terms 没被解析",
-            cost.net_per_ton
+    }
+
+    /// 采购条款缺化验值: 煤留着(全局模板下缺项是常态), 但必须告警说明没计进扣款.
+    #[test]
+    fn test_clause_missing_assay_warns_but_keeps_coal() {
+        let mut coal = coal_from_tuple(
+            "甲",
+            (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
         );
+        coal.props.remove("S");
+        coal.purchase_terms = Some(PurchaseTerms {
+            clauses: vec![PurchaseClause {
+                indicator: "S".into(),
+                direction: Direction::Upper,
+                guarantee: 1.0,
+                penalty: Penalty {
+                    tiers: vec![PenaltyTier {
+                        width: None,
+                        rate: 50.0,
+                    }],
+                    reject: 2.0,
+                },
+            }],
+            contract_moisture: None,
+            moisture_excess_double_threshold: None,
+        });
+
+        let request = BlendRequest {
+            coals: vec![coal],
+            specs: Vec::new(),
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "缺化验值不应让煤不可用: {:?}", result.reason);
+        assert!(result.recipe.contains_key("甲"), "煤应留在池里");
         assert!(
-            (cost.purchase_adjust_per_ton - (expected_cif_eff - 1100.0)).abs() < 1e-6,
-            "买入修正应为 {}, 实得 {}",
-            expected_cif_eff - 1100.0,
-            cost.purchase_adjust_per_ton
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("甲") && warning.contains("硫")),
+            "应有缺化验值告警并点名指标, 实得 {:?}",
+            result.warnings
         );
-        let order = result.orders.first().expect("应有订单");
-        assert!(
-            (order.cif_eff_per_ton - expected_cif_eff).abs() < 1e-6,
-            "订单单价应为修正后价, 实得 {}",
-            order.cif_eff_per_ton
+        let cost = result.cost.expect("应有成本");
+        assert_eq!(
+            cost.purchase_adjust_per_ton, 0.0,
+            "算不出的条款不该凭空产生修正"
         );
     }
 }

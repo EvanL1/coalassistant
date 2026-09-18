@@ -175,6 +175,12 @@ export interface OrderItem {
    * 可选: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
    */
   cif_eff_per_ton?: number;
+  /**
+   * 该煤买入侧修正后的订单金额 (元) = cif_eff_per_ton × tons.
+   * 与 cif_amount 的差别是含买入扣款与水分折算; 结账金额看这项.
+   * 可选: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
+   */
+  cif_eff_amount?: number | null;
 }
 
 export interface IndicatorCheck {
