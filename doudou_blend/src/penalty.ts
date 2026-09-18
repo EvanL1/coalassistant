@@ -77,9 +77,12 @@ export function tierRate({
  *   - 有保证值却在模板+覆盖里都找不到条款的指标(且未被显式排除), 计入
  *     `orphanedGuarantees` —— 调用方应提示用户, 而不是当作用户没配置。
  *   - `contract_moisture` / `moisture_excess_double_threshold`: 覆盖对象里
- *     显式写了这个键(哪怕值是 null)就用覆盖的值, 包括用 null 关掉该项;
- *     完全没写这个键才回退模板。用 `in` 判断键是否存在, 不用 `??`,
- *     因为 `??` 分不清"显式设为 null"和"压根没设置"。
+ *     这个键为具体数字就用它; 为 `null` 是显式关闭, 不回退模板; 键不存在
+ *     或值为 `undefined` 都视为"没设置", 回退模板。
+ *     "键不存在"与"值为 undefined"必须同等对待(而不是像早期版本那样用
+ *     `in` 单独区分), 因为 `JSON.stringify` 会丢弃值为 undefined 的键 ——
+ *     区分它们会让同一个覆盖对象在写入/读出 localStorage 前后表现不同,
+ *     用户能看到的症状是"配方价格随页面刷新变化"。
  *   - `terms === null` 表示该煤没有任何可用采购条款, 调用方应省略
  *     `purchase_terms` 字段。
  */
@@ -121,17 +124,29 @@ export function mergePurchaseTerms(
     return { terms: null, orphanedGuarantees };
   }
 
-  const contract_moisture =
-    override != null && "contract_moisture" in override
-      ? (override.contract_moisture ?? null)
-      : (template?.contract_moisture ?? null);
-  const moisture_excess_double_threshold =
-    override != null && "moisture_excess_double_threshold" in override
-      ? (override.moisture_excess_double_threshold ?? null)
-      : (template?.moisture_excess_double_threshold ?? null);
+  const contract_moisture = inheritableMoistureField(
+    override?.contract_moisture,
+    template?.contract_moisture,
+  );
+  const moisture_excess_double_threshold = inheritableMoistureField(
+    override?.moisture_excess_double_threshold,
+    template?.moisture_excess_double_threshold,
+  );
 
   return {
     terms: { clauses, contract_moisture, moisture_excess_double_threshold },
     orphanedGuarantees,
   };
+}
+
+/**
+ * `contract_moisture` / `moisture_excess_double_threshold` 共用的继承规则:
+ * 覆盖值是具体数字就用它; 是 `null` 就显式关闭(不回退模板); 是 `undefined`
+ * (无论键是否存在, 两者在 JS 里读取结果相同)就当没设置, 回退模板的值。
+ */
+function inheritableMoistureField(
+  overrideValue: number | null | undefined,
+  templateValue: number | null | undefined,
+): number | null {
+  return overrideValue !== undefined ? overrideValue : (templateValue ?? null);
 }

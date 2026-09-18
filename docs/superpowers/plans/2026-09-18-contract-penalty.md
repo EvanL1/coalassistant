@@ -1686,8 +1686,9 @@ Task 6~8 按本节的签名与字段写前端.
 - Create: `doudou_blend/src/penaltyStorage.ts`
 - Modify: `doudou_blend/src/storage.ts`（`CoalPref` 增字段）
 
-> **实现记录（首轮质量审查后修订）：** 下面的代码块是这个任务实际交付的形状,
-> 已经吸收了质量审查发现的四个问题, 不是最初草稿。与最初设计的差异见文末小结。
+> **实现记录（两轮质量审查后修订）：** 下面的代码块是这个任务实际交付的形状,
+> 已经吸收了质量审查发现的全部问题（首轮 4 个 BLOCKING + 二轮 3 个 Low）,
+> 不是最初草稿。与最初设计的差异见文末小结。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1819,14 +1820,49 @@ describe("mergePurchaseTerms", () => {
     expect(merged.orphanedGuarantees).toEqual(["G"]);
   });
 
-  it("覆盖显式把合同水分设为 null 时关闭该项, 不回退模板", () => {
-    const merged = mergePurchaseTerms(template, { contract_moisture: null }, { A: 10 });
-    expect(merged.terms?.contract_moisture).toBeNull();
+  it("同一指标既在覆盖条款里又被排除时, 排除生效(排除是比覆盖条款更具体的信号: 覆盖条款说明'这项按这个价算', 排除说明'这项压根不适用', 后者更接近用户的真实意图)", () => {
+    const merged = mergePurchaseTerms(
+      null,
+      {
+        clauses: [{ indicator: "A", direction: "Upper", penalty: { tiers: [{ rate: 120 }], reject: 11 } }],
+        excluded_indicators: ["A"],
+      },
+      { A: 10 },
+    );
+    expect(merged.terms).toBeNull();
+    expect(merged.orphanedGuarantees).toEqual([]);
+  });
+});
+
+// contract_moisture / moisture_excess_double_threshold 共用同一条继承规则,
+// 两个字段各测一遍三态 + JSON 往返稳定性 —— 只测 contract_moisture 曾经让
+// moisture_excess_double_threshold 那条分支(删掉照样全绿)偷偷漏测过一次.
+describe.each([
+  ["contract_moisture", 8] as const,
+  ["moisture_excess_double_threshold", 12] as const,
+])("mergePurchaseTerms — %s 的三态继承", (field, templateValue) => {
+  it("键缺失时继承模板", () => {
+    const merged = mergePurchaseTerms(template, { clauses: [] }, { A: 10 });
+    expect(merged.terms?.[field]).toBe(templateValue);
   });
 
-  it("覆盖完全不提合同水分这个键时, 回退模板的值", () => {
-    const merged = mergePurchaseTerms(template, { clauses: [] }, { A: 10 });
-    expect(merged.terms?.contract_moisture).toBe(8);
+  it("键存在但值为 undefined 时视同缺失, 继承模板", () => {
+    const merged = mergePurchaseTerms(template, { clauses: [], [field]: undefined }, { A: 10 });
+    expect(merged.terms?.[field]).toBe(templateValue);
+  });
+
+  it("键存在且值为 null 时显式关闭, 不回退模板", () => {
+    const merged = mergePurchaseTerms(template, { [field]: null }, { A: 10 });
+    expect(merged.terms?.[field]).toBeNull();
+  });
+
+  it("JSON 往返后行为不变(JSON.stringify 会丢掉值为 undefined 的键, 往返前后必须算出同一个结果)", () => {
+    const override = { clauses: [], [field]: undefined };
+    const before = mergePurchaseTerms(template, override, { A: 10 });
+    const roundTripped = JSON.parse(JSON.stringify(override));
+    const after = mergePurchaseTerms(template, roundTripped, { A: 10 });
+    expect(after.terms?.[field]).toBe(before.terms?.[field]);
+    expect(before.terms?.[field]).toBe(templateValue); // 双重确认: 往返前后都是"继承", 不是巧合地都错
   });
 });
 ```
@@ -1920,9 +1956,12 @@ export function tierRate({
  *   - 有保证值却在模板+覆盖里都找不到条款的指标(且未被显式排除), 计入
  *     `orphanedGuarantees` —— 调用方应提示用户, 而不是当作用户没配置。
  *   - `contract_moisture` / `moisture_excess_double_threshold`: 覆盖对象里
- *     显式写了这个键(哪怕值是 null)就用覆盖的值, 包括用 null 关掉该项;
- *     完全没写这个键才回退模板。用 `in` 判断键是否存在, 不用 `??`,
- *     因为 `??` 分不清"显式设为 null"和"压根没设置"。
+ *     这个键为具体数字就用它; 为 `null` 是显式关闭, 不回退模板; 键不存在
+ *     或值为 `undefined` 都视为"没设置", 回退模板。
+ *     "键不存在"与"值为 undefined"必须同等对待(而不是用 `in` 单独区分),
+ *     因为 `JSON.stringify` 会丢弃值为 undefined 的键 —— 区分它们会让
+ *     同一个覆盖对象在写入/读出 localStorage 前后表现不同, 用户能看到的
+ *     症状是"配方价格随页面刷新变化"。
  *   - `terms === null` 表示该煤没有任何可用采购条款, 调用方应省略
  *     `purchase_terms` 字段。
  */
@@ -1964,19 +2003,31 @@ export function mergePurchaseTerms(
     return { terms: null, orphanedGuarantees };
   }
 
-  const contract_moisture =
-    override != null && "contract_moisture" in override
-      ? (override.contract_moisture ?? null)
-      : (template?.contract_moisture ?? null);
-  const moisture_excess_double_threshold =
-    override != null && "moisture_excess_double_threshold" in override
-      ? (override.moisture_excess_double_threshold ?? null)
-      : (template?.moisture_excess_double_threshold ?? null);
+  const contract_moisture = inheritableMoistureField(
+    override?.contract_moisture,
+    template?.contract_moisture,
+  );
+  const moisture_excess_double_threshold = inheritableMoistureField(
+    override?.moisture_excess_double_threshold,
+    template?.moisture_excess_double_threshold,
+  );
 
   return {
     terms: { clauses, contract_moisture, moisture_excess_double_threshold },
     orphanedGuarantees,
   };
+}
+
+/**
+ * `contract_moisture` / `moisture_excess_double_threshold` 共用的继承规则:
+ * 覆盖值是具体数字就用它; 是 `null` 就显式关闭(不回退模板); 是 `undefined`
+ * (无论键是否存在, 两者在 JS 里读取结果相同)就当没设置, 回退模板的值。
+ */
+function inheritableMoistureField(
+  overrideValue: number | null | undefined,
+  templateValue: number | null | undefined,
+): number | null {
+  return overrideValue !== undefined ? overrideValue : (templateValue ?? null);
 }
 ```
 
@@ -2057,7 +2108,7 @@ git add doudou_blend/src/penalty.ts doudou_blend/src/penalty.test.ts doudou_blen
 git commit -m "feat(penalty): 前端扣款单位换算与模板合并"
 ```
 
-**与最初设计的差异（首轮质量审查发现, 已修订到上面的代码块里）：**
+**与最初设计的差异（两轮质量审查发现, 已修订到上面的代码块里）：**
 1. `mergePurchaseTerms` 从返回 `PurchaseTerms | null` 改为返回
    `MergedPurchaseTerms { terms, orphanedGuarantees }`。原因: 模板只存
    localStorage 不跨设备同步, 换设备后"这个煤没配置扣款"和"配置了但模板
@@ -2065,7 +2116,9 @@ git commit -m "feat(penalty): 前端扣款单位换算与模板合并"
 2. `CoalPenaltyOverride` 新增 `excluded_indicators?: string[]`, 合并逻辑
    末尾按它删除已产出的条款。原因: 原逻辑只能"新增/替换"模板条款, 无法
    表达"这份采购合同压根不管这项指标", 用户只能删保证值迂回, 而保证值
-   可能还有其他用途。
+   可能还有其他用途。排除比覆盖条款优先级更高(同一指标两者都给了, 以排除
+   为准), 因为排除是更具体的信号: 覆盖条款说明"这项按这个价算", 排除说明
+   "这项压根不适用"。
 3. `tierRate` 从 `(step, amount): number` 改成
    `({ step, amount }): number | null`。原因: 位置参数传反(`tierRate(amount, step)`)
    会静默算出一个错的但貌似合理的数字, 而这是全前端最关键的一个单位换算;
@@ -2074,6 +2127,13 @@ git commit -m "feat(penalty): 前端扣款单位换算与模板合并"
 4. `penaltyStorage.ts` 用 `CustomEvent` 而非 `Event`(跟仓库其余事件风格
    一致), 并导出 `PENALTY_TEMPLATE_EVENT` 常量供订阅方引用, 避免手打
    字符串字面量打错字导致订阅永远失效。
+5. `contract_moisture` / `moisture_excess_double_threshold` 的继承判断从
+   `"key" in override`(区分"键不存在"与"键存在但值为 undefined")改成只看
+   `override[key] !== undefined`(两者同等对待, 都算"没设置", 回退模板)。
+   原因: `JSON.stringify` 会丢弃值为 undefined 的键, 用 `in` 区分这两种
+   情况, 会让同一个覆盖对象在写入/读出 localStorage 前后算出不同的结果——
+   页面刷新一下, 配方价格就变了, 且完全没有报错信号。**Task 7/8 因此不必
+   小心避免往这两个键里 spread 出 `undefined`**, 这个坑已经在这一层堵死。
 
 ---
 
@@ -2241,6 +2301,12 @@ git commit -m "feat(today): 成本卡拆出独立组件并展示买入修正与�
 **Files:**
 - Modify: `doudou_blend/src/screens/ContractScreen.tsx`
 - Modify: `doudou_blend/src/screens/CoalPoolScreen.tsx`
+
+> `CoalPenaltyOverride` 的 `contract_moisture` / `moisture_excess_double_threshold`
+> 不必小心避免 spread 出 `undefined`（例如 `{ ...prevOverride, contract_moisture: form.moisture || undefined }`
+> 这类写法是安全的）：`mergePurchaseTerms` 把"键不存在"和"值为 undefined"
+> 同等对待, 两者都回退模板; 只有显式传 `null` 才会关闭该项。这个坑已经在
+> Task 6 堵死, 不需要本任务的表单逻辑操心。
 
 - [ ] **Step 1: 合同屏 —— 每条 spec 的计价开关**
 

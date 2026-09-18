@@ -130,13 +130,48 @@ describe("mergePurchaseTerms", () => {
     expect(merged.orphanedGuarantees).toEqual(["G"]);
   });
 
-  it("覆盖显式把合同水分设为 null 时关闭该项, 不回退模板", () => {
-    const merged = mergePurchaseTerms(template, { contract_moisture: null }, { A: 10 });
-    expect(merged.terms?.contract_moisture).toBeNull();
+  it("同一指标既在覆盖条款里又被排除时, 排除生效(排除是比覆盖条款更具体的信号: 覆盖条款说明'这项按这个价算', 排除说明'这项压根不适用', 后者更接近用户的真实意图)", () => {
+    const merged = mergePurchaseTerms(
+      null,
+      {
+        clauses: [{ indicator: "A", direction: "Upper", penalty: { tiers: [{ rate: 120 }], reject: 11 } }],
+        excluded_indicators: ["A"],
+      },
+      { A: 10 },
+    );
+    expect(merged.terms).toBeNull();
+    expect(merged.orphanedGuarantees).toEqual([]);
+  });
+});
+
+// contract_moisture / moisture_excess_double_threshold 共用同一条继承规则,
+// 两个字段各测一遍三态 + JSON 往返稳定性 —— 只测 contract_moisture 曾经让
+// moisture_excess_double_threshold 那条分支(删掉照样全绿)偷偷漏测过一次.
+describe.each([
+  ["contract_moisture", 8] as const,
+  ["moisture_excess_double_threshold", 12] as const,
+])("mergePurchaseTerms — %s 的三态继承", (field, templateValue) => {
+  it("键缺失时继承模板", () => {
+    const merged = mergePurchaseTerms(template, { clauses: [] }, { A: 10 });
+    expect(merged.terms?.[field]).toBe(templateValue);
   });
 
-  it("覆盖完全不提合同水分这个键时, 回退模板的值", () => {
-    const merged = mergePurchaseTerms(template, { clauses: [] }, { A: 10 });
-    expect(merged.terms?.contract_moisture).toBe(8);
+  it("键存在但值为 undefined 时视同缺失, 继承模板", () => {
+    const merged = mergePurchaseTerms(template, { clauses: [], [field]: undefined }, { A: 10 });
+    expect(merged.terms?.[field]).toBe(templateValue);
+  });
+
+  it("键存在且值为 null 时显式关闭, 不回退模板", () => {
+    const merged = mergePurchaseTerms(template, { [field]: null }, { A: 10 });
+    expect(merged.terms?.[field]).toBeNull();
+  });
+
+  it("JSON 往返后行为不变(JSON.stringify 会丢掉值为 undefined 的键, 往返前后必须算出同一个结果)", () => {
+    const override = { clauses: [], [field]: undefined };
+    const before = mergePurchaseTerms(template, override, { A: 10 });
+    const roundTripped = JSON.parse(JSON.stringify(override));
+    const after = mergePurchaseTerms(template, roundTripped, { A: 10 });
+    expect(after.terms?.[field]).toBe(before.terms?.[field]);
+    expect(before.terms?.[field]).toBe(templateValue); // 双重确认: 往返前后都是"继承", 不是巧合地都错
   });
 });
