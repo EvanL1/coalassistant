@@ -129,7 +129,7 @@ pub struct PurchaseTerms {
     /// 合同水分, 用于结算量折算. None = 不做折算.
     pub contract_moisture: Option<f64>,
     /// 超过该水分时超出部分双倍折算. None = 不启用.
-    pub moisture_double_threshold: Option<f64>,
+    pub moisture_excess_double_threshold: Option<f64>,
 }
 
 pub struct Coal {
@@ -250,7 +250,7 @@ pub struct CostBreakdown {
 pub struct OrderItem {
     // ... 既有字段 ...
     /// 该煤买入侧修正后的单价, 采购按此价核对.
-    pub cif_eff: f64,
+    pub cif_eff_per_ton: f64,
 }
 ```
 
