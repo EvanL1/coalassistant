@@ -762,6 +762,10 @@ fn solve_once(
         // 容限必须与 LP 拒收行同量级: LP 放行 FEASIBILITY_TOLERANCE*(1+magnitude),
         // 这里若仍用绝对 SOLUTION_TOLERANCE, 就会把 LP 认可的解判成 Fail,
         // 经 finalize_quality_status 变成 NeedsReview —— 正确配方被盖上"需要复核".
+        //
+        // 注意参照值不同, 这是刻意的: LP 悬崖行用 effective_upper(reject)∓margin
+        // (含安全余量的代理), 这里比的是原始 penalty.reject (合同白纸黑字那条线).
+        // 体检回答的是"是否越过合同拒收线", 不是"是否越过内部安全代理"; 不要把两者改成一致.
         if let Some(spec) = spec {
             if spec.enforcement == Enforcement::Priced && outcome.status == EvaluationStatus::Fail {
                 let within_reject = spec.penalty.as_ref().is_some_and(|penalty| {
