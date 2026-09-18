@@ -26,18 +26,22 @@ afterEach(() => {
 });
 
 describe("CostCard", () => {
-  it("无扣款时只显示大字号净成本, 不渲染任何明细行 (界面与无计价条款时代完全一致)", () => {
+  it("无扣款时大字号标签是最低到厂价, 只显示大字号, 不渲染任何明细行", () => {
     render(<CostCard cost={base} />);
     expect(screen.getByTestId("cost-headline").textContent).toBe(
       "1100.00元/吨",
     );
+    expect(screen.getByText("最低到厂价")).toBeTruthy();
+    expect(screen.queryByText("最低净成本")).toBeNull();
     expect(screen.queryByText("到厂价")).toBeNull();
     expect(screen.queryByText("预计扣款")).toBeNull();
     expect(screen.queryByText("买入修正")).toBeNull();
   });
 
-  it("有卖出扣款时显示扣款行与到厂价明细行", () => {
+  it("有卖出扣款时大字号标签变成最低净成本, 显示扣款行与到厂价明细行", () => {
     render(<CostCard cost={{ ...base, penalty_per_ton: 64, net_per_ton: 1164 }} />);
+    expect(screen.getByText("最低净成本")).toBeTruthy();
+    expect(screen.queryByText("最低到厂价")).toBeNull();
     expect(screen.getByText("预计扣款")).toBeTruthy();
     expect(screen.getByText("64.00 元/吨")).toBeTruthy();
     expect(screen.getByText("到厂价")).toBeTruthy();
@@ -47,10 +51,11 @@ describe("CostCard", () => {
     expect(screen.getByText(".00", { selector: ".cost-dec" })).toBeTruthy();
   });
 
-  it("有买入修正时显示修正行与到厂价明细行, 折扣为负值", () => {
+  it("有买入修正时大字号标签也变成最低净成本, 显示修正行与到厂价明细行, 折扣为负值", () => {
     render(
       <CostCard cost={{ ...base, purchase_adjust_per_ton: -40, net_per_ton: 1060 }} />,
     );
+    expect(screen.getByText("最低净成本")).toBeTruthy();
     expect(screen.getByText("买入修正")).toBeTruthy();
     expect(screen.getByText("-40.00 元/吨")).toBeTruthy();
     expect(screen.getByText("到厂价")).toBeTruthy();
@@ -65,13 +70,14 @@ describe("CostCard", () => {
     expect(screen.getByTestId("cost-cif").textContent).toBe("1100.00 元/吨");
   });
 
-  it("买入修正与卖出扣款字段缺失 (老记录) 时按无扣款处理, 不渲染明细行", () => {
+  it("买入修正与卖出扣款字段缺失 (老记录) 时按无扣款处理, 标签仍是最低到厂价, 不渲染明细行", () => {
     const legacy: CostBreakdown = {
       fob_per_ton: 900,
       frt_per_ton: 100,
       cif_per_ton: 1000,
     };
     render(<CostCard cost={legacy} />);
+    expect(screen.getByText("最低到厂价")).toBeTruthy();
     expect(screen.queryByText("到厂价")).toBeNull();
     expect(screen.queryByText("预计扣款")).toBeNull();
     expect(screen.queryByText("买入修正")).toBeNull();

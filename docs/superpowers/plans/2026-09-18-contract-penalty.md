@@ -2237,10 +2237,15 @@ formatPrice"会连这部分一起删掉。**执行时发现后立即停下汇报
   `.today-cost` 仍是 `.today-dashboard` 网格里那一格）。
 - `CostCard` 的大字号主位（`.cost-int`/`.cost-dec`/`.cost-unit` 两段式，
   `formatPrice` 也从 `TodayScreen.tsx` **搬进**（不是删除）`CostCard.tsx`）
-  展示的是 `net_per_ton`（回退 `cif_per_ton`），标签仍是"最低到厂价"不变 ——
-  净成本才是 LP 实际求最优的数字，到厂价条款生效后只是报价，大字号主位必须
-  跟着净成本走，否则这个功能要展示的数字反而被继续藏起来。没有计价条款时
-  `net_per_ton === cif_per_ton`，大字号数值和老界面完全一致，界面观感不变。
+  展示的是 `net_per_ton`（回退 `cif_per_ton`）—— 净成本才是 LP 实际求最优的数字，
+  到厂价条款生效后只是报价，大字号主位必须跟着净成本走，否则这个功能要展示的
+  数字反而被继续藏起来。**标签跟着数值变，不写死**：`detailed`（=
+  `hasAdjust || hasPenalty`）为假时标签是"最低到厂价"，为真时换成"最低净成本"。
+  标签写死不变会导致数值已经不是到厂价之后界面还顶着"到厂价"的名字——用户是
+  透过标签去读数字的，标签比数字更容易被无条件相信，印错标签比印错数字更危险，
+  这属于本功能要消灭的那类"报价当真实成本"的静默误导，团队复盘时特意纠正过。
+  没有计价条款时 `net_per_ton === cif_per_ton`，大字号数值和标签都跟老界面
+  完全一致，界面观感不变。
 - 大字号下方是明细行：到厂价、买入修正、预计扣款。三行都在"没内容"时不渲染：
   买入修正/预计扣款各自 `Math.abs(...) > 1e-6` 时才显示；到厂价则挂在
   `detailed = hasAdjust || hasPenalty` 上 —— 没有计价条款时它跟大字号净成本
@@ -2289,7 +2294,7 @@ export function CostCard({
           {/* ⚠ 采购扣款模板在本设备缺失, 点名煤种/指标 —— 见 Step 8 */}
         </div>
       )}
-      <div className="cost-label">最低到厂价</div>
+      <div className="cost-label">{detailed ? "最低净成本" : "最低到厂价"}</div>
       <div className="cost-amount" data-testid="cost-headline">
         <span className="cost-int">{costInt}</span>
         <span className="cost-dec">.{costDec}</span>
@@ -2610,8 +2615,9 @@ cd doudou_blend && npm test && npm run build && npm run check:consistency && npm
 启动本地服务与前端，在合同屏按本合同录入：灰 ≤10% 计价 80 元/吨·%、拒收 11.5；
 粘结 ≥85 计价 5 元/吨·点、拒收 80。求解后确认：
 
-- 成本卡大字号主位变成净成本（不再等于到厂价），下方出现"到厂价"与"预计扣款"
-  两行明细（没有计价条款的煤池对照组应该看不到任何明细行，只有大字号）
+- 成本卡大字号主位变成净成本（不再等于到厂价），**标签同步从"最低到厂价"变成
+  "最低净成本"**，下方出现"到厂价"与"预计扣款"两行明细（没有计价条款的煤池
+  对照组应该看不到任何明细行，标签仍是"最低到厂价"，只有大字号）
 - 粘结指标显示"扣 N 元/吨"而非红色不合格
 - 配方相对全硬约束时更便宜（净成本更低）
 

@@ -20,8 +20,14 @@ function indicatorLabel(indicator: string): string {
  *
  * 净成本才是真实吨成本 —— LP 就是按它求最优的, 到厂价启用计价条款后只是报价,
  * 所以大字号主位必须跟着 net_per_ton 走, 不能停在 cif_per_ton (那会把这个功能
- * 本该让用户看见的数字重新藏起来). 没有计价条款时 net_per_ton === cif_per_ton,
- * 大字号数值跟老界面完全一致, 标签(最低到厂价)也不变.
+ * 本该让用户看见的数字重新藏起来).
+ *
+ * 标签跟着数值变, 不能写死"最低到厂价": 没有计价条款时 net_per_ton ===
+ * cif_per_ton, 大字号数值和标签都跟老界面完全一致; 一旦两者不等, 标签必须换成
+ * "最低净成本"。标签写死不变的话, 这个大字号会在数值已经不是到厂价之后继续
+ * 顶着"到厂价"的名字 —— 用户是透过标签去读这个数字的, 标签比数字本身更容易被
+ * 无条件相信, 印错标签比印错数字更危险, 恰好是这整个功能想消灭的那类"报价当
+ * 真实成本"的静默误导。
  *
  * 三行明细 (到厂价/买入修正/预计扣款) 都在"没内容"时隐藏: 买入修正/预计扣款
  * 为 0 时各自隐藏; 到厂价则是当它跟大字号净成本相等时隐藏(此时再列一行纯属
@@ -66,7 +72,7 @@ export function CostCard({
           </ul>
         </div>
       )}
-      <div className="cost-label">最低到厂价</div>
+      <div className="cost-label">{detailed ? "最低净成本" : "最低到厂价"}</div>
       <div className="cost-amount" data-testid="cost-headline">
         <span className="cost-int">{costInt}</span>
         <span className="cost-dec">.{costDec}</span>
