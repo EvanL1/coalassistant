@@ -789,6 +789,16 @@ struct LpProblem {
 
 impl LpProblem {
     fn solve(&self) -> Option<(Vec<f64>, f64)> {
+        debug_assert!(
+            self.ratio_count <= self.n
+                && self.c.len() == self.n
+                && self.a_ub.len() == self.b_ub.len()
+                && self.a_ub.iter().all(|row| row.len() <= self.n),
+            "LpProblem 宽度不一致: ratio_count={}, n={}, c={}",
+            self.ratio_count,
+            self.n,
+            self.c.len()
+        );
         let n = self.n;
         let inequality_count = self.a_ub.len();
         let total_rows = 1 + inequality_count + n;
@@ -892,9 +902,12 @@ fn build_csc(rows: usize, columns: usize, triplets: &[(usize, usize, f64)]) -> C
 mod tests {
     use super::*;
 
-    /// 档位列不得参与 Σx=1, 也不得被配比归一化缩放.
+    /// 档位列不得参与 Σx=1.
+    ///
+    /// 本测试中附加列最优解为 0, 归一化是否误缩放它不可观测——
+    /// 归一化只对配比列生效由 [`test_lp_problem_handles_nonzero_extra_column`] 覆盖.
     #[test]
-    fn test_lp_problem_only_normalizes_ratio_columns() {
+    fn test_lp_problem_excludes_extra_columns_from_sum() {
         let problem = LpProblem {
             ratio_count: 2,
             n: 3,
@@ -917,9 +930,10 @@ mod tests {
         );
     }
 
-    /// 附加列在最优解处非零时, 三处改动(等式行/raw_sum/归一化)才全部可检验.
+    /// 附加列在最优解处非零时, 三处改动(等式行/raw_sum/归一化)才全部可检验——
+    /// 本测试是"归一化只对配比列生效"这一断言唯一能证伪的用例.
     ///
-    /// 约束 x0 + x1 − d ≤ 0.5, 因 Σx = 1 故等价于强制 d ≥ 0.5.
+    /// 约束 x0 + x1 − d ≤ 0.5 (d 即附加列 solution[2]), 因 Σx = 1 故等价于强制 d ≥ 0.5.
     /// 若 raw_sum 仍对全部列求和: 1 + 0.5 = 1.5 ≠ 1 ⇒ 可行性校验失败 ⇒ solve 返回 None ⇒ 本测试 panic.
     /// 若归一化仍对全部列做: 配比被 1.5 除 ⇒ 前两列之和变成 0.667 ⇒ 断言失败.
     #[test]
