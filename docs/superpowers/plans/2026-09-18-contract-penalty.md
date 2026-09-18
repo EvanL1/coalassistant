@@ -1686,6 +1686,9 @@ Task 6~8 按本节的签名与字段写前端.
 - Create: `doudou_blend/src/penaltyStorage.ts`
 - Modify: `doudou_blend/src/storage.ts`（`CoalPref` 增字段）
 
+> **实现记录（首轮质量审查后修订）：** 下面的代码块是这个任务实际交付的形状,
+> 已经吸收了质量审查发现的四个问题, 不是最初草稿。与最初设计的差异见文末小结。
+
 - [ ] **Step 1: 写失败测试**
 
 创建 `doudou_blend/src/penalty.test.ts`：
@@ -1697,21 +1700,30 @@ import type { PenaltyTemplate } from "./penalty";
 
 describe("tierRate", () => {
   it("把合同原文的每 0.1% 扣 8 元换算成 80 元/吨·%", () => {
-    expect(tierRate(0.1, 8)).toBeCloseTo(80, 9);
+    expect(tierRate({ step: 0.1, amount: 8 })).toBeCloseTo(80, 9);
   });
 
   it("每 0.01% 扣 2 元换算成 200 元/吨·%", () => {
-    expect(tierRate(0.01, 2)).toBeCloseTo(200, 9);
+    expect(tierRate({ step: 0.01, amount: 2 })).toBeCloseTo(200, 9);
   });
 
   it("每 1 点扣 5 元保持 5", () => {
-    expect(tierRate(1, 5)).toBeCloseTo(5, 9);
+    expect(tierRate({ step: 1, amount: 5 })).toBeCloseTo(5, 9);
   });
 
-  it("步长非法时返回 0 而不是 Infinity", () => {
-    expect(tierRate(0, 8)).toBe(0);
-    expect(tierRate(-1, 8)).toBe(0);
-    expect(tierRate(Number.NaN, 8)).toBe(0);
+  it("0 元是合法的零费率档位, 不是错误信号", () => {
+    expect(tierRate({ step: 1, amount: 0 })).toBe(0);
+  });
+
+  it("step 非法(非正数/非有限)返回 null 而不是 Infinity", () => {
+    expect(tierRate({ step: 0, amount: 8 })).toBeNull();
+    expect(tierRate({ step: -1, amount: 8 })).toBeNull();
+    expect(tierRate({ step: Number.NaN, amount: 8 })).toBeNull();
+  });
+
+  it("amount 非法(负数/非有限)返回 null —— 负费率等于扣款倒贴钱", () => {
+    expect(tierRate({ step: 0.1, amount: -8 })).toBeNull();
+    expect(tierRate({ step: 0.1, amount: Number.NaN })).toBeNull();
   });
 });
 
@@ -1733,31 +1745,88 @@ const template: PenaltyTemplate = {
 };
 
 describe("mergePurchaseTerms", () => {
-  it("没有保证值的指标不产出条款", () => {
-    const terms = mergePurchaseTerms(template, undefined, {});
-    expect(terms).toBeNull();
+  it("没有保证值的指标不产出条款, 也不算孤儿", () => {
+    const merged = mergePurchaseTerms(template, undefined, {});
+    expect(merged.terms).toBeNull();
+    expect(merged.orphanedGuarantees).toEqual([]);
   });
 
-  it("按保证值从模板生成条款", () => {
-    const terms = mergePurchaseTerms(template, undefined, { A: 10, G: 85 });
-    expect(terms?.clauses).toHaveLength(2);
-    expect(terms?.contract_moisture).toBe(8);
-    const ash = terms?.clauses.find((clause) => clause.indicator === "A");
+  it("按保证值从模板生成条款, 水分字段一并带过来", () => {
+    const merged = mergePurchaseTerms(template, undefined, { A: 10, G: 85 });
+    expect(merged.terms?.clauses).toHaveLength(2);
+    expect(merged.terms?.contract_moisture).toBe(8);
+    expect(merged.terms?.moisture_excess_double_threshold).toBe(12);
+    const ash = merged.terms?.clauses.find((clause) => clause.indicator === "A");
     expect(ash?.guarantee).toBe(10);
     expect(ash?.penalty.tiers[0].rate).toBe(80);
+    expect(merged.orphanedGuarantees).toEqual([]);
   });
 
   it("单煤覆盖优先于模板", () => {
-    const terms = mergePurchaseTerms(
+    const merged = mergePurchaseTerms(
       template,
       { clauses: [{ indicator: "A", direction: "Upper", penalty: { tiers: [{ rate: 120 }], reject: 11 } }] },
       { A: 10, G: 85 },
     );
-    const ash = terms?.clauses.find((clause) => clause.indicator === "A");
+    const ash = merged.terms?.clauses.find((clause) => clause.indicator === "A");
     expect(ash?.penalty.tiers[0].rate).toBe(120);
     expect(ash?.penalty.reject).toBe(11);
-    const cohesion = terms?.clauses.find((clause) => clause.indicator === "G");
+    const cohesion = merged.terms?.clauses.find((clause) => clause.indicator === "G");
     expect(cohesion?.penalty.tiers[0].rate).toBe(5);
+  });
+
+  it("只给部分指标保证值时, 只产出对应条款, 未提供保证值的指标既不出条款也不算孤儿", () => {
+    const merged = mergePurchaseTerms(template, undefined, { A: 10 });
+    expect(merged.terms?.clauses).toHaveLength(1);
+    expect(merged.terms?.clauses[0].indicator).toBe("A");
+    expect(merged.orphanedGuarantees).toEqual([]);
+  });
+
+  it("单煤覆盖可以新增模板没有的指标(覆盖专属条款)", () => {
+    const merged = mergePurchaseTerms(
+      template,
+      { clauses: [{ indicator: "M", direction: "Upper", penalty: { tiers: [{ rate: 30 }], reject: 15 } }] },
+      { M: 9 },
+    );
+    expect(merged.terms?.clauses).toHaveLength(1);
+    expect(merged.terms?.clauses[0].indicator).toBe("M");
+  });
+
+  it("单煤覆盖可以排除模板条款: 即使有保证值也不产出, 且不计入孤儿", () => {
+    const merged = mergePurchaseTerms(
+      template,
+      { excluded_indicators: ["G"] },
+      { A: 10, G: 85 },
+    );
+    expect(merged.terms?.clauses).toHaveLength(1);
+    expect(merged.terms?.clauses.some((clause) => clause.indicator === "G")).toBe(false);
+    expect(merged.orphanedGuarantees).toEqual([]);
+  });
+
+  it("模板整体缺失(如跨设备未同步): 有保证值却找不到条款要报孤儿, 不能静默吃掉", () => {
+    const merged = mergePurchaseTerms(null, undefined, { A: 10 });
+    expect(merged.terms).toBeNull();
+    expect(merged.orphanedGuarantees).toEqual(["A"]);
+  });
+
+  it("部分指标的模板条款缺失: 有条款的照常产出, 缺条款的报孤儿而不是被吞掉", () => {
+    const merged = mergePurchaseTerms(
+      null,
+      { clauses: [{ indicator: "A", direction: "Upper", penalty: { tiers: [{ rate: 80 }], reject: 12 } }] },
+      { A: 10, G: 85 },
+    );
+    expect(merged.terms?.clauses).toHaveLength(1);
+    expect(merged.orphanedGuarantees).toEqual(["G"]);
+  });
+
+  it("覆盖显式把合同水分设为 null 时关闭该项, 不回退模板", () => {
+    const merged = mergePurchaseTerms(template, { contract_moisture: null }, { A: 10 });
+    expect(merged.terms?.contract_moisture).toBeNull();
+  });
+
+  it("覆盖完全不提合同水分这个键时, 回退模板的值", () => {
+    const merged = mergePurchaseTerms(template, { clauses: [] }, { A: 10 });
+    expect(merged.terms?.contract_moisture).toBe(8);
   });
 });
 ```
@@ -1791,30 +1860,77 @@ export interface PenaltyTemplate {
 /** 单煤覆盖: 只列出与模板不同的条款. */
 export interface CoalPenaltyOverride {
   clauses?: PenaltyTemplateClause[];
+  /**
+   * 该煤明确不适用的模板条款指标: 即使有保证值也不产出条款, 且不计入孤儿保证值
+   * (这是用户主动排除, 不是数据丢失). 真实采购合同确实会只对部分指标计价.
+   */
+  excluded_indicators?: string[];
   contract_moisture?: number | null;
   moisture_excess_double_threshold?: number | null;
 }
 
 /**
- * 把合同原文的"每 step 个单位扣 amount 元"换算成 元/吨·单位.
- * 合同写"每超 0.1% 扣 8 元/吨" ⇒ tierRate(0.1, 8) = 80.
- * 让用户照抄合同, 不做心算 —— 8 与 80 差一个量级.
+ * 合并结果. `terms` 供 core 使用; `orphanedGuarantees` 标出"有保证值却找不到
+ * 条款"的指标 —— 调用方应据此提示用户, 而不是静默按无扣款处理.
+ *
+ * 孤儿保证值最常见的成因: 全局模板只存 localStorage 不跨设备同步
+ * (见 penaltyStorage.ts), 换设备登录后 CoalPref 里的 purchase_guarantees
+ * 随 coal_prefs 正常同步过来了, 但模板没有 —— 这种煤本该计价却悄悄零扣款,
+ * 两台设备算出的成本会不一致但界面上什么都不会报错。
  */
-export function tierRate(step: number, amount: number): number {
-  if (!Number.isFinite(step) || step <= 0 || !Number.isFinite(amount)) return 0;
+export interface MergedPurchaseTerms {
+  terms: PurchaseTerms | null;
+  orphanedGuarantees: string[];
+}
+
+/**
+ * 把合同原文的"每 step 个单位扣 amount 元"换算成 元/吨·单位.
+ * 合同写"每超 0.1% 扣 8 元/吨" ⇒ tierRate({ step: 0.1, amount: 8 }) = 80.
+ * 让用户照抄合同, 不做心算 —— 8 与 80 差一个量级。
+ *
+ * 用具名对象参数, 不用位置参数: `tierRate(8, 0.1)` 这种参数顺序传反的调用,
+ * 位置参数会静默算出一个看似合理但错误的数字, 对象参数会直接类型对不上/
+ * 值域检查失败, 编译期或运行期都能截住。
+ *
+ * 非法输入(step/amount 非有限数、step<=0、amount<0)返回 null, 不是 0 ——
+ * 0 本身是合法的零费率档位(某档不扣钱), 不能拿它当错误信号, 调用方必须
+ * 显式处理 null。
+ */
+export function tierRate({
+  step,
+  amount,
+}: {
+  step: number;
+  amount: number;
+}): number | null {
+  if (!Number.isFinite(step) || step <= 0) return null;
+  if (!Number.isFinite(amount) || amount < 0) return null;
   return amount / step;
 }
 
 /**
- * 合并全局模板与单煤覆盖, 配上该煤的保证值, 产出 core 需要的 PurchaseTerms.
- * 没有保证值的指标不产出条款(没有保证值就无从判定偏离).
- * 返回 null 表示该煤无可用采购条款, 应省略 purchase_terms 字段.
+ * 合并全局模板与单煤覆盖, 配上该煤的保证值, 产出 core 需要的 PurchaseTerms。
+ *
+ * 规则:
+ *   - 覆盖按指标逐条替换模板条款(不是整体替换); `excluded_indicators` 里的
+ *     指标即使在模板或覆盖里有条款也不产出(实现"单煤覆盖压制模板条款",
+ *     而不仅是新增/替换)。
+ *   - 没有保证值的指标不产出条款(没有保证值就无从判定偏离), 也不算孤儿
+ *     (这只是"没配置", 不是"配置丢了")。
+ *   - 有保证值却在模板+覆盖里都找不到条款的指标(且未被显式排除), 计入
+ *     `orphanedGuarantees` —— 调用方应提示用户, 而不是当作用户没配置。
+ *   - `contract_moisture` / `moisture_excess_double_threshold`: 覆盖对象里
+ *     显式写了这个键(哪怕值是 null)就用覆盖的值, 包括用 null 关掉该项;
+ *     完全没写这个键才回退模板。用 `in` 判断键是否存在, 不用 `??`,
+ *     因为 `??` 分不清"显式设为 null"和"压根没设置"。
+ *   - `terms === null` 表示该煤没有任何可用采购条款, 调用方应省略
+ *     `purchase_terms` 字段。
  */
 export function mergePurchaseTerms(
   template: PenaltyTemplate | null,
   override: CoalPenaltyOverride | undefined,
-  guarantees: Record<string, number>,
-): PurchaseTerms | null {
+  guarantees: Partial<Record<string, number>>,
+): MergedPurchaseTerms {
   const byIndicator = new Map<string, PenaltyTemplateClause>();
   for (const clause of template?.clauses ?? []) {
     byIndicator.set(clause.indicator, clause);
@@ -1822,11 +1938,18 @@ export function mergePurchaseTerms(
   for (const clause of override?.clauses ?? []) {
     byIndicator.set(clause.indicator, clause);
   }
+  const excluded = new Set(override?.excluded_indicators ?? []);
 
   const clauses: PurchaseClause[] = [];
-  for (const [indicator, clause] of byIndicator) {
-    const guarantee = guarantees[indicator];
-    if (!Number.isFinite(guarantee)) continue;
+  const orphanedGuarantees: string[] = [];
+  for (const [indicator, guarantee] of Object.entries(guarantees)) {
+    if (typeof guarantee !== "number" || !Number.isFinite(guarantee)) continue;
+    if (excluded.has(indicator)) continue;
+    const clause = byIndicator.get(indicator);
+    if (!clause) {
+      orphanedGuarantees.push(indicator);
+      continue;
+    }
     clauses.push({
       indicator,
       direction: clause.direction,
@@ -1835,21 +1958,25 @@ export function mergePurchaseTerms(
     });
   }
 
+  // 没有任何条款落地 = 该煤未配置采购扣款, 即使模板/覆盖带了合同水分也不该
+  // 套用(水分双倍计入是"该煤有采购合同"的推论, 不该在没有条款时生效)。
+  if (clauses.length === 0) {
+    return { terms: null, orphanedGuarantees };
+  }
+
   const contract_moisture =
-    override?.contract_moisture ?? template?.contract_moisture ?? null;
+    override != null && "contract_moisture" in override
+      ? (override.contract_moisture ?? null)
+      : (template?.contract_moisture ?? null);
   const moisture_excess_double_threshold =
-    override?.moisture_excess_double_threshold ?? template?.moisture_excess_double_threshold ?? null;
+    override != null && "moisture_excess_double_threshold" in override
+      ? (override.moisture_excess_double_threshold ?? null)
+      : (template?.moisture_excess_double_threshold ?? null);
 
-  // 注意: 只看 clauses 是否为空, 不要加 `&& contract_moisture == null`。
-  // 全局模板会把 contract_moisture 发给每一种煤, 加了那半个条件的话,
-  // 用户从未配置过的煤也会拿到 purchase_terms, 水分折算悄悄改掉它的价格
-  // (fob × (1−M实)/(1−M合), 常见 2% 量级), 整池煤被静默改价。
-  //
-  // 已知限制: 因此"只做水分结算、不配任何保证值"的煤暂不支持。若要支持,
-  // 需在 Task 8 给一个显式的单煤开关, 而不是让它成为模板的副作用。
-  if (clauses.length === 0) return null;
-
-  return { clauses, contract_moisture, moisture_excess_double_threshold };
+  return {
+    terms: { clauses, contract_moisture, moisture_excess_double_threshold },
+    orphanedGuarantees,
+  };
 }
 ```
 
@@ -1870,6 +1997,12 @@ import type { PenaltyTemplate } from "./penalty";
 // 新增顶层键需要建表迁移, 不在本期范围. 代价: 模板不跨设备同步.
 const KEY_PENALTY_TEMPLATE = "doudou_blend.penalty_template.v1";
 
+/**
+ * 模板变更事件名。订阅方用这个常量, 不要手打字符串字面量 ——
+ * 打错字不会报错, 只会让那个屏幕永远收不到刷新事件。
+ */
+export const PENALTY_TEMPLATE_EVENT = "doudou:penalty_template_changed";
+
 export function getPenaltyTemplate(): PenaltyTemplate | null {
   try {
     const raw = localStorage.getItem(KEY_PENALTY_TEMPLATE);
@@ -1884,12 +2017,12 @@ export function getPenaltyTemplate(): PenaltyTemplate | null {
 
 export function setPenaltyTemplate(template: PenaltyTemplate): void {
   localStorage.setItem(KEY_PENALTY_TEMPLATE, JSON.stringify(template));
-  window.dispatchEvent(new Event("doudou:penalty_template_changed"));
+  window.dispatchEvent(new CustomEvent(PENALTY_TEMPLATE_EVENT));
 }
 
 export function clearPenaltyTemplate(): void {
   localStorage.removeItem(KEY_PENALTY_TEMPLATE);
-  window.dispatchEvent(new Event("doudou:penalty_template_changed"));
+  window.dispatchEvent(new CustomEvent(PENALTY_TEMPLATE_EVENT));
 }
 ```
 
@@ -1923,6 +2056,24 @@ cd doudou_blend && npm test && npm run build
 git add doudou_blend/src/penalty.ts doudou_blend/src/penalty.test.ts doudou_blend/src/penaltyStorage.ts doudou_blend/src/storage.ts
 git commit -m "feat(penalty): 前端扣款单位换算与模板合并"
 ```
+
+**与最初设计的差异（首轮质量审查发现, 已修订到上面的代码块里）：**
+1. `mergePurchaseTerms` 从返回 `PurchaseTerms | null` 改为返回
+   `MergedPurchaseTerms { terms, orphanedGuarantees }`。原因: 模板只存
+   localStorage 不跨设备同步, 换设备后"这个煤没配置扣款"和"配置了但模板
+   丢了"在旧签名下都表现为 `null`, 两台设备算出的成本会静默不一致。
+2. `CoalPenaltyOverride` 新增 `excluded_indicators?: string[]`, 合并逻辑
+   末尾按它删除已产出的条款。原因: 原逻辑只能"新增/替换"模板条款, 无法
+   表达"这份采购合同压根不管这项指标", 用户只能删保证值迂回, 而保证值
+   可能还有其他用途。
+3. `tierRate` 从 `(step, amount): number` 改成
+   `({ step, amount }): number | null`。原因: 位置参数传反(`tierRate(amount, step)`)
+   会静默算出一个错的但貌似合理的数字, 而这是全前端最关键的一个单位换算;
+   返回 `0` 也没法跟"合法的零费率档位"区分, 改成 `null` 显式表达非法输入,
+   同时把负 `amount`(倒贴钱的扣款)也纳入非法输入。
+4. `penaltyStorage.ts` 用 `CustomEvent` 而非 `Event`(跟仓库其余事件风格
+   一致), 并导出 `PENALTY_TEMPLATE_EVENT` 常量供订阅方引用, 避免手打
+   字符串字面量打错字导致订阅永远失效。
 
 ---
 
@@ -2143,7 +2294,10 @@ function togglePriced(spec: Spec, on: boolean): Spec {
       value={tierAmounts[index] ?? 0}
       onChange={(event) => {
         setTierAmount(index, Number(event.target.value));
-        updateTier(index, { ...tier, rate: tierRate(tierSteps[index] ?? 0.1, Number(event.target.value)) });
+        const rate = tierRate({ step: tierSteps[index] ?? 0.1, amount: Number(event.target.value) });
+        // tierRate 对非法输入(负数/非有限/step<=0)返回 null, 不是 0 ——
+        // 0 是合法的零费率档位, 不能用它吞掉错误输入; null 时不写回, 保留旧值。
+        if (rate != null) updateTier(index, { ...tier, rate });
       }}
     />
     元/吨
@@ -2231,12 +2385,18 @@ import { getPenaltyTemplate, setPenaltyTemplate } from "../penaltyStorage";
 为每种煤补：
 
 ```tsx
-purchase_terms: mergePurchaseTerms(
+const { terms: purchase_terms, orphanedGuarantees } = mergePurchaseTerms(
   getPenaltyTemplate(),
   pref?.purchase_override,
   pref?.purchase_guarantees ?? {},
-),
+);
+// orphanedGuarantees 非空 = 该煤有保证值却找不到匹配条款(最常见成因:
+// 换设备登录, CoalPref 里的 purchase_guarantees 随 coal_prefs 同步过来了,
+// 但全局模板只存本机 localStorage, 没有同步) —— 对应的界面警示在 Task 7
+// (今日屏成本卡) 里处理, 这里只负责把它算出来, 不要在这一步吞掉。
 ```
+
+再把 `purchase_terms` 填进对应煤的请求对象。
 
 - [ ] **Step 7: 运行测试与构建**
 
