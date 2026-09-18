@@ -1874,7 +1874,23 @@ git commit -m "feat(penalty): 前端扣款单位换算与模板合并"
 **Files:**
 - Create: `doudou_blend/src/screens/CostCard.tsx`
 - Modify: `doudou_blend/src/screens/TodayScreen.tsx`（916 行 → 抽出成本卡）
-- Test: `doudou_blend/src/screens/CostCard.test.tsx`
+- Modify: `doudou_blend/src/backend.ts`（历史净成本派生，见 Step 0）
+- Test: `doudou_blend/src/screens/CostCard.test.tsx`、`doudou_blend/src/backend.test.ts`
+
+- [ ] **Step 0: 历史记录显示的是报价而非净成本（Task 5 排查发现）**
+
+`blend_kit_server/src/database.rs:236` 把 `/cost/cif_per_ton` 抽成 `cost_cif` 列，
+`HistoryScreen.tsx:274` 直接渲染 `¥{entry.cost_cif.toFixed(2)}`。启用合同条款后，
+这个数字就不再是真实成本——买入侧折扣和卖出侧扣款都没算进去。
+
+**不改服务端、不加列、不做迁移。** 按仓库既有分层（Rust 侧存不透明 blob，
+TS adapter 从 result 派生展示字段）在 `backend.ts` 的 history adapter 里派生：
+优先取 `result.cost.net_per_ton`，缺失时回退到 `cost_cif` 列。
+
+老记录的 blob 里没有 `net_per_ton`，回退能生效正是因为 Task 1 把这四个字段
+在 TS 侧标成了可选；不要把它们改回必填。
+
+测试：带 `net_per_ton` 的记录取净成本；不带的老记录回退到 `cost_cif`。
 
 - [ ] **Step 1: 写失败测试**
 
