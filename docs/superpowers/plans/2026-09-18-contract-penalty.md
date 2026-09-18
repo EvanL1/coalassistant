@@ -1840,7 +1840,14 @@ export function mergePurchaseTerms(
   const moisture_excess_double_threshold =
     override?.moisture_excess_double_threshold ?? template?.moisture_excess_double_threshold ?? null;
 
-  if (clauses.length === 0 && contract_moisture == null) return null;
+  // 注意: 只看 clauses 是否为空, 不要加 `&& contract_moisture == null`。
+  // 全局模板会把 contract_moisture 发给每一种煤, 加了那半个条件的话,
+  // 用户从未配置过的煤也会拿到 purchase_terms, 水分折算悄悄改掉它的价格
+  // (fob × (1−M实)/(1−M合), 常见 2% 量级), 整池煤被静默改价。
+  //
+  // 已知限制: 因此"只做水分结算、不配任何保证值"的煤暂不支持。若要支持,
+  // 需在 Task 8 给一个显式的单煤开关, 而不是让它成为模板的副作用。
+  if (clauses.length === 0) return null;
 
   return { clauses, contract_moisture, moisture_excess_double_threshold };
 }
