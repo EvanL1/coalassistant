@@ -639,7 +639,7 @@ mod tests {
 
     /// 档位列不得参与 Σx=1, 也不得被配比归一化缩放.
     #[test]
-    fn test_lp_problem_only_normalizes_ratio_columns() {
+    fn test_lp_problem_excludes_extra_columns_from_sum() {
         let problem = LpProblem {
             ratio_count: 2,
             n: 3,
@@ -664,7 +664,7 @@ mod tests {
 - [ ] **Step 2: 运行确认失败**
 
 ```bash
-cd blend_kit_rs && cargo test --release test_lp_problem_only_normalizes_ratio_columns
+cd blend_kit_rs && cargo test --release test_lp_problem_excludes_extra_columns_from_sum
 ```
 预期：编译失败，`struct LpProblem has no field named ratio_count`。
 
