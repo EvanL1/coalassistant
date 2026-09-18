@@ -156,7 +156,7 @@ describe("TodayScreen 求解快照", () => {
       await second.promise;
     });
     await waitFor(() =>
-      expect(screen.getByTestId("cost-cif").textContent).toBe("1200.00 元/吨"),
+      expect(screen.getByText("1200", { selector: ".cost-int" })).toBeTruthy(),
     );
 
     await act(async () => {
@@ -164,8 +164,8 @@ describe("TodayScreen 求解快照", () => {
       await first.promise;
     });
 
-    expect(screen.getByTestId("cost-cif").textContent).toBe("1200.00 元/吨");
-    expect(screen.getByTestId("cost-cif").textContent).not.toBe("1000.00 元/吨");
+    expect(screen.getByText("1200", { selector: ".cost-int" })).toBeTruthy();
+    expect(screen.queryByText("1000", { selector: ".cost-int" })).toBeNull();
   });
 
   it("吨数重算完成前禁止旧结果操作，完成后保存和导出都使用新快照", async () => {
@@ -180,9 +180,7 @@ describe("TodayScreen 求解快照", () => {
     mocks.getBackend.mockResolvedValue(backend);
 
     render(<TodayScreen onNavigate={vi.fn()} />);
-    expect((await screen.findByTestId("cost-cif")).textContent).toBe(
-      "1000.00 元/吨",
-    );
+    await screen.findByText("1000", { selector: ".cost-int" });
 
     const quantityInput = screen.getByLabelText("采购总吨数");
     fireEvent.change(quantityInput, { target: { value: "5000" } });
@@ -235,9 +233,7 @@ describe("TodayScreen 求解快照", () => {
     mocks.getBackend.mockResolvedValue(backend);
 
     render(<TodayScreen onNavigate={vi.fn()} />);
-    expect((await screen.findByTestId("cost-cif")).textContent).toBe(
-      "1000.00 元/吨",
-    );
+    await screen.findByText("1000", { selector: ".cost-int" });
 
     fireEvent.blur(screen.getByLabelText("采购总吨数"));
     fireEvent.click(screen.getByRole("button", { name: "导出订单" }));
@@ -258,9 +254,7 @@ describe("TodayScreen 求解快照", () => {
     mocks.getBackend.mockResolvedValue(backend);
 
     const view = render(<TodayScreen onNavigate={vi.fn()} />);
-    expect((await screen.findByTestId("cost-cif")).textContent).toBe(
-      "1000.00 元/吨",
-    );
+    await screen.findByText("1000", { selector: ".cost-int" });
     const timerSpy = vi.spyOn(window, "setTimeout");
     timerSpy.mockClear();
 
@@ -346,9 +340,7 @@ describe("TodayScreen 报价时效提示", () => {
     });
 
     render(<TodayScreen onNavigate={vi.fn()} />);
-    expect((await screen.findByTestId("cost-cif")).textContent).toBe(
-      "1000.00 元/吨",
-    );
+    await screen.findByText("1000", { selector: ".cost-int" });
 
     const note = await screen.findByText(/报价停留在 2026-07-17/);
     expect(note.textContent).toContain("未按市场校正");
@@ -363,9 +355,7 @@ describe("TodayScreen 报价时效提示", () => {
     });
 
     render(<TodayScreen onNavigate={vi.fn()} />);
-    expect((await screen.findByTestId("cost-cif")).textContent).toBe(
-      "1000.00 元/吨",
-    );
+    await screen.findByText("1000", { selector: ".cost-int" });
 
     // fob 900 * 1.152 + frt 100 = 1136.8 -> 1137; 运费不参与漂移
     const estimate = await screen.findByText(/随焦煤现货指数/);
@@ -381,9 +371,7 @@ describe("TodayScreen 报价时效提示", () => {
     });
 
     render(<TodayScreen onNavigate={vi.fn()} />);
-    expect((await screen.findByTestId("cost-cif")).textContent).toBe(
-      "1000.00 元/吨",
-    );
+    await screen.findByText("1000", { selector: ".cost-int" });
     await screen.findByText(/报价停留在 2026-07-17/);
 
     expect(screen.queryByText(/随焦煤现货指数/)).toBeNull();

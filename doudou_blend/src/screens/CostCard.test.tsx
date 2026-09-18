@@ -37,7 +37,9 @@ describe("CostCard", () => {
     render(<CostCard cost={{ ...base, penalty_per_ton: 64, net_per_ton: 1164 }} />);
     expect(screen.getByText("预计扣款")).toBeTruthy();
     expect(screen.getByText("64.00 元/吨")).toBeTruthy();
-    expect(screen.getByText("1164.00 元/吨")).toBeTruthy();
+    // 净成本是大字号主位 (两段式 .cost-int/.cost-dec), 不是一个整串文本节点.
+    expect(screen.getByText("1164", { selector: ".cost-int" })).toBeTruthy();
+    expect(screen.getByText(".00", { selector: ".cost-dec" })).toBeTruthy();
   });
 
   it("有买入修正时显示修正行, 折扣为负值", () => {
@@ -46,6 +48,15 @@ describe("CostCard", () => {
     );
     expect(screen.getByText("买入修正")).toBeTruthy();
     expect(screen.getByText("-40.00 元/吨")).toBeTruthy();
+  });
+
+  it("大字号主位显示净成本而非到厂价 (LP 按净成本求最优, 报价只是展示)", () => {
+    render(<CostCard cost={{ ...base, penalty_per_ton: 30, net_per_ton: 1130 }} />);
+    // cif_per_ton=1100, net_per_ton=1130 —— 主位必须是 1130, 不是 1100.
+    expect(screen.getByText("1130", { selector: ".cost-int" })).toBeTruthy();
+    expect(screen.queryByText("1100", { selector: ".cost-int" })).toBeNull();
+    // 到厂价明细行仍展示报价原值.
+    expect(screen.getByText("1100.00 元/吨")).toBeTruthy();
   });
 
   it("买入修正与卖出扣款字段缺失 (老记录) 时按无扣款处理, 不崩溃", () => {
@@ -58,8 +69,8 @@ describe("CostCard", () => {
     expect(screen.getByText("到厂价")).toBeTruthy();
     expect(screen.queryByText("预计扣款")).toBeNull();
     expect(screen.queryByText("买入修正")).toBeNull();
-    // net_per_ton 也缺失 → 回退展示 cif_per_ton, 不是伪造的 0.00
-    expect(screen.getAllByText("1000.00 元/吨").length).toBeGreaterThan(0);
+    // net_per_ton 也缺失 → 大字号回退展示 cif_per_ton, 不是伪造的 0.00
+    expect(screen.getByText("1000", { selector: ".cost-int" })).toBeTruthy();
   });
 
   it("没有孤儿保证值时不显示模板缺失告警", () => {

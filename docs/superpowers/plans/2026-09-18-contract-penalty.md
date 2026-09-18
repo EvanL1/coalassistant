@@ -2217,25 +2217,77 @@ cd doudou_blend && npx vitest run src/screens/CostCard.test.tsx
 ```
 预期：FAIL —— `Cannot find module './CostCard'`。
 
-- [ ] **Step 3: 实现 `doudou_blend/src/screens/CostCard.tsx`**
+- [ ] **Step 3: 实现 `doudou_blend/src/screens/CostCard.tsx`（已按实现修订，见下方"实际交付"说明）**
+
+⚠ **给下一个读这份计划的人**：下面这版是 Task 7 执行时发现原计划有问题后，
+经 team-lead 确认修订过的版本，不是最初草稿。原计划的 Step 4 写的是"整段替换"
+`TodayScreen.tsx` 里渲染 `cost.cif_per_ton` 的成本区块 —— 但那个区块（原
+`.cost-card.today-cost` div）不只是价格数字，还打包了 `.cost-meta`（数值界内
+/质量/可选煤数/总额徽章）和 `.cost-drift`（报价时效/锚点推算/现货指数提示）。
+`.cost-drift` 有自己的一组回归测试（`TodayScreen.test.tsx` 的
+"TodayScreen 报价时效提示" describe block），代码里还留了一条注释明确警告过
+"真正危险的是没推算的默认态，不能不提示" —— 照原计划"整段替换 + 删掉
+formatPrice"会连这部分一起删掉。**执行时发现后立即停下汇报，不要自己删。**
+
+实际交付的设计：
+
+- `.cost-meta` / `.cost-drift` **完全不动**，还留在 `TodayScreen.tsx` 里，只是从
+  `.cost-card.today-cost` 搬进了一个新的同级"状态卡"（`.cost-card.cost-status-card`），
+  和 `<CostCard>` 一起包在 `<div className="today-cost">` 里（两张蓝卡上下堆叠，
+  `.today-cost` 仍是 `.today-dashboard` 网格里那一格）。
+- `CostCard` 的大字号主位（`.cost-int`/`.cost-dec`/`.cost-unit` 两段式，
+  `formatPrice` 也从 `TodayScreen.tsx` **搬进**（不是删除）`CostCard.tsx`）
+  展示的是 `net_per_ton`（回退 `cif_per_ton`），标签仍是"最低到厂价"不变 ——
+  净成本才是 LP 实际求最优的数字，到厂价条款生效后只是报价，大字号主位必须
+  跟着净成本走，否则这个功能要展示的数字反而被继续藏起来。没有计价条款时
+  `net_per_ton === cif_per_ton`，大字号数值和老界面完全一致，界面观感不变。
+- 大字号下方是明细行：到厂价（`cost.cif_per_ton`，恒定展示）、买入修正、
+  预计扣款（后两行 `Math.abs(...) > 1e-6` 时才显示，值为 0/缺失就隐藏）。
+- 额外加了 Step 8（孤儿保证值告警，见下方），`orphanedGuarantees` 非空时在卡片
+  顶部插入 `role="alert"` 的红色告警块，点名煤种和指标。
 
 ```tsx
+import { INDICATOR_LABEL } from "../types";
 import type { CostBreakdown } from "../types";
+import type { OrphanedGuaranteeWarning } from "../domain/resolvedCoal";
 
 const YUAN = (value: number) => `${value.toFixed(2)} 元/吨`;
 
-/**
- * 成本卡: 到厂价 / 买入修正 / 预计扣款 / 净成本.
- * 净成本才是真实吨成本 —— LP 就是按它求最优的.
- * 修正与扣款为 0 时隐藏该行, 保持无计价条款用户的界面不变.
- */
-export function CostCard({ cost }: { cost: CostBreakdown }) {
-  const hasAdjust = Math.abs(cost.purchase_adjust_per_ton) > 1e-6;
-  const hasPenalty = Math.abs(cost.penalty_per_ton) > 1e-6;
-  const detailed = hasAdjust || hasPenalty;
+/** 拆成整数/小数两段, 配合 .cost-int/.cost-dec 两段式大字号. */
+function formatPrice(n: number): { int: string; dec: string } {
+  const [intPart, decPart] = n.toFixed(2).split(".");
+  return { int: intPart, dec: decPart };
+}
+
+function indicatorLabel(indicator: string): string {
+  return INDICATOR_LABEL[indicator] ?? indicator;
+}
+
+export function CostCard({
+  cost,
+  orphanedGuarantees = [],
+}: {
+  cost: CostBreakdown;
+  orphanedGuarantees?: OrphanedGuaranteeWarning[];
+}) {
+  const hasAdjust = Math.abs(cost.purchase_adjust_per_ton ?? 0) > 1e-6;
+  const hasPenalty = Math.abs(cost.penalty_per_ton ?? 0) > 1e-6;
+  const netPerTon = cost.net_per_ton ?? cost.cif_per_ton;
+  const { int: costInt, dec: costDec } = formatPrice(netPerTon);
 
   return (
     <div className="cost-card">
+      {orphanedGuarantees.length > 0 && (
+        <div className="cost-orphan-warning" role="alert">
+          {/* ⚠ 采购扣款模板在本设备缺失, 点名煤种/指标 —— 见 Step 8 */}
+        </div>
+      )}
+      <div className="cost-label">最低到厂价</div>
+      <div className="cost-amount">
+        <span className="cost-int">{costInt}</span>
+        <span className="cost-dec">.{costDec}</span>
+        <span className="cost-unit">元/吨</span>
+      </div>
       <div className="cost-row">
         <span>到厂价</span>
         <span>{YUAN(cost.cif_per_ton)}</span>
@@ -2243,28 +2295,38 @@ export function CostCard({ cost }: { cost: CostBreakdown }) {
       {hasAdjust && (
         <div className="cost-row cost-row--adjust">
           <span>买入修正</span>
-          <span>{YUAN(cost.purchase_adjust_per_ton)}</span>
+          <span>{YUAN(cost.purchase_adjust_per_ton ?? 0)}</span>
         </div>
       )}
       {hasPenalty && (
         <div className="cost-row cost-row--penalty">
           <span>预计扣款</span>
-          <span>{YUAN(cost.penalty_per_ton)}</span>
+          <span>{YUAN(cost.penalty_per_ton ?? 0)}</span>
         </div>
       )}
-      <div className={detailed ? "cost-row cost-row--net" : "cost-row"}>
-        <span>{detailed ? "净成本" : "合计"}</span>
-        <span>{YUAN(cost.net_per_ton)}</span>
-      </div>
     </div>
   );
 }
 ```
 
-- [ ] **Step 4: 在 `TodayScreen.tsx` 换用 `CostCard`**
+（完整实现含 data-testid 与告警块的具体文案，见仓库里的
+`doudou_blend/src/screens/CostCard.tsx`。）
 
-找到现有渲染 `cost.cif_per_ton` 的成本区块，整段替换为 `<CostCard cost={cost} />`，
-并在文件顶部加 `import { CostCard } from "./CostCard";`。删掉因此不再被引用的局部格式化函数。
+- [ ] **Step 4: 在 `TodayScreen.tsx` 换用 `CostCard`（范围比原计划窄 —— 见上方警告）**
+
+**不要**整段删掉 `.cost-card.today-cost`。只把原来渲染 `cost.cif_per_ton` 大字号
+（`cost-label` + `cost-amount` 那一小块，连同局部的 `formatPrice`/`costInt`/`costDec`）
+换成 `<CostCard cost={cost} orphanedGuarantees={...} />`；`.cost-meta` 和
+`.cost-drift`（报价时效提示）原样保留，和 `<CostCard>` 一起放进
+`<div className="today-cost">` 包裹的两张蓝卡里（详见上方"实际交付"）。
+`formatPrice` 搬进 `CostCard.tsx`，不要在 `TodayScreen.tsx` 里删掉后重新定义。
+
+在文件顶部加 `import { CostCard } from "./CostCard";`。
+
+**因为大字号主位换成了 `net_per_ton` 但没有配置计价条款时数值和原来的
+`cif_per_ton` 完全相等，`TodayScreen.test.tsx` 里原有的 `.cost-int` 选择器断言
+不需要改也能继续通过** —— 不要为了"用新组件"去重写这些断言，那样会造成没必要
+的测试改动量，也更容易在改的过程中悄悄削弱覆盖。
 
 - [ ] **Step 5: 指标体检显示扣款额**
 
@@ -2279,6 +2341,26 @@ export function CostCard({ cost }: { cost: CostBreakdown }) {
 )}
 ```
 
+这一步和原计划一致, 没有变化.
+
+- [ ] **Step 8: 采购扣款模板缺失告警（不在原计划里, Task 6 复盘后新加）**
+
+`mergePurchaseTerms`（`penalty.ts`）返回 `orphanedGuarantees`：一种煤有
+`purchase_guarantees` 却在模板+覆盖里都找不到匹配条款的指标列表。最常见成因是
+全局扣款模板只存 localStorage 不跨设备同步（见 `penaltyStorage.ts` 顶部注释），
+换设备登录后煤的保证值随 `coal_prefs` 同步过来了但模板没有 —— 这种煤本该计价
+却被静默当无扣款处理，两台设备算出的成本不一致但界面上什么都不会报错。
+
+新增 `collectOrphanedGuarantees(pool, prefs, template)`（`domain/resolvedCoal.ts`）：
+扫描 `effectiveEnabled` 的煤（停用/隐藏的煤不用吓用户），逐个调用
+`mergePurchaseTerms` 收集非空的 `orphanedGuarantees`，产出
+`{coal, indicators}[]`。在 `TodayScreen.tsx` 的 `runSolve` 里算好后存进
+`SolveSnapshot.orphanedGuarantees`（新增的可选字段, `domain/solveSession.ts`），
+传给 `<CostCard>` 的同名 prop；非空时卡片顶部插入 `role="alert"` 的红色告警块，
+点名煤种和指标（中文标签走 `INDICATOR_LABEL`）。另外监听了
+`PENALTY_TEMPLATE_EVENT`（跟已有的 prefs/contract/user_coals 变化监听对称），
+模板一变就自动重算刷新告警。
+
 - [ ] **Step 6: 运行测试**
 
 ```bash
@@ -2287,11 +2369,17 @@ cd doudou_blend && npm test && npm run build
 预期：`CostCard.test.tsx` PASS，`TodayScreen.test.tsx` 无回归。若 `TodayScreen.test.tsx`
 因构造 `CostBreakdown` 缺新字段而失败，补上 Task 1 新增的 6 个字段。
 
+**实际执行时额外发现并顺手修的两处同类缺陷**（导出/展示用了报价而非净成本，
+和 Step 0 是同一类问题，不在原计划范围内，但值得记录避免以后重犯）：
+`buildOrderText`（"导出订单"剪贴板文本）原来全程用 `cif_per_ton`/`cif_amount`/
+`total_cif`；`.cost-meta` 里的"总额"徽章也一样。两处都改成优先
+`net_per_ton`/`cif_eff_amount`/`total_net`，缺失时回退报价字段。
+
 - [ ] **Step 7: 提交**
 
 ```bash
-git add doudou_blend/src/screens/CostCard.tsx doudou_blend/src/screens/CostCard.test.tsx doudou_blend/src/screens/TodayScreen.tsx
-git commit -m "feat(today): 成本卡拆出独立组件并展示买入修正与卖出扣款"
+git add doudou_blend/src/screens/CostCard.tsx doudou_blend/src/screens/CostCard.test.tsx doudou_blend/src/screens/TodayScreen.tsx doudou_blend/src/screens/TodayScreen.test.tsx doudou_blend/src/backend.ts doudou_blend/src/backend.test.ts doudou_blend/src/domain/resolvedCoal.ts doudou_blend/src/domain/resolvedCoal.test.ts doudou_blend/src/domain/solveSession.ts doudou_blend/src/App.css
+git commit -m "feat(today): 成本卡拆出独立组件, 展示买入修正/卖出扣款, 并告警扣款模板缺失"
 ```
 
 ---

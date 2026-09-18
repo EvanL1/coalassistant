@@ -144,6 +144,31 @@ button {
   color: white;
   margin-bottom: 16px;
 }
+.cost-label {
+  font-size: 13px;
+  opacity: 0.85;
+  margin-bottom: 6px;
+}
+.cost-amount {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.cost-int {
+  font-size: 44px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -1px;
+}
+.cost-dec {
+  font-size: 22px;
+  font-weight: 700;
+}
+.cost-unit {
+  font-size: 14px;
+  opacity: 0.85;
+}
 .cost-meta {
   display: flex;
   flex-wrap: wrap;
