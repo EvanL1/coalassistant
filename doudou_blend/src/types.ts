@@ -78,8 +78,8 @@ export interface PurchaseTerms {
   clauses: PurchaseClause[];
   /** 合同水分 (%). */
   contract_moisture?: number | null;
-  /** 超过该水分 (%) 时超出部分双倍折算. */
-  moisture_double_threshold?: number | null;
+  /** 超过该水分 (%) 时, 超出部分按 2 倍计入有效水分 M_eff. */
+  moisture_excess_double_threshold?: number | null;
 }
 
 export interface Spec {
@@ -138,16 +138,26 @@ export interface BlendRequest {
 export interface CostBreakdown {
   fob_per_ton: number;
   frt_per_ton: number;
+  /** 到厂价. 扣款条款落地后仅作展示用, 实际优化目标是 net_per_ton. */
   cif_per_ton: number;
   total_fob?: number | null;
   total_frt?: number | null;
   total_cif?: number | null;
-  /** 买入侧扣款折扣 + 水分折算带来的到厂价修正合计, 元/吨. 负值 = 成本下降. */
-  purchase_adjust_per_ton: number;
-  /** 卖出侧质量扣款合计, 元/吨. */
-  penalty_per_ton: number;
-  /** 真实吨成本 = cif + purchase_adjust + penalty. */
-  net_per_ton: number;
+  /**
+   * 买入侧扣款折扣 + 水分折算带来的到厂价修正合计, 元/吨. 负值 = 成本下降.
+   * 可选: 兼容扣款条款上线前存量 BlendResult 记录 (无此字段).
+   */
+  purchase_adjust_per_ton?: number;
+  /**
+   * 卖出侧质量扣款合计, 元/吨.
+   * 可选: 兼容扣款条款上线前存量 BlendResult 记录 (无此字段).
+   */
+  penalty_per_ton?: number;
+  /**
+   * 真实吨成本 = cif + purchase_adjust + penalty.
+   * 可选: 兼容扣款条款上线前存量 BlendResult 记录 (无此字段).
+   */
+  net_per_ton?: number;
   total_purchase_adjust?: number | null;
   total_penalty?: number | null;
   total_net?: number | null;
@@ -160,8 +170,11 @@ export interface OrderItem {
   fob_amount?: number | null;
   frt_amount?: number | null;
   cif_amount?: number | null;
-  /** 该煤买入侧修正后的单价, 采购按此价核对. */
-  cif_eff: number;
+  /**
+   * 该煤买入侧修正后的单价 (元/吨), 采购按此价核对.
+   * 可选: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
+   */
+  cif_eff_per_ton?: number;
 }
 
 export interface IndicatorCheck {

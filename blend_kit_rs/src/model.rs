@@ -105,6 +105,10 @@ pub struct PenaltyTier {
 ///
 /// tiers 的 rate 必须严格递增: 凸性是"档位变量可用 LP 精确表达"的前提,
 /// 递减的 rate 会让求解器填错档并低估扣款.
+///
+/// 正负号由调用方负责: 买入侧扣款是折扣 (降低成本), 卖出侧扣款是费用 (提高成本);
+/// `reject` 的方向 (超上限拒收还是低于下限拒收) 由外层 `Spec`/`PurchaseClause`
+/// 的 `direction` 决定, 不由 `Penalty` 自身判断.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Penalty {
     pub tiers: Vec<PenaltyTier>,
@@ -130,9 +134,9 @@ pub struct PurchaseTerms {
     /// 合同水分 (%), 用于结算量折算. None = 不折算.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract_moisture: Option<f64>,
-    /// 超过该水分 (%) 时超出部分双倍折算. None = 不启用.
+    /// 超过该水分 (%) 时, 超出部分按 2 倍计入有效水分 M_eff. None = 不启用.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub moisture_double_threshold: Option<f64>,
+    pub moisture_excess_double_threshold: Option<f64>,
 }
 
 /// 合同值采用的报告判定方式.
@@ -313,16 +317,23 @@ fn default_truncate() -> bool {
 pub struct CostBreakdown {
     pub fob_per_ton: f64,
     pub frt_per_ton: f64,
+    /// 到厂价. 扣款条款落地后仅作展示用, LP 实际优化的是 `net_per_ton`.
     pub cif_per_ton: f64,
     /// 仅当 total_quantity 提供时填充.
     pub total_fob: Option<f64>,
     pub total_frt: Option<f64>,
     pub total_cif: Option<f64>,
     /// 买入侧扣款折扣 + 水分折算带来的到厂价修正合计, 元/吨. 负值 = 成本下降.
+    /// `#[serde(default)]`: 兼容扣款条款上线前存量 BlendResult 记录 (无此字段).
+    #[serde(default)]
     pub purchase_adjust_per_ton: f64,
     /// 卖出侧质量扣款合计, 元/吨.
+    /// `#[serde(default)]`: 兼容扣款条款上线前存量 BlendResult 记录 (无此字段).
+    #[serde(default)]
     pub penalty_per_ton: f64,
     /// 真实吨成本 = cif + purchase_adjust + penalty.
+    /// `#[serde(default)]`: 兼容扣款条款上线前存量 BlendResult 记录 (无此字段).
+    #[serde(default)]
     pub net_per_ton: f64,
     pub total_purchase_adjust: Option<f64>,
     pub total_penalty: Option<f64>,
@@ -340,8 +351,10 @@ pub struct OrderItem {
     pub fob_amount: Option<f64>,
     pub frt_amount: Option<f64>,
     pub cif_amount: Option<f64>,
-    /// 该煤买入侧修正后的单价, 采购按此价核对.
-    pub cif_eff: f64,
+    /// 该煤买入侧修正后的单价 (元/吨), 采购按此价核对.
+    /// `#[serde(default)]`: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
+    #[serde(default)]
+    pub cif_eff_per_ton: f64,
 }
 
 /// 视图 C: 单项指标的体检结果 (给质检/销售).

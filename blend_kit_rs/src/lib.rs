@@ -1056,13 +1056,83 @@ mod tests {
             (cost.net_per_ton - cost.cif_per_ton).abs() < 1e-9,
             "净成本应等于到厂价"
         );
+        assert_eq!(cost.total_purchase_adjust, Some(0.0));
         assert_eq!(cost.total_penalty, Some(0.0));
+        assert_eq!(cost.total_net, cost.total_cif, "净成本合计应等于到厂价合计");
 
+        // cif_eff_per_ton 是按煤而非常量的字段, 逐煤核对具体值而非只查有限.
+        // 甲 = 1000 + 50 = 1050, 乙 = 1100 + 50 = 1150.
+        assert!(!result.orders.is_empty(), "应至少有一条订单");
         for order in &result.orders {
-            assert!(order.cif_eff.is_finite(), "cif_eff 应已填充");
+            let expected_cif = match order.coal.as_str() {
+                "甲" => 1050.0,
+                "乙" => 1150.0,
+                other => panic!("意外煤种: {other}"),
+            };
+            assert_eq!(
+                order.cif_eff_per_ton, expected_cif,
+                "{} 的 cif_eff_per_ton 应等于其到厂价",
+                order.coal
+            );
         }
         for check in &result.indicator_check {
             assert_eq!(check.penalty_per_ton, None, "非计价指标扣款应为 None");
         }
+    }
+
+    /// 老 JSON(不含 penalty/purchase_terms)必须仍能解析并求解.
+    /// 这条测试守的是 solve_json 的字符串契约, 上一条测的是 Rust 结构体路径.
+    #[test]
+    fn test_solve_json_accepts_legacy_payload() {
+        let payload = r#"{
+            "coals": [
+                {"name":"甲","props":{"S":1.0,"A":9.0,"V":24.0,"G":88.0,"Y":16.0,"petro":0.10,"CSR":65.0,"M":8.0},"fob":1000.0,"frt":50.0},
+                {"name":"乙","props":{"S":0.8,"A":8.0,"V":26.0,"G":90.0,"Y":18.0,"petro":0.10,"CSR":66.0,"M":8.0},"fob":1100.0,"frt":50.0}
+            ],
+            "specs": [{"indicator":"A","direction":"Upper","min":null,"max":10.0,"enabled":true}],
+            "total_quantity": 1000.0,
+            "truncate_decimal": false
+        }"#;
+        let output = solve_json(payload);
+        let result: BlendResult = serde_json::from_str(&output).expect("结果应可反序列化");
+        assert!(result.ok, "老 JSON 应可求解: {:?}", result.reason);
+    }
+
+    /// 复现 BLOCKING 1: PostgreSQL 中存量 BlendResult 记录的 cost/orders
+    /// 缺扣款字段 (上线前写入); 没有 #[serde(default)] 会导致反序列化直接报错.
+    #[test]
+    fn test_legacy_blend_result_json_deserializes() {
+        let payload = r#"{
+            "ok": true,
+            "reason": null,
+            "recipe": {"甲": 1.0},
+            "cost": {
+                "fob_per_ton": 1000.0,
+                "frt_per_ton": 50.0,
+                "cif_per_ton": 1050.0,
+                "total_fob": 1000000.0,
+                "total_frt": 50000.0,
+                "total_cif": 1050000.0
+            },
+            "orders": [
+                {
+                    "coal": "甲",
+                    "ratio": 1.0,
+                    "tons": 1000.0,
+                    "fob_amount": 1000000.0,
+                    "frt_amount": 50000.0,
+                    "cif_amount": 1050000.0
+                }
+            ],
+            "indicator_check": [],
+            "warnings": []
+        }"#;
+        let result: BlendResult =
+            serde_json::from_str(payload).expect("缺扣款字段的存量记录应仍可反序列化");
+        let cost = result.cost.expect("应有成本");
+        assert_eq!(cost.purchase_adjust_per_ton, 0.0);
+        assert_eq!(cost.penalty_per_ton, 0.0);
+        assert_eq!(cost.net_per_ton, 0.0);
+        assert_eq!(result.orders[0].cif_eff_per_ton, 0.0);
     }
 }

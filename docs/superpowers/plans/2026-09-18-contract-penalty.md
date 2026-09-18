@@ -88,7 +88,7 @@
         assert_eq!(cost.total_penalty, Some(0.0));
 
         for order in &result.orders {
-            assert!(order.cif_eff.is_finite(), "cif_eff 应已填充");
+            assert!(order.cif_eff_per_ton.is_finite(), "cif_eff_per_ton 应已填充");
         }
         for check in &result.indicator_check {
             assert_eq!(check.penalty_per_ton, None, "非计价指标扣款应为 None");
@@ -150,9 +150,9 @@ pub struct PurchaseTerms {
     /// 合同水分 (%), 用于结算量折算. None = 不折算.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract_moisture: Option<f64>,
-    /// 超过该水分 (%) 时超出部分双倍折算. None = 不启用.
+    /// 超过该水分 (%) 时, 超出部分按 2 倍计入有效水分 M_eff. None = 不启用.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub moisture_double_threshold: Option<f64>,
+    pub moisture_excess_double_threshold: Option<f64>,
 }
 ```
 
@@ -188,10 +188,16 @@ pub struct PurchaseTerms {
 
 ```rust
     /// 买入侧扣款折扣 + 水分折算带来的到厂价修正合计, 元/吨. 负值 = 成本下降.
+    /// `#[serde(default)]`: 兼容扣款条款上线前存量 BlendResult 记录 (无此字段).
+    #[serde(default)]
     pub purchase_adjust_per_ton: f64,
     /// 卖出侧质量扣款合计, 元/吨.
+    /// `#[serde(default)]`: 兼容扣款条款上线前存量 BlendResult 记录 (无此字段).
+    #[serde(default)]
     pub penalty_per_ton: f64,
     /// 真实吨成本 = cif + purchase_adjust + penalty.
+    /// `#[serde(default)]`: 兼容扣款条款上线前存量 BlendResult 记录 (无此字段).
+    #[serde(default)]
     pub net_per_ton: f64,
     pub total_purchase_adjust: Option<f64>,
     pub total_penalty: Option<f64>,
@@ -201,8 +207,10 @@ pub struct PurchaseTerms {
 `OrderItem` 末尾增加字段：
 
 ```rust
-    /// 该煤买入侧修正后的单价, 采购按此价核对.
-    pub cif_eff: f64,
+    /// 该煤买入侧修正后的单价 (元/吨), 采购按此价核对.
+    /// `#[serde(default)]`: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
+    #[serde(default)]
+    pub cif_eff_per_ton: f64,
 ```
 
 `IndicatorCheck` 末尾增加字段：
@@ -225,7 +233,7 @@ pub struct PurchaseTerms {
         total_net: request.total_quantity.map(|quantity| quantity * cif_per_ton),
 ```
 
-`OrderItem` 构造处补 `cif_eff: coal.cif(),`。
+`OrderItem` 构造处补 `cif_eff_per_ton: coal.cif(),`。
 
 `IndicatorCheck` 的**两处**构造（`formulas.get` 失败分支与主分支）各补 `penalty_per_ton: None,`。
 
@@ -279,24 +287,35 @@ export interface PurchaseTerms {
   clauses: PurchaseClause[];
   /** 合同水分 (%). */
   contract_moisture?: number | null;
-  /** 超过该水分 (%) 时超出部分双倍折算. */
-  moisture_double_threshold?: number | null;
+  /** 超过该水分 (%) 时, 超出部分按 2 倍计入有效水分 M_eff. */
+  moisture_excess_double_threshold?: number | null;
 }
 ```
 
 `Spec` 接口末尾加 `penalty?: Penalty | null;`
 `Coal` 接口末尾加 `purchase_terms?: PurchaseTerms | null;`
-`CostBreakdown` 末尾加：
+`CostBreakdown` 末尾加 (四个字段都标 `?`: 兼容扣款条款上线前存量 `BlendResult` 记录反序列化后
+物理缺这些键; `backend.ts` 把存储 blob 直接断言成 `BlendResult`, 不标 `?` 会让 History 读取端
+对旧记录类型检查通过却渲染出虚假的 0)：
 ```ts
-  purchase_adjust_per_ton: number;
-  penalty_per_ton: number;
-  net_per_ton: number;
+  purchase_adjust_per_ton?: number;
+  penalty_per_ton?: number;
+  net_per_ton?: number;
   total_purchase_adjust?: number | null;
   total_penalty?: number | null;
   total_net?: number | null;
 ```
-`OrderItem` 末尾加 `cif_eff: number;`
+`OrderItem` 末尾加 `cif_eff_per_ton?: number;` (同理标 `?`)
 `IndicatorCheck` 末尾加 `penalty_per_ton?: number | null;`
+
+`scripts/check_repository_consistency.mjs` 的 `sharedStructs` (约 122-137 行) 补四条, 否则
+新增的四个类型 Rust↔TS 字段漂移不受 CI 保护：
+```js
+  [rustModelSource, "PenaltyTier", "PenaltyTier"],
+  [rustModelSource, "Penalty", "Penalty"],
+  [rustModelSource, "PurchaseClause", "PurchaseClause"],
+  [rustModelSource, "PurchaseTerms", "PurchaseTerms"],
+```
 
 - [ ] **Step 9: 运行测试与一致性检查**
 
@@ -1081,7 +1100,7 @@ mod tests {
                 penalty: Penalty { tiers: vec![tier(None, 80.0)], reject: 12.0 },
             }],
             contract_moisture: None,
-            moisture_double_threshold: None,
+            moisture_excess_double_threshold: None,
         };
         let coal = coal_with(&[("A", 10.5)], Some(terms));
         assert!((effective_cif(&coal).unwrap() - 1060.0).abs() < 1e-9);
@@ -1097,7 +1116,7 @@ mod tests {
                 penalty: Penalty { tiers: vec![tier(None, 80.0)], reject: 12.0 },
             }],
             contract_moisture: None,
-            moisture_double_threshold: None,
+            moisture_excess_double_threshold: None,
         };
         let coal = coal_with(&[("A", 9.2)], Some(terms));
         assert_eq!(effective_cif(&coal), Some(1100.0));
@@ -1113,7 +1132,7 @@ mod tests {
                 penalty: Penalty { tiers: vec![tier(None, 80.0)], reject: 12.0 },
             }],
             contract_moisture: None,
-            moisture_double_threshold: None,
+            moisture_excess_double_threshold: None,
         };
         let coal = coal_with(&[("A", 13.0)], Some(terms));
         assert_eq!(effective_cif(&coal), None, "越过采购合同拒收线的煤不应入池");
@@ -1125,7 +1144,7 @@ mod tests {
         let terms = PurchaseTerms {
             clauses: Vec::new(),
             contract_moisture: Some(8.0),
-            moisture_double_threshold: None,
+            moisture_excess_double_threshold: None,
         };
         let coal = coal_with(&[("M", 10.0)], Some(terms));
         let expected = 1000.0 * (0.90 / 0.92) + 100.0;
@@ -1137,12 +1156,12 @@ mod tests {
     }
 
     #[test]
-    fn test_moisture_double_threshold() {
+    fn test_moisture_excess_double_threshold() {
         // 实测 14% 超阈值 12% ⇒ 有效水分 2×14−12 = 16%
         let terms = PurchaseTerms {
             clauses: Vec::new(),
             contract_moisture: Some(8.0),
-            moisture_double_threshold: Some(12.0),
+            moisture_excess_double_threshold: Some(12.0),
         };
         let coal = coal_with(&[("M", 14.0)], Some(terms));
         let expected = 1000.0 * (0.84 / 0.92) + 100.0;
@@ -1207,7 +1226,7 @@ pub(crate) fn effective_cif(coal: &Coal) -> Option<f64> {
     // 结算量 = 实收净重 × (1−实际水分)/(1−合同水分); 运费按实收湿重付, 不参与折算.
     let moisture_factor = match (terms.contract_moisture, coal.get("M")) {
         (Some(contract), Some(actual)) if contract < 100.0 => {
-            let effective = match terms.moisture_double_threshold {
+            let effective = match terms.moisture_excess_double_threshold {
                 Some(threshold) if actual > threshold => 2.0 * actual - threshold,
                 _ => actual,
             };
@@ -1252,7 +1271,7 @@ cd blend_kit_rs && cargo test --release --lib penalty::
                 },
             }],
             contract_moisture: None,
-            moisture_double_threshold: None,
+            moisture_excess_double_threshold: None,
         }
     }
 
@@ -1289,7 +1308,7 @@ cd blend_kit_rs && cargo test --release --lib penalty::
         assert_eq!(cost.total_net, Some(10600.0));
 
         let order = result.orders.first().expect("应有订单");
-        assert!((order.cif_eff - 1060.0).abs() < 1e-6, "订单单价应为修正后价");
+        assert!((order.cif_eff_per_ton - 1060.0).abs() < 1e-6, "订单单价应为修正后价");
     }
 
     /// 越过采购合同拒收线的煤被剔出煤池并留下 warning.
@@ -1386,10 +1405,10 @@ use crate::penalty::effective_cif;
         }),
 ```
 
-`OrderItem` 构造的 `cif_eff` 改为：
+`OrderItem` 构造的 `cif_eff_per_ton` 改为：
 
 ```rust
-                cif_eff: effective_cif(coal).unwrap_or_else(|| coal.cif()),
+                cif_eff_per_ton: effective_cif(coal).unwrap_or_else(|| coal.cif()),
 ```
 
 - [ ] **Step 9: 运行全部测试**
@@ -1449,7 +1468,7 @@ describe("tierRate", () => {
 
 const template: PenaltyTemplate = {
   contract_moisture: 8,
-  moisture_double_threshold: 12,
+  moisture_excess_double_threshold: 12,
   clauses: [
     {
       indicator: "A",
@@ -1517,14 +1536,14 @@ export interface PenaltyTemplateClause {
 export interface PenaltyTemplate {
   clauses: PenaltyTemplateClause[];
   contract_moisture?: number | null;
-  moisture_double_threshold?: number | null;
+  moisture_excess_double_threshold?: number | null;
 }
 
 /** 单煤覆盖: 只列出与模板不同的条款. */
 export interface CoalPenaltyOverride {
   clauses?: PenaltyTemplateClause[];
   contract_moisture?: number | null;
-  moisture_double_threshold?: number | null;
+  moisture_excess_double_threshold?: number | null;
 }
 
 /**
@@ -1569,12 +1588,12 @@ export function mergePurchaseTerms(
 
   const contract_moisture =
     override?.contract_moisture ?? template?.contract_moisture ?? null;
-  const moisture_double_threshold =
-    override?.moisture_double_threshold ?? template?.moisture_double_threshold ?? null;
+  const moisture_excess_double_threshold =
+    override?.moisture_excess_double_threshold ?? template?.moisture_excess_double_threshold ?? null;
 
   if (clauses.length === 0 && contract_moisture == null) return null;
 
-  return { clauses, contract_moisture, moisture_double_threshold };
+  return { clauses, contract_moisture, moisture_excess_double_threshold };
 }
 ```
 

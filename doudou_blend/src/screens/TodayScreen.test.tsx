@@ -94,7 +94,7 @@ function makeResult(cif: number, quantity: number): BlendResult {
         ratio: 1,
         tons: quantity,
         cif_amount: cif * quantity,
-        cif_eff: cif,
+        cif_eff_per_ton: cif,
       },
     ],
     indicator_check: [],

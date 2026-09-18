@@ -539,7 +539,7 @@ fn solve_once(
                 fob_amount: tons.map(|value| value * coal.fob),
                 frt_amount: tons.map(|value| value * coal.frt),
                 cif_amount: tons.map(|value| value * coal.cif()),
-                cif_eff: coal.cif(),
+                cif_eff_per_ton: coal.cif(),
             }
         })
         .collect();
