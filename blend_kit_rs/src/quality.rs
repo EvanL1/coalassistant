@@ -666,6 +666,57 @@ mod tests {
         );
     }
 
+    fn priced_lower_spec(tiers: Vec<PenaltyTier>, reject: f64) -> Spec {
+        Spec {
+            indicator: "G".into(),
+            direction: Direction::Lower,
+            min: Some(10.0),
+            max: None,
+            enabled: true,
+            margin: None,
+            acceptance: None,
+            enforcement: Enforcement::Priced,
+            penalty: Some(Penalty { tiers, reject }),
+        }
+    }
+
+    #[test]
+    fn test_penalty_lower_direction_reject_must_be_outside_contract_bound() {
+        // Lower 向 reject 必须不高于合同下限, 否则计价区间为空
+        let spec = priced_lower_spec(
+            vec![PenaltyTier {
+                width: None,
+                rate: 80.0,
+            }],
+            11.0,
+        );
+        assert!(
+            validate_request(&request_with(spec)).is_err(),
+            "Lower 向 reject 落在合同界内侧应报错"
+        );
+    }
+
+    #[test]
+    fn test_valid_priced_lower_spec_passes() {
+        let spec = priced_lower_spec(
+            vec![
+                PenaltyTier {
+                    width: Some(0.5),
+                    rate: 10.0,
+                },
+                PenaltyTier {
+                    width: None,
+                    rate: 20.0,
+                },
+            ],
+            8.0,
+        );
+        assert!(
+            validate_request(&request_with(spec)).is_ok(),
+            "合法 Lower 向计价条款应通过"
+        );
+    }
+
     fn coal_with_terms(terms: PurchaseTerms) -> Coal {
         let mut props = std::collections::HashMap::new();
         for indicator in INDICATORS {
