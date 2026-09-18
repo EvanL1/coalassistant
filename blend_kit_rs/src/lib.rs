@@ -1526,4 +1526,99 @@ mod tests {
             cost.net_per_ton
         );
     }
+
+    /// margin 只收紧拒收线, 绝不移动合同界 —— 合同界是结算用的精确合同数字,
+    /// 移动它会让每吨凭空多扣 margin × rate, 且不会报错, 只是安静地算贵.
+    /// 无 margin 与有 margin 两次求解的扣款必须逐分相等.
+    #[test]
+    fn test_priced_margin_does_not_shift_contract_limit() {
+        let penalty_with_margin = |margin: Option<f64>| -> f64 {
+            let mut spec = priced_upper_spec(
+                "A",
+                10.0,
+                vec![
+                    PenaltyTier {
+                        width: Some(1.0),
+                        rate: 10.0,
+                    },
+                    PenaltyTier {
+                        width: None,
+                        rate: 30.0,
+                    },
+                ],
+                13.0,
+            );
+            spec.margin = margin;
+            let request = BlendRequest {
+                coals: vec![coal_from_tuple(
+                    "甲",
+                    (1.0, 11.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+                )],
+                specs: vec![spec],
+                total_quantity: None,
+                truncate_decimal: false,
+            };
+            let result = solve(&request);
+            assert!(result.ok, "margin={margin:?} 时应可解: {:?}", result.reason);
+            result.cost.expect("应有成本").penalty_per_ton
+        };
+
+        // 偏离 1.0: 恰好填满一档(宽 1.0, 10 元) ⇒ 10 元/吨.
+        let without_margin = penalty_with_margin(None);
+        assert!(
+            (without_margin - 10.0).abs() < 1e-3,
+            "无 margin 扣款应为 10 元/吨, 实得 {without_margin}"
+        );
+
+        // 若 margin 误加到合同界上: 界变 9.5, 偏离 1.5 ⇒ 10 + 0.5×30 = 25 元/吨.
+        // 取 11.0 而非 11.5, 是为了让变异态仍可解, 从而由下面的相等断言抓住差异,
+        // 而不是靠上面的 result.ok 断言间接抓住.
+        let with_margin = penalty_with_margin(Some(0.5));
+        assert!(
+            (without_margin - with_margin).abs() < 1e-6,
+            "margin 不得改变合同界扣款: 无 margin {without_margin}, 有 margin {with_margin}"
+        );
+    }
+
+    /// margin 必须真的收紧拒收线 —— 否则"margin 不影响扣款"可以靠彻底废掉
+    /// margin 来伪造通过. 灰分 11.25 落在 [拒收线 − margin, 拒收线] 区间内:
+    /// 无 margin 时未越 12.0 拒收线应可解, margin 1.0 把线收到 11.0 后必须不可行.
+    ///
+    /// 参数取值受限于已知缺陷: `LpProblem::solve` 的可行性复算用绝对 1e-8,
+    /// 比 Clarabel 在档位列上的收敛残差还紧, 约 27% 的良态计价输入会被误判
+    /// "约束冲突, LP 不可行". 上述取值经扫描确认落在稳定区; 该缺陷修复后可放宽.
+    #[test]
+    fn test_priced_margin_tightens_reject_line() {
+        let solves_with_margin = |margin: Option<f64>| -> bool {
+            let mut spec = priced_upper_spec(
+                "A",
+                10.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 10.0,
+                }],
+                12.0,
+            );
+            spec.margin = margin;
+            let request = BlendRequest {
+                coals: vec![coal_from_tuple(
+                    "甲",
+                    (1.0, 11.25, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+                )],
+                specs: vec![spec],
+                total_quantity: None,
+                truncate_decimal: false,
+            };
+            solve(&request).ok
+        };
+
+        assert!(
+            solves_with_margin(None),
+            "灰分 11.25 未越 12.0 拒收线, 无 margin 时应可解"
+        );
+        assert!(
+            !solves_with_margin(Some(1.0)),
+            "margin 1.0 把拒收线收紧到 11.0, 灰分 11.25 应判不可行"
+        );
+    }
 }

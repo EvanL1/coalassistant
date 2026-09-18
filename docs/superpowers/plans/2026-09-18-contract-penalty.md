@@ -1123,12 +1123,54 @@ Task 4 之前 `Priced` 不产生任何 LP 行；实现后它产生拒收线硬�
 > 已用变异测试验证其有效性：把 `offset: total_columns` 改成 `offset: count`
 > （单块时与正确实现等价）后，5 条单块用例**全部仍然通过**，只有这条两块用例失败。
 
+- [ ] **Step 4d: `margin` 的两条不变式（本计划初稿遗漏）**
+
+`margin` 只收紧拒收线、绝不移动合同界。合同界是结算用的精确合同数字，移动它会让
+每吨凭空多扣 `margin × rate`，**不报错、只是安静地算贵**。初稿全部计价用例的
+`margin` 都是 `None`，`margin == 0.0` 使该不变式在整个测试套件中不可观测——
+代码写对了，却零保护。审查用变异测试证实：把 `margin` 同时加到 `limit` 上，
+103 条测试**全绿**。
+
+- `test_priced_margin_does_not_shift_contract_limit`：同一场景跑两遍
+  （`margin: None` 与 `margin: Some(0.5)`），断言 `penalty_per_ton` 相等（容差 1e-6）。
+  灰分取 11.0 而非 11.5，是为了让变异态仍可解，从而由相等断言抓住差异，
+  而不是靠 `result.ok` 断言间接抓住。
+- `test_priced_margin_tightens_reject_line`：灰分 11.25 落在 [拒收线 − margin, 拒收线]
+  内，`None` 时可解、`Some(1.0)` 时不可行。缺了它，删光 `margin` 的作用即可伪造前一条通过。
+
+> 变异验证：`margin` 误加到 `limit` → 仅第一条失败（无 margin 10.0 / 有 margin 25.0）；
+> 抽掉 `margin` 对 `reject` 的作用 → 仅第二条失败。两次都是 94 过 1 failed。
+
+- [ ] **⚠ 未决缺陷：计价解约 27% 被误判不可行（Task 4 期间发现，未修）**
+
+`LpProblem::solve` 末尾的可行性复算用**绝对**容差 `SOLUTION_TOLERANCE = 1e-8`：
+
+```rust
+row.iter().zip(&solution).map(...).sum::<f64>() <= bound + SOLUTION_TOLERANCE
+```
+
+配比列在复算前被归一化重投影，残差收缩到 ~1e-13，所以硬约束一直没被咬到。
+**档位列没有任何归一化**，残差就是 Clarabel 内点法的收敛余量 ~1e-8..1e-7，
+而吸收行在最优解处**必然取等**（目标函数把 Σd 压到恰好等于偏离量），
+于是复算把正常解判成越界 → `solve_once` 返回 `None` → `"约束冲突, LP 不可行"`。
+
+实测（合同上限 10.0，单档 rate 10，扫描 ash 10.0~13.0 × reject 11.0~15.0）：
+**92 组良态输入中 25 组（27%）被误判不可行**，且分布无规律（ash=12.75 通过而
+12.50 失败），纯粹是条件数运气。诊断样本：ash=12.5 / reject=13.0 解出
+`x=[0.999999999999865, 2.499999961849723]`，吸收行残差 **3.815e-8 > 1e-8**。
+
+这与已关闭的"档位列未随配比列归一化"不是同一回事：那条的量级被 `SOLUTION_TOLERANCE`
+兜住，这条的残差是容差的 4 倍且可复现证伪。**修复方向需决策**（改相对残差判据 /
+按行范数缩放容差 / 收紧 Clarabel 收敛设置），因为复算同时守着硬约束与拒收线这道
+"商业自杀防线"，放宽它有安全含义，不应由实现者单方面改动。
+Task 4 的计价用例参数均已扫描确认落在稳定区，该缺陷修复后可放宽。
+
 - [ ] **Step 6: 运行测试**
 
 ```bash
 cd blend_kit_rs && cargo test --release && cargo clippy --release -- -D warnings
 ```
-预期：Task 4 的 8 个新测试 PASS（optimizer.rs 1 条不变式 + lib.rs 7 条行为），既有测试无回归。
+预期：Task 4 的 10 个新测试 PASS（optimizer.rs 1 条不变式 + lib.rs 9 条行为），既有测试无回归。
 
 - [ ] **Step 7: 提交**
 
