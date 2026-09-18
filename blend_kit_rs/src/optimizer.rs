@@ -726,6 +726,7 @@ fn solve_once(
         .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
         .map(|(coal, ratio)| {
             let tons = request.total_quantity.map(|quantity| quantity * ratio);
+            let effective = cif_eff_or_quoted(coal);
             OrderItem {
                 coal: coal.name.clone(),
                 ratio: *ratio,
@@ -733,8 +734,8 @@ fn solve_once(
                 fob_amount: tons.map(|value| value * coal.fob),
                 frt_amount: tons.map(|value| value * coal.frt),
                 cif_amount: tons.map(|value| value * coal.cif()),
-                cif_eff_per_ton: cif_eff_or_quoted(coal),
-                cif_eff_amount: tons.map(|value| value * cif_eff_or_quoted(coal)),
+                cif_eff_per_ton: effective,
+                cif_eff_amount: tons.map(|value| value * effective),
             }
         })
         .collect();
