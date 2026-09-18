@@ -431,6 +431,14 @@ fn append_hard_model_domains(
     Some(())
 }
 
+/// 一条计价约束在 LP 中占用的档位列区间.
+struct PricedBlock {
+    indicator: String,
+    /// 档位变量的起始列下标.
+    offset: usize,
+    tier_count: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_once(
     coals: &[&Coal],
@@ -443,7 +451,7 @@ fn solve_once(
     mut warnings: Vec<String>,
 ) -> Option<(BlendResult, Vec<f64>)> {
     let count = coals.len();
-    let costs: Vec<f64> = coals.iter().map(|coal| coal.cif()).collect();
+    let mut costs: Vec<f64> = coals.iter().map(|coal| coal.cif()).collect();
     let mut inequalities = Vec::new();
     let mut bounds = Vec::new();
 
@@ -479,15 +487,100 @@ fn solve_once(
     }
     append_hard_model_domains(coals, specs, models, &mut inequalities, &mut bounds)?;
 
+    // 计价约束: 每档一个变量, 罚款进目标. rate 递增保证求解器自行按序填档.
+    let priced: Vec<&Spec> = specs
+        .iter()
+        .filter(|spec| spec.enforcement == Enforcement::Priced)
+        .copied()
+        .collect();
+    let mut blocks: Vec<PricedBlock> = Vec::new();
+    let mut total_columns = count;
+    for spec in &priced {
+        let penalty = spec.penalty.as_ref()?;
+        blocks.push(PricedBlock {
+            indicator: spec.indicator.clone(),
+            offset: total_columns,
+            tier_count: penalty.tiers.len(),
+        });
+        total_columns += penalty.tiers.len();
+        for tier in &penalty.tiers {
+            costs.push(tier.rate);
+        }
+    }
+
+    for (spec, block) in priced.iter().zip(&blocks) {
+        let formula = formulas.get(&spec.indicator)?;
+        let penalty = spec.penalty.as_ref()?;
+        let rule = acceptance_rule(spec, request.truncate_decimal);
+        let margin = spec.margin.unwrap_or(0.0);
+
+        // 合同界是精确的合同数字, 不加 margin; margin 只收紧拒收线.
+        let (limit, reject) = match spec.direction {
+            Direction::Upper => (
+                effective_upper(spec.max?, &rule),
+                effective_upper(penalty.reject, &rule) - margin,
+            ),
+            Direction::Lower => (
+                effective_lower(spec.min?, &rule),
+                effective_lower(penalty.reject, &rule) + margin,
+            ),
+            Direction::Range => return None,
+        };
+
+        // 吸收行: value 超出 limit 的部分由档位变量承接.
+        let (mut row, bound) = match spec.direction {
+            Direction::Upper => formula.upper_constraint(limit),
+            _ => formula.lower_constraint(limit),
+        };
+        row.resize(total_columns, 0.0);
+        for index in 0..block.tier_count {
+            row[block.offset + index] = -1.0;
+        }
+        inequalities.push(row);
+        bounds.push(bound);
+
+        // 档宽行: 末档无上限, 不生成.
+        for (index, tier) in penalty.tiers.iter().enumerate() {
+            if let Some(width) = tier.width {
+                let mut row = vec![0.0; total_columns];
+                row[block.offset + index] = 1.0;
+                inequalities.push(row);
+                bounds.push(width);
+            }
+        }
+
+        // 悬崖行: 越过拒收线硬不可行.
+        let (mut row, bound) = match spec.direction {
+            Direction::Upper => formula.upper_constraint(reject),
+            _ => formula.lower_constraint(reject),
+        };
+        row.resize(total_columns, 0.0);
+        inequalities.push(row);
+        bounds.push(bound);
+    }
+
     let problem = LpProblem {
         ratio_count: count,
-        n: count,
+        n: total_columns,
         c: costs,
         a_ub: inequalities,
         b_ub: bounds,
     };
     let (solution, _) = problem.solve()?;
     let ratios = solution[..count].to_vec();
+
+    let mut penalty_by_indicator: HashMap<String, f64> = HashMap::new();
+    for (spec, block) in priced.iter().zip(&blocks) {
+        let penalty = spec.penalty.as_ref()?;
+        let amount: f64 = penalty
+            .tiers
+            .iter()
+            .enumerate()
+            .map(|(index, tier)| tier.rate * solution[block.offset + index].max(0.0))
+            .sum();
+        penalty_by_indicator.insert(block.indicator.clone(), amount);
+    }
+    let penalty_per_ton: f64 = penalty_by_indicator.values().sum();
 
     let recipe = coals
         .iter()
@@ -520,13 +613,15 @@ fn solve_once(
             .total_quantity
             .map(|quantity| quantity * cif_per_ton),
         purchase_adjust_per_ton: 0.0,
-        penalty_per_ton: 0.0,
-        net_per_ton: cif_per_ton,
+        penalty_per_ton,
+        net_per_ton: cif_per_ton + penalty_per_ton,
         total_purchase_adjust: request.total_quantity.map(|_| 0.0),
-        total_penalty: request.total_quantity.map(|_| 0.0),
+        total_penalty: request
+            .total_quantity
+            .map(|quantity| quantity * penalty_per_ton),
         total_net: request
             .total_quantity
-            .map(|quantity| quantity * cif_per_ton),
+            .map(|quantity| quantity * (cif_per_ton + penalty_per_ton)),
     };
     let mut orders: Vec<OrderItem> = coals
         .iter()
@@ -602,6 +697,23 @@ fn solve_once(
         if invalid_model_output {
             outcome.status = EvaluationStatus::Fail;
         }
+        // 计价指标超合同界是预期行为(已折算成扣款), 只要未越拒收线就不判 Fail.
+        // 拒收线本身是 LP 硬约束, 但非线性评估器的复算值可能与 LP 代理不同, 故仍显式复核.
+        if let Some(spec) = spec {
+            if spec.enforcement == Enforcement::Priced && outcome.status == EvaluationStatus::Fail {
+                let within_reject =
+                    spec.penalty
+                        .as_ref()
+                        .is_some_and(|penalty| match spec.direction {
+                            Direction::Upper => evaluated <= penalty.reject + SOLUTION_TOLERANCE,
+                            Direction::Lower => evaluated + SOLUTION_TOLERANCE >= penalty.reject,
+                            Direction::Range => false,
+                        });
+                if within_reject {
+                    outcome.status = EvaluationStatus::TolerancePass;
+                }
+            }
+        }
         if model_summary
             .as_ref()
             .is_some_and(|summary| !summary.in_domain)
@@ -626,7 +738,7 @@ fn solve_once(
             method: formula.method,
             status: outcome.status,
             model: model_summary,
-            penalty_per_ton: None,
+            penalty_per_ton: penalty_by_indicator.get(indicator).copied(),
         });
     }
 
@@ -901,6 +1013,34 @@ fn build_csc(rows: usize, columns: usize, triplets: &[(usize, usize, f64)]) -> C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 计价约束行的线性性依赖 den·x = Σx = 1.
+    /// 若将来引入非单位分母的 MetricFormula, 罚项行会静默失真 —— 用这条测试钉住.
+    #[test]
+    fn test_all_formulas_have_unit_denominators() {
+        let coals = [
+            crate::coal_from_tuple(
+                "甲",
+                (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+            ),
+            crate::coal_from_tuple(
+                "乙",
+                (0.8, 8.0, 26.0, 90.0, 18.0, 0.10, 66.0, 8.0, 1100.0, 0.0),
+            ),
+        ];
+        let refs: Vec<&Coal> = coals.iter().collect();
+        let formulas = build_formulas(&refs, &EvaluatorSet::default());
+        assert!(!formulas.is_empty(), "应至少构造出一个公式");
+        for (indicator, formula) in &formulas {
+            assert!(
+                formula
+                    .denominators
+                    .iter()
+                    .all(|value| (value - 1.0).abs() < 1e-12),
+                "{indicator} 的分母非单位, 计价约束将失真"
+            );
+        }
+    }
 
     /// 档位列不得参与 Σx=1.
     ///

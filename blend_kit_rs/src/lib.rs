@@ -1135,4 +1135,264 @@ mod tests {
         assert_eq!(cost.net_per_ton, 0.0);
         assert_eq!(result.orders[0].cif_eff_per_ton, 0.0);
     }
+
+    fn priced_upper_spec(
+        indicator: &str,
+        maximum: f64,
+        tiers: Vec<PenaltyTier>,
+        reject: f64,
+    ) -> Spec {
+        Spec {
+            indicator: indicator.into(),
+            direction: Direction::Upper,
+            min: None,
+            max: Some(maximum),
+            enabled: true,
+            margin: None,
+            acceptance: None,
+            enforcement: Enforcement::Priced,
+            penalty: Some(Penalty { tiers, reject }),
+        }
+    }
+
+    fn priced_lower_spec(
+        indicator: &str,
+        minimum: f64,
+        tiers: Vec<PenaltyTier>,
+        reject: f64,
+    ) -> Spec {
+        Spec {
+            indicator: indicator.into(),
+            direction: Direction::Lower,
+            min: Some(minimum),
+            max: None,
+            enabled: true,
+            margin: None,
+            acceptance: None,
+            enforcement: Enforcement::Priced,
+            penalty: Some(Penalty { tiers, reject }),
+        }
+    }
+
+    /// 偏离 1.5 跨两档: 一档(宽 1.0, 10 元)填满 + 二档(30 元)承接 0.5 ⇒ 10 + 15 = 25 元/吨.
+    /// 不需要次序约束, 因为二档更贵, 最小化目标自行按序填档.
+    #[test]
+    fn test_priced_penalty_fills_cheap_tier_first() {
+        let request = BlendRequest {
+            coals: vec![coal_from_tuple(
+                "甲",
+                (1.0, 11.5, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+            )],
+            specs: vec![priced_upper_spec(
+                "A",
+                10.0,
+                vec![
+                    PenaltyTier {
+                        width: Some(1.0),
+                        rate: 10.0,
+                    },
+                    PenaltyTier {
+                        width: None,
+                        rate: 30.0,
+                    },
+                ],
+                13.0,
+            )],
+            total_quantity: Some(100.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "计价超界不应判不可行: {:?}", result.reason);
+
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            (cost.penalty_per_ton - 25.0).abs() < 1e-3,
+            "扣款应为 25 元/吨, 实得 {}",
+            cost.penalty_per_ton
+        );
+        assert!(
+            (cost.net_per_ton - 1025.0).abs() < 1e-3,
+            "净成本应为 1025, 实得 {}",
+            cost.net_per_ton
+        );
+        // 内点法收敛到 ~1e-6, 总额不能用 assert_eq! 比浮点.
+        assert!(
+            cost.total_penalty
+                .is_some_and(|value| (value - 2500.0).abs() < 1e-2),
+            "扣款总额应为 2500, 实得 {:?}",
+            cost.total_penalty
+        );
+
+        let ash = result
+            .indicator_check
+            .iter()
+            .find(|check| check.indicator == "A")
+            .expect("应有灰分体检");
+        assert!(
+            ash.penalty_per_ton
+                .is_some_and(|value| (value - 25.0).abs() < 1e-3),
+            "灰分应带扣款额"
+        );
+        assert_eq!(
+            ash.status,
+            EvaluationStatus::TolerancePass,
+            "计价带内超合同界应判 TolerancePass 而非 Fail"
+        );
+        assert_ne!(result.quality_status, QualityStatus::NeedsReview);
+    }
+
+    /// 越过拒收线仍是硬不可行 —— 这是防止求解器算出商业自杀方案的唯一机制.
+    #[test]
+    fn test_priced_penalty_reject_line_is_hard() {
+        let request = BlendRequest {
+            coals: vec![coal_from_tuple(
+                "甲",
+                (1.0, 13.5, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+            )],
+            specs: vec![priced_upper_spec(
+                "A",
+                10.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 10.0,
+                }],
+                13.0,
+            )],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(!result.ok, "越过拒收线应不可行");
+    }
+
+    /// 便宜脏煤 vs 贵干净煤: 省 80 元、扣 64 元 ⇒ 应选脏煤.
+    /// 硬约束模型会把脏煤判为不可行, 白丢 16 元/吨.
+    #[test]
+    fn test_priced_penalty_prefers_cheaper_off_spec_coal() {
+        let request = BlendRequest {
+            coals: vec![
+                coal_from_tuple(
+                    "干净",
+                    (1.0, 10.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 2280.0, 0.0),
+                ),
+                coal_from_tuple(
+                    "便宜",
+                    (1.0, 10.8, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 2200.0, 0.0),
+                ),
+            ],
+            specs: vec![priced_upper_spec(
+                "A",
+                10.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 80.0,
+                }],
+                11.5,
+            )],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "应可解: {:?}", result.reason);
+
+        let cheap = result.recipe.get("便宜").copied().unwrap_or(0.0);
+        assert!(cheap > 0.999, "应全选便宜煤, 实得配比 {cheap}");
+
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            (cost.penalty_per_ton - 64.0).abs() < 1e-2,
+            "扣款应为 64 元/吨, 实得 {}",
+            cost.penalty_per_ton
+        );
+        assert!(
+            (cost.net_per_ton - 2264.0).abs() < 1e-2,
+            "净成本应为 2264 (优于干净煤的 2280), 实得 {}",
+            cost.net_per_ton
+        );
+    }
+
+    /// Lower 向的吸收行: 合同 G≥85, 单煤 G=83, 欠 2 点 × 5 元/吨·点 ⇒ 10 元/吨.
+    /// 这正是"宁可少 1 点粘结吃 5 元扣款, 也不花几十元换贵煤"的业务场景.
+    #[test]
+    fn test_priced_penalty_lower_direction_absorbs_shortfall() {
+        let request = BlendRequest {
+            coals: vec![coal_from_tuple(
+                "甲",
+                (1.0, 9.0, 24.0, 83.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+            )],
+            specs: vec![priced_lower_spec(
+                "G",
+                85.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 5.0,
+                }],
+                80.0,
+            )],
+            total_quantity: Some(100.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "计价欠界不应判不可行: {:?}", result.reason);
+
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            (cost.penalty_per_ton - 10.0).abs() < 1e-3,
+            "扣款应为 10 元/吨, 实得 {}",
+            cost.penalty_per_ton
+        );
+        assert!(
+            (cost.net_per_ton - 1010.0).abs() < 1e-3,
+            "净成本应为 1010, 实得 {}",
+            cost.net_per_ton
+        );
+        assert!(
+            cost.total_penalty
+                .is_some_and(|value| (value - 1000.0).abs() < 1e-2),
+            "扣款总额应为 1000, 实得 {:?}",
+            cost.total_penalty
+        );
+
+        let cohesion = result
+            .indicator_check
+            .iter()
+            .find(|check| check.indicator == "G")
+            .expect("应有粘结体检");
+        assert!(
+            cohesion
+                .penalty_per_ton
+                .is_some_and(|value| (value - 10.0).abs() < 1e-3),
+            "粘结应带扣款额"
+        );
+        assert_eq!(
+            cohesion.status,
+            EvaluationStatus::TolerancePass,
+            "计价带内低于合同界应判 TolerancePass 而非 Fail"
+        );
+    }
+
+    /// Lower 向的悬崖行: 拒收线是下限, 低于它硬不可行.
+    /// 与 Upper 向共用代码但符号相反, 单独钉住防止 effective_lower 的 margin 方向写反.
+    #[test]
+    fn test_priced_penalty_lower_reject_line_is_hard() {
+        let request = BlendRequest {
+            coals: vec![coal_from_tuple(
+                "甲",
+                (1.0, 9.0, 24.0, 79.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+            )],
+            specs: vec![priced_lower_spec(
+                "G",
+                85.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 5.0,
+                }],
+                80.0,
+            )],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(!result.ok, "低于拒收线应不可行");
+    }
 }
