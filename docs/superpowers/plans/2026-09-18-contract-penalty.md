@@ -460,20 +460,82 @@ cd blend_kit_rs && cargo test --release test_penalty_rates_must_increase
             let Some(penalty) = &spec.penalty else {
                 return Err(format!("{} 启用计价但缺扣款条款", label_zh(&spec.indicator)));
             };
-            validate_penalty(&spec.indicator, spec.direction, spec.min, spec.max, penalty)?;
+            // Range 已在上面提前返回, 这里只剩 Upper/Lower; needs_max/needs_min 检查
+            // (上文) 已保证对应边界存在, Some(..) else 只是防御式兜底.
+            let bound = if spec.direction == Direction::Upper {
+                spec.max
+            } else {
+                spec.min
+            };
+            let Some(bound) = bound else {
+                return Err(format!("{} 计价缺少合同边界", label_zh(&spec.indicator)));
+            };
+            validate_penalty(&spec.indicator, spec.direction, bound, penalty)?;
         }
 ```
 
-在 `validate_request` 之后新增函数：
+同一 coal 循环里，`props` 校验之后追加买入侧校验（调用下方 `validate_purchase_terms`）：
 
 ```rust
+        if let Some(terms) = &coal.purchase_terms {
+            validate_purchase_terms(&coal.name, terms)?;
+        }
+```
+
+在 `validate_request` 之后新增两个函数 —— `validate_purchase_terms` 校验买入侧
+`PurchaseClause`（**含同指标重复检测**：一个煤挂两条同指标条款会在 Task 5 的
+`effective_cif` 里被各自扣款重复计算，低估该煤成本，LP 因此过量买入，属于与凸性同一等级的
+"静默算错钱"风险），`validate_penalty` 是双侧共用的核心规则（凸性 + 拒收线方向）：
+
+```rust
+fn validate_purchase_terms(coal_name: &str, terms: &PurchaseTerms) -> Result<(), String> {
+    let mut indicators = std::collections::HashSet::new();
+    for clause in &terms.clauses {
+        if !INDICATORS.contains(&clause.indicator.as_str()) {
+            return Err(format!("{} 采购条款指标未知: {}", coal_name, clause.indicator));
+        }
+        if !indicators.insert(clause.indicator.as_str()) {
+            return Err(format!("{} 采购条款指标重复: {}", coal_name, clause.indicator));
+        }
+        if clause.direction == Direction::Range {
+            return Err(format!(
+                "{} {} 区间型指标不支持采购计价",
+                coal_name,
+                label_zh(&clause.indicator)
+            ));
+        }
+        if !clause.guarantee.is_finite() {
+            return Err(format!(
+                "{} {} 采购保证值必须是有限数",
+                coal_name,
+                label_zh(&clause.indicator)
+            ));
+        }
+        validate_penalty(&clause.indicator, clause.direction, clause.guarantee, &clause.penalty)
+            .map_err(|err| format!("{coal_name} {err}"))?;
+    }
+    if terms.contract_moisture.is_some_and(|m| !m.is_finite() || !(0.0..=100.0).contains(&m)) {
+        return Err(format!("{coal_name} 合同水分必须在 0~100 之间"));
+    }
+    if terms
+        .moisture_excess_double_threshold
+        .is_some_and(|t| !t.is_finite() || !(0.0..=100.0).contains(&t))
+    {
+        return Err(format!("{coal_name} 水分双倍阈值必须在 0~100 之间"));
+    }
+    Ok(())
+}
+
 /// 校验计价条款. 凸性(rate 递增)与拒收线方向是安全性的核心:
 /// 前者错会让 LP 低估扣款, 后者错会让计价区间为空.
-pub(crate) fn validate_penalty(
+///
+/// `bound` 是调用方按方向解出的合同边界 (Upper 传 max, Lower 传 min);
+/// 两处调用方都已在调用前把 Range 拒掉, 也都已保证 bound 存在 —— 所以这里不需要
+/// `Option<f64>` 双参数, 一个 `f64` 就够, 三条 ok_or_else/Range 的错误字符串都是死代码.
+fn validate_penalty(
     indicator: &str,
     direction: Direction,
-    minimum: Option<f64>,
-    maximum: Option<f64>,
+    bound: f64,
     penalty: &Penalty,
 ) -> Result<(), String> {
     let label = label_zh(indicator);
@@ -487,8 +549,11 @@ pub(crate) fn validate_penalty(
     let last = penalty.tiers.len() - 1;
     let mut previous_rate = f64::NEG_INFINITY;
     for (index, tier) in penalty.tiers.iter().enumerate() {
-        if !tier.rate.is_finite() || tier.rate < 0.0 {
-            return Err(format!("{label} 第 {} 档扣款率非法", index + 1));
+        if !tier.rate.is_finite() {
+            return Err(format!("{label} 第 {} 档扣款率必须是有限数", index + 1));
+        }
+        if tier.rate < 0.0 {
+            return Err(format!("{label} 第 {} 档扣款率不能为负 (rate={})", index + 1, tier.rate));
         }
         if tier.rate <= previous_rate {
             return Err(format!(
@@ -512,29 +577,37 @@ pub(crate) fn validate_penalty(
 
     match direction {
         Direction::Upper => {
-            let bound = maximum.ok_or_else(|| format!("{label} 计价缺少上限"))?;
             if penalty.reject < bound {
-                return Err(format!("{label} 拒收线必须不低于合同上限"));
+                return Err(format!(
+                    "{label} 拒收线必须不低于合同上限 (拒收线 {} < 上限 {})",
+                    penalty.reject, bound
+                ));
             }
         }
         Direction::Lower => {
-            let bound = minimum.ok_or_else(|| format!("{label} 计价缺少下限"))?;
             if penalty.reject > bound {
-                return Err(format!("{label} 拒收线必须不高于合同下限"));
+                return Err(format!(
+                    "{label} 拒收线必须不高于合同下限 (拒收线 {} > 下限 {})",
+                    penalty.reject, bound
+                ));
             }
         }
-        Direction::Range => return Err(format!("{label} 区间型指标不支持计价")),
+        Direction::Range => {
+            unreachable!("两处调用方 (validate_request / validate_purchase_terms) 已提前拒绝 Range")
+        }
     }
     Ok(())
 }
 ```
 
+`validate_penalty` 不需要 `pub(crate)`：两处调用方都在同一文件内。
+
 - [ ] **Step 4: 运行测试**
 
 ```bash
-cd blend_kit_rs && cargo test --release penalty && cargo test --release && cargo clippy --release -- -D warnings
+cd blend_kit_rs && cargo test --release penalty && cargo test --release && cargo clippy --release --all-targets -- -D warnings && cargo fmt --check
 ```
-预期：新增 6 个测试全 PASS，既有测试无回归。
+预期：新增测试全 PASS（卖出侧 + 买入侧 + 边界情况，覆盖比最初 6 个用例更全），既有测试无回归。
 
 - [ ] **Step 5: 提交**
 

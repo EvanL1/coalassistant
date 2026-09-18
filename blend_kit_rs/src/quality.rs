@@ -342,19 +342,38 @@ pub(crate) fn validate_request(request: &BlendRequest) -> Result<(), String> {
                     label_zh(&spec.indicator)
                 ));
             };
-            validate_penalty(&spec.indicator, spec.direction, spec.min, spec.max, penalty)?;
+            // Range 已在上面提前返回, 这里只剩 Upper/Lower; needs_max/needs_min 检查
+            // (:293-298) 已保证对应边界存在, Some(..) else 只是防御式兜底.
+            let bound = if spec.direction == Direction::Upper {
+                spec.max
+            } else {
+                spec.min
+            };
+            let Some(bound) = bound else {
+                return Err(format!("{} 计价缺少合同边界", label_zh(&spec.indicator)));
+            };
+            validate_penalty(&spec.indicator, spec.direction, bound, penalty)?;
         }
     }
     Ok(())
 }
 
 /// 校验单条采购合同计价条款 (买入侧). 规则与卖出侧 `validate_penalty` 共用,
-/// 额外校验 guarantee 有限、指标已知、方向不为 Range, 以及水分折算参数的合理范围.
+/// 额外校验 guarantee 有限、指标已知且不重复、方向不为 Range, 以及水分折算参数的合理范围.
 fn validate_purchase_terms(coal_name: &str, terms: &PurchaseTerms) -> Result<(), String> {
+    let mut indicators = std::collections::HashSet::new();
     for clause in &terms.clauses {
         if !INDICATORS.contains(&clause.indicator.as_str()) {
             return Err(format!(
                 "{} 采购条款指标未知: {}",
+                coal_name, clause.indicator
+            ));
+        }
+        if !indicators.insert(clause.indicator.as_str()) {
+            // 同一指标两条条款会在 effective_cif 里被各自的扣款重复计算,
+            // 让煤价被低估, LP 因此过量买入该煤 (同类问题参见凸性检查).
+            return Err(format!(
+                "{} 采购条款指标重复: {}",
                 coal_name, clause.indicator
             ));
         }
@@ -375,8 +394,7 @@ fn validate_purchase_terms(coal_name: &str, terms: &PurchaseTerms) -> Result<(),
         validate_penalty(
             &clause.indicator,
             clause.direction,
-            Some(clause.guarantee),
-            Some(clause.guarantee),
+            clause.guarantee,
             &clause.penalty,
         )
         .map_err(|err| format!("{coal_name} {err}"))?;
@@ -398,11 +416,13 @@ fn validate_purchase_terms(coal_name: &str, terms: &PurchaseTerms) -> Result<(),
 
 /// 校验计价条款. 凸性(rate 递增)与拒收线方向是安全性的核心:
 /// 前者错会让 LP 低估扣款, 后者错会让计价区间为空.
-pub(crate) fn validate_penalty(
+///
+/// `bound` 是调用方按方向解出的合同边界 (Upper 传 max, Lower 传 min);
+/// 两处调用方都已在调用前把 Range 拒掉, 也都已保证 bound 存在.
+fn validate_penalty(
     indicator: &str,
     direction: Direction,
-    minimum: Option<f64>,
-    maximum: Option<f64>,
+    bound: f64,
     penalty: &Penalty,
 ) -> Result<(), String> {
     let label = label_zh(indicator);
@@ -416,8 +436,15 @@ pub(crate) fn validate_penalty(
     let last = penalty.tiers.len() - 1;
     let mut previous_rate = f64::NEG_INFINITY;
     for (index, tier) in penalty.tiers.iter().enumerate() {
-        if !tier.rate.is_finite() || tier.rate < 0.0 {
-            return Err(format!("{label} 第 {} 档扣款率非法", index + 1));
+        if !tier.rate.is_finite() {
+            return Err(format!("{label} 第 {} 档扣款率必须是有限数", index + 1));
+        }
+        if tier.rate < 0.0 {
+            return Err(format!(
+                "{label} 第 {} 档扣款率不能为负 (rate={})",
+                index + 1,
+                tier.rate
+            ));
         }
         if tier.rate <= previous_rate {
             return Err(format!(
@@ -441,18 +468,24 @@ pub(crate) fn validate_penalty(
 
     match direction {
         Direction::Upper => {
-            let bound = maximum.ok_or_else(|| format!("{label} 计价缺少上限"))?;
             if penalty.reject < bound {
-                return Err(format!("{label} 拒收线必须不低于合同上限"));
+                return Err(format!(
+                    "{label} 拒收线必须不低于合同上限 (拒收线 {} < 上限 {})",
+                    penalty.reject, bound
+                ));
             }
         }
         Direction::Lower => {
-            let bound = minimum.ok_or_else(|| format!("{label} 计价缺少下限"))?;
             if penalty.reject > bound {
-                return Err(format!("{label} 拒收线必须不高于合同下限"));
+                return Err(format!(
+                    "{label} 拒收线必须不高于合同下限 (拒收线 {} > 下限 {})",
+                    penalty.reject, bound
+                ));
             }
         }
-        Direction::Range => return Err(format!("{label} 区间型指标不支持计价")),
+        Direction::Range => {
+            unreachable!("两处调用方 (validate_request / validate_purchase_terms) 已提前拒绝 Range")
+        }
     }
     Ok(())
 }
@@ -552,10 +585,8 @@ mod tests {
             ],
             12.0,
         );
-        assert!(
-            validate_request(&request_with(spec)).is_err(),
-            "rate 递减应报错"
-        );
+        let err = validate_request(&request_with(spec)).expect_err("rate 递减应报错");
+        assert!(err.contains("递增"), "错误信息应提及递增, 实际: {err}");
     }
 
     #[test]
@@ -568,10 +599,8 @@ mod tests {
             }],
             9.0,
         );
-        assert!(
-            validate_request(&request_with(spec)).is_err(),
-            "reject 在合同界内侧应报错"
-        );
+        let err = validate_request(&request_with(spec)).expect_err("reject 在合同界内侧应报错");
+        assert!(err.contains("拒收线"), "错误信息应提及拒收线, 实际: {err}");
     }
 
     #[test]
@@ -663,6 +692,22 @@ mod tests {
         assert!(
             validate_request(&request_with(spec)).is_ok(),
             "合法计价条款应通过"
+        );
+    }
+
+    #[test]
+    fn test_valid_priced_spec_single_tier_passes() {
+        // 单档 (width: None) 是真实合同最常见形态, 例如"每超 0.1% 扣 8 元/吨"无第二档.
+        let spec = priced_spec(
+            vec![PenaltyTier {
+                width: None,
+                rate: 80.0,
+            }],
+            12.0,
+        );
+        assert!(
+            validate_request(&request_with(spec)).is_ok(),
+            "单档计价条款应通过"
         );
     }
 
@@ -861,6 +906,69 @@ mod tests {
         assert!(
             validate_request(&request_with_purchase_terms(terms)).is_err(),
             "水分双倍阈值超出合理范围应报错"
+        );
+    }
+
+    #[test]
+    fn test_purchase_clause_rejects_duplicate_indicator() {
+        // 同一指标两条条款会在 effective_cif 里被重复扣款, 低估该煤成本, LP 因此过量买入.
+        let terms = PurchaseTerms {
+            clauses: vec![
+                PurchaseClause {
+                    indicator: "A".into(),
+                    direction: Direction::Upper,
+                    guarantee: 10.0,
+                    penalty: Penalty {
+                        tiers: vec![PenaltyTier {
+                            width: None,
+                            rate: 80.0,
+                        }],
+                        reject: 12.0,
+                    },
+                },
+                PurchaseClause {
+                    indicator: "A".into(),
+                    direction: Direction::Upper,
+                    guarantee: 10.0,
+                    penalty: Penalty {
+                        tiers: vec![PenaltyTier {
+                            width: None,
+                            rate: 50.0,
+                        }],
+                        reject: 12.0,
+                    },
+                },
+            ],
+            contract_moisture: None,
+            moisture_excess_double_threshold: None,
+        };
+        assert!(
+            validate_request(&request_with_purchase_terms(terms)).is_err(),
+            "买入侧同一指标重复应报错"
+        );
+    }
+
+    #[test]
+    fn test_valid_purchase_clause_single_tier_passes() {
+        let terms = PurchaseTerms {
+            clauses: vec![PurchaseClause {
+                indicator: "A".into(),
+                direction: Direction::Upper,
+                guarantee: 10.0,
+                penalty: Penalty {
+                    tiers: vec![PenaltyTier {
+                        width: None,
+                        rate: 80.0,
+                    }],
+                    reject: 12.0,
+                },
+            }],
+            contract_moisture: None,
+            moisture_excess_double_threshold: None,
+        };
+        assert!(
+            validate_request(&request_with_purchase_terms(terms)).is_ok(),
+            "单档买入侧计价条款应通过"
         );
     }
 
