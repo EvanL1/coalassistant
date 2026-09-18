@@ -12,6 +12,7 @@
 import type { Spec, MasterCoalEntry, BlendResult, MeasuredQuality } from "./types";
 import { normalizeCoalName } from "./domain/coalName";
 import type { AnchorQuote } from "./domain/priceDrift";
+import type { CoalPenaltyOverride } from "./penalty";
 
 export { normalizeCoalName } from "./domain/coalName";
 
@@ -39,6 +40,10 @@ export interface CoalPref {
   frt_override?: number | null;
   /** 用户改过的化验项; null = 用 master 默认 */
   props_override?: Partial<Record<string, number | null>>;
+  /** 该煤采购合同的保证值: 指标 → 保证值. 缺项不算扣款. */
+  purchase_guarantees?: Partial<Record<string, number>>;
+  /** 该煤与全局扣款模板不同的条款; 缺失 = 完全套用模板. */
+  purchase_override?: CoalPenaltyOverride;
   /** 最近一次修改时间 (ISO) */
   updated_at?: string;
 }
