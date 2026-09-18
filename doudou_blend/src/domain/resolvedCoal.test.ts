@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { CoalPref, CoalPrefs } from "../storage";
-import type { MasterCoalEntry } from "../types";
-import type { PenaltyTemplate } from "../penalty";
+import type { CoalPref } from "../storage";
+import type { MasterCoalEntry, PurchaseTerms } from "../types";
 import {
-  collectOrphanedGuarantees,
   resolveCoal,
   resolveCoalPool,
   summarizePriceStatus,
@@ -250,7 +248,7 @@ describe("resolveCoalPool", () => {
       "duplicate_name",
       "duplicate_name",
     ]);
-    expect(resolved.map(toBlendCoal)).toEqual([null, null]);
+    expect(resolved.map((coal) => toBlendCoal(coal))).toEqual([null, null]);
   });
 });
 
@@ -418,80 +416,47 @@ describe("summarizePriceStatus", () => {
   });
 });
 
-describe("collectOrphanedGuarantees (Step 8: 采购扣款模板缺失告警)", () => {
-  const secondCoal: MasterCoalEntry = {
-    ...masterCoal,
-    name: "第二煤",
-    fob: 800,
-  };
-
-  it("启用煤有保证值但模板/覆盖里找不到条款时计入警告", () => {
-    const prefs: CoalPrefs = {
-      测试主煤: { purchase_guarantees: { S: 0.5 } },
-    };
-    const pool = resolveCoalPool([masterCoal], [], prefs);
-
-    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([
-      { coal: "测试主煤", indicators: ["S"] },
-    ]);
-  });
-
-  it("模板能匹配到条款时不产出警告", () => {
-    const prefs: CoalPrefs = {
-      测试主煤: { purchase_guarantees: { S: 0.5 } },
-    };
-    const template: PenaltyTemplate = {
+describe("toBlendCoal 的 purchaseTerms 参数 (调用方传入, 不在这里重算)", () => {
+  it("传入 terms 时挂到 purchase_terms 上", () => {
+    const resolved = resolveCoal(masterCoal, null, "master");
+    const terms: PurchaseTerms = {
       clauses: [
         {
           indicator: "S",
           direction: "Upper",
+          guarantee: 0.5,
           penalty: { tiers: [{ rate: 80 }], reject: 1.5 },
         },
       ],
     };
-    const pool = resolveCoalPool([masterCoal], [], prefs);
 
-    expect(collectOrphanedGuarantees(pool, prefs, template)).toEqual([]);
+    expect(toBlendCoal(resolved, terms)).toEqual({
+      name: "测试主煤",
+      props: masterCoal.props,
+      fob: 1_000,
+      frt: 100,
+      purchase_terms: terms,
+    });
   });
 
-  it("没有保证值的煤不计入警告 (没配置不是配置丢了)", () => {
-    const prefs: CoalPrefs = {};
-    const pool = resolveCoalPool([masterCoal], [], prefs);
+  it("不传或传 null 时不产出 purchase_terms 字段 (undefined, 不是显式 null)", () => {
+    const resolved = resolveCoal(masterCoal, null, "master");
 
-    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([]);
+    const withoutArg = toBlendCoal(resolved);
+    const withNull = toBlendCoal(resolved, null);
+
+    expect(withoutArg?.purchase_terms).toBeUndefined();
+    expect(withNull?.purchase_terms).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(withoutArg, "purchase_terms")).toBe(true);
+    // 值是 undefined, 但 JSON.stringify 会把这个键整个丢掉 —— 这才是关键效果.
+    expect(JSON.parse(JSON.stringify(withoutArg))).not.toHaveProperty(
+      "purchase_terms",
+    );
   });
 
-  it("停用/隐藏的煤即使有孤儿保证值也不计入警告", () => {
-    const prefs: CoalPrefs = {
-      测试主煤: { enabled: false, purchase_guarantees: { S: 0.5 } },
-    };
-    const pool = resolveCoalPool([masterCoal], [], prefs);
+  it("非 ready 的煤仍然返回 null, 不受 purchaseTerms 参数影响", () => {
+    const resolved = resolveCoal(masterCoal, { enabled: false }, "master");
 
-    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([]);
-  });
-
-  it("多种煤各自的孤儿指标分别列出", () => {
-    const prefs: CoalPrefs = {
-      测试主煤: { purchase_guarantees: { S: 0.5, A: 10 } },
-      第二煤: { purchase_guarantees: { G: 70 } },
-    };
-    const pool = resolveCoalPool([masterCoal, secondCoal], [], prefs);
-
-    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([
-      { coal: "测试主煤", indicators: ["S", "A"] },
-      { coal: "第二煤", indicators: ["G"] },
-    ]);
-  });
-
-  it("单煤显式排除的指标不计入警告", () => {
-    const prefs: CoalPrefs = {
-      测试主煤: {
-        purchase_guarantees: { S: 0.5 },
-        purchase_override: { excluded_indicators: ["S"] },
-      },
-    };
-    const pool = resolveCoalPool([masterCoal], [], prefs);
-
-    expect(collectOrphanedGuarantees(pool, prefs, null)).toEqual([]);
+    expect(toBlendCoal(resolved, { clauses: [] })).toBeNull();
   });
 });

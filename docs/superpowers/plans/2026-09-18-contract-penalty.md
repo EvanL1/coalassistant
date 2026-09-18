@@ -2240,27 +2240,59 @@ formatPrice"会连这部分一起删掉。**执行时发现后立即停下汇报
   展示的是 `net_per_ton`（回退 `cif_per_ton`）—— 净成本才是 LP 实际求最优的数字，
   到厂价条款生效后只是报价，大字号主位必须跟着净成本走，否则这个功能要展示的
   数字反而被继续藏起来。**标签跟着数值变，不写死**：`detailed`（=
-  `hasAdjust || hasPenalty`）为假时标签是"最低到厂价"，为真时换成"最低净成本"。
-  标签写死不变会导致数值已经不是到厂价之后界面还顶着"到厂价"的名字——用户是
-  透过标签去读数字的，标签比数字更容易被无条件相信，印错标签比印错数字更危险，
-  这属于本功能要消灭的那类"报价当真实成本"的静默误导，团队复盘时特意纠正过。
-  没有计价条款时 `net_per_ton === cif_per_ton`，大字号数值和标签都跟老界面
-  完全一致，界面观感不变。
+  `hasCostAdjustments(cost)`，见下方共享判定）为假时标签是"最低到厂价"，为真时
+  换成**"最低实际成本"**（不是"最低净成本"——见下方"不用净成本"）。标签写死
+  不变会导致数值已经不是到厂价之后界面还顶着"到厂价"的名字——用户是透过标签去
+  读数字的，标签比数字更容易被无条件相信，印错标签比印错数字更危险，这属于本
+  功能要消灭的那类"报价当真实成本"的静默误导，团队复盘时特意纠正过。没有计价
+  条款时 `net_per_ton === cif_per_ton`，大字号数值和标签都跟老界面完全一致，
+  界面观感不变。
+- **不用"净成本"，用"实际成本"**：团队复盘时又纠正过一次——"净"暗示"扣掉后
+  更便宜"，但卖出扣款会把这个数字推到到厂价**之上**（更贵，不是更便宜），这正是
+  最需要标签说清楚的情况，"净"字反而误导。`net_per_ton` 这个字段名不改，
+  只改中文界面文案（`CostCard.tsx`/`buildOrderText` 里的"净成本"都要一起改，
+  两处是同一类误导，不要只改一处）。
 - 大字号下方是明细行：到厂价、买入修正、预计扣款。三行都在"没内容"时不渲染：
-  买入修正/预计扣款各自 `Math.abs(...) > 1e-6` 时才显示；到厂价则挂在
-  `detailed = hasAdjust || hasPenalty` 上 —— 没有计价条款时它跟大字号净成本
-  完全相等，再列一行纯属重复，索性不渲染。也就是说：**没配置计价条款的用户,
-  明细行一行都不出现, 卡片就是过去那一个大数字**，跟启用条款前像素级一致。
+  买入修正/预计扣款各自 `Math.abs(...) > 1e-6` 时才显示；到厂价则挂在 `detailed`
+  上 —— 没有计价条款时它跟大字号净成本完全相等，再列一行纯属重复，索性不渲染。
+  也就是说：**没配置计价条款的用户, 明细行一行都不出现, 卡片就是过去那一个
+  大数字**，跟启用条款前像素级一致。
 - 额外加了 Step 8（孤儿保证值告警，见下方），`orphanedGuarantees` 非空时在卡片
-  顶部插入 `role="alert"` 的红色告警块，点名煤种和指标。
+  顶部插入 `role="alert"` 的红色告警块，点名煤种和指标。告警标题说效果
+  （"⚠ 有煤的采购扣款没算进成本"），不猜原因——不说"重新录入"（暗示用户之前
+  录过模板，不一定成立），也不提"本设备/同步"这种我们的技术心智模型，配煤师
+  不需要知道模板存在 localStorage 这件事。
 - 大字号主位加了 `data-testid="cost-headline"`，跟三行明细各自的 testid
-  （`cost-cif`/`cost-adjust`/`cost-penalty`）一样，是为了避免"到厂价"和"净成本"
-  可能渲染出相同文本时用 `getByText` 查出歧义。
+  （`cost-cif`/`cost-adjust`/`cost-penalty`）一样，是为了避免"到厂价"和"实际
+  成本"可能渲染出相同文本时用 `getByText` 查出歧义。
+- **共享判定 `hasCostAdjustments(cost)`**（新增 `domain/costBreakdown.ts`）:
+  `CostCard.tsx` 的 `detailed` 和 `TodayScreen.tsx`（`buildOrderText`/状态卡总额
+  徽章）都改用它，不要各自重新判断。质量审查发现 `buildOrderText` 原来用
+  `|net_per_ton - cif_per_ton| > 1e-6`，`CostCard` 用
+  `hasAdjust || hasPenalty`——买入折扣与卖出扣款刚好互相抵消时 (`net===cif`
+  但两笔调整各自非零) 两种判法给出不同答案，前者会漏报，用户看不到两笔本该
+  展示的明细。
+- **BLOCKING 1+2（质量审查, 吸收了 Task 8 Step 6）：单次条款扫描 + 挂上
+  `purchase_terms`。** 新增 `domain/purchaseTerms.ts`：`resolvePurchaseTerms(pool,
+  prefs, template)` 对每种 `readiness === "ready"` 的煤跑一次
+  `mergePurchaseTerms`，产出 `{coal, terms, orphanedIndicators}[]`；
+  `extractOrphanedGuarantees`/`purchaseTermsByCoalName` 从同一份结果分别派生
+  CostCard 的告警和"煤名→条款"查找表。`resolvedCoal.ts` 的 `toBlendCoal` 加了
+  第二个可选参数 `purchaseTerms`，调用方（`TodayScreen.tsx` 的 `runSolve`）把
+  查找表里对应的 `terms` 传进去，写进 `Coal.purchase_terms`（`null`/缺省都用
+  `undefined` 落地，JSON 序列化时整个字段消失，不是显式 `null`）。这之前
+  `toBlendCoal` 完全不设置 `purchase_terms`——意味着买入侧扣款压根没进请求，
+  订单里"已按无扣款计入成本"这句话对**所有**煤都成立，不只是孤儿；这条线落地
+  后才对孤儿才成立，警告开始真正区分有意义的情况。
+  只扫描 `readiness === "ready"` 的煤（不是 `effectiveEnabled`）: 这跟
+  `toBlendCoal` 实际会塞进请求的煤集合完全一致，修掉了"孤儿告警在缺价格因此
+  这次求解用不上的煤上也会跳出来"的偏差。
 
 ```tsx
 import { INDICATOR_LABEL } from "../types";
 import type { CostBreakdown } from "../types";
-import type { OrphanedGuaranteeWarning } from "../domain/resolvedCoal";
+import type { OrphanedGuaranteeWarning } from "../domain/purchaseTerms";
+import { hasCostAdjustments } from "../domain/costBreakdown";
 
 const YUAN = (value: number) => `${value.toFixed(2)} 元/吨`;
 
@@ -2283,7 +2315,7 @@ export function CostCard({
 }) {
   const hasAdjust = Math.abs(cost.purchase_adjust_per_ton ?? 0) > 1e-6;
   const hasPenalty = Math.abs(cost.penalty_per_ton ?? 0) > 1e-6;
-  const detailed = hasAdjust || hasPenalty;
+  const detailed = hasCostAdjustments(cost); // 共享判定, 见上方说明
   const netPerTon = cost.net_per_ton ?? cost.cif_per_ton;
   const { int: costInt, dec: costDec } = formatPrice(netPerTon);
 
@@ -2291,10 +2323,10 @@ export function CostCard({
     <div className="cost-card">
       {orphanedGuarantees.length > 0 && (
         <div className="cost-orphan-warning" role="alert">
-          {/* ⚠ 采购扣款模板在本设备缺失, 点名煤种/指标 —— 见 Step 8 */}
+          {/* ⚠ 有煤的采购扣款没算进成本, 点名煤种/指标 —— 见 Step 8 */}
         </div>
       )}
-      <div className="cost-label">{detailed ? "最低净成本" : "最低到厂价"}</div>
+      <div className="cost-label">{detailed ? "最低实际成本" : "最低到厂价"}</div>
       <div className="cost-amount" data-testid="cost-headline">
         <span className="cost-int">{costInt}</span>
         <span className="cost-dec">.{costDec}</span>
@@ -2357,7 +2389,8 @@ export function CostCard({
 
 这一步和原计划一致, 没有变化.
 
-- [ ] **Step 8: 采购扣款模板缺失告警（不在原计划里, Task 6 复盘后新加）**
+- [ ] **Step 8: 采购扣款模板缺失告警（不在原计划里, Task 6 复盘后新加；实现已因
+  BLOCKING 1+2 重构, 见下方最新版）**
 
 `mergePurchaseTerms`（`penalty.ts`）返回 `orphanedGuarantees`：一种煤有
 `purchase_guarantees` 却在模板+覆盖里都找不到匹配条款的指标列表。最常见成因是
@@ -2365,13 +2398,30 @@ export function CostCard({
 换设备登录后煤的保证值随 `coal_prefs` 同步过来了但模板没有 —— 这种煤本该计价
 却被静默当无扣款处理，两台设备算出的成本不一致但界面上什么都不会报错。
 
-新增 `collectOrphanedGuarantees(pool, prefs, template)`（`domain/resolvedCoal.ts`）：
-扫描 `effectiveEnabled` 的煤（停用/隐藏的煤不用吓用户），逐个调用
-`mergePurchaseTerms` 收集非空的 `orphanedGuarantees`，产出
-`{coal, indicators}[]`。在 `TodayScreen.tsx` 的 `runSolve` 里算好后存进
-`SolveSnapshot.orphanedGuarantees`（新增的可选字段, `domain/solveSession.ts`），
-传给 `<CostCard>` 的同名 prop；非空时卡片顶部插入 `role="alert"` 的红色告警块，
-点名煤种和指标（中文标签走 `INDICATOR_LABEL`）。另外监听了
+~~新增 `collectOrphanedGuarantees(pool, prefs, template)`（`domain/resolvedCoal.ts`）：
+扫描 `effectiveEnabled` 的煤~~ ——**这版实现已被 BLOCKING 1+2 取代**：单独的
+`collectOrphanedGuarantees` 只算孤儿列表，而 Task 8 Step 6（组装请求的
+`purchase_terms`）需要对同一批煤再调一次 `mergePurchaseTerms`，两个调用点算
+同一件事，质量审查判定这是这个项目反复出现的分叉缺陷形状，把两者合并成一次
+扫描。现状（`domain/purchaseTerms.ts`）：
+
+- `resolvePurchaseTerms(pool, prefs, template)` 扫描 `readiness === "ready"`
+  的煤（不是 `effectiveEnabled` —— 这才跟 `toBlendCoal` 实际会塞进请求的煤集合
+  一致，缺价格进不了这次求解的煤不该跳出告警吓用户），每种煤跑一次
+  `mergePurchaseTerms`，产出 `CoalPurchaseTerms[]`（`{coal, terms,
+  orphanedIndicators}`）。
+- `extractOrphanedGuarantees(entries)` 从同一份结果派生 CostCard 用的
+  `OrphanedGuaranteeWarning[]`（`{coal, indicators}`）。
+- `purchaseTermsByCoalName(entries)` 派生"煤名 → 条款"查找表, 供
+  `resolvedCoal.ts` 的 `toBlendCoal(coal, terms?)` 第二参数使用（详见 Task 7 的
+  BLOCKING 1+2 说明与已标记完成的 Task 8 Step 6）。
+
+在 `TodayScreen.tsx` 的 `runSolve` 里跑一次 `resolvePurchaseTerms`，两个派生
+函数的结果分别存进 `SolveSnapshot.orphanedGuarantees`（`domain/solveSession.ts`
+的可选字段，类型也从 `domain/purchaseTerms.ts` 导入）传给 `<CostCard>` 的同名
+prop，和 `termsByCoal` 查找表喂给 `toBlendCoal`。非空告警时卡片顶部插入
+`role="alert"` 的红色告警块，点名煤种和指标（中文标签走 `INDICATOR_LABEL`），
+标题说效果不猜原因（"⚠ 有煤的采购扣款没算进成本"）。另外监听了
 `PENALTY_TEMPLATE_EVENT`（跟已有的 prefs/contract/user_coals 变化监听对称），
 模板一变就自动重算刷新告警。
 
@@ -2547,24 +2597,21 @@ setCoalPref(coal.name, {
 import { getPenaltyTemplate, setPenaltyTemplate } from "../penaltyStorage";
 ```
 
-- [ ] **Step 6: 组装请求时挂上 `purchase_terms`**
+- [x] **Step 6: 组装请求时挂上 `purchase_terms` —— 已在 Task 7 交付, 这里不要重做**
 
-找到构造 `Coal[]` 送给 `solveJson` 的位置（`TodayScreen.tsx` 或其调用的 helper），
-为每种煤补：
+⚠ **给下一个读这份计划的人**：这一步原计划留给 Task 8，但 Task 7 的质量审查
+（BLOCKING 1+2）发现它跟 Task 7 的孤儿保证值告警是同一个计算——两处各自调
+`mergePurchaseTerms` 会重演这个项目撞过很多次的"两个调用点算同一件事、数据
+一变悄悄分叉"的缺陷。于是把这一步移进 Task 7 一起做掉了：单次扫描
+`domain/purchaseTerms.ts` 的 `resolvePurchaseTerms(pool, prefs, template)`
+产出 `{coal, terms, orphanedIndicators}[]`，`purchaseTermsByCoalName` 派生出
+"煤名 → 条款"查找表喂给 `resolvedCoal.ts` 新增的 `toBlendCoal(coal, terms?)`
+第二参数，`extractOrphanedGuarantees` 派生出 Task 7 成本卡用的告警——两个下游
+从同一次扫描来，不可能分叉。接线点在 `TodayScreen.tsx` 的 `runSolve`。
 
-```tsx
-const { terms: purchase_terms, orphanedGuarantees } = mergePurchaseTerms(
-  getPenaltyTemplate(),
-  pref?.purchase_override,
-  pref?.purchase_guarantees ?? {},
-);
-// orphanedGuarantees 非空 = 该煤有保证值却找不到匹配条款(最常见成因:
-// 换设备登录, CoalPref 里的 purchase_guarantees 随 coal_prefs 同步过来了,
-// 但全局模板只存本机 localStorage, 没有同步) —— 对应的界面警示在 Task 7
-// (今日屏成本卡) 里处理, 这里只负责把它算出来, 不要在这一步吞掉。
-```
-
-再把 `purchase_terms` 填进对应煤的请求对象。
+**不要在 Task 8 里再实现一遍这一步**——Task 8 剩下的范围纯粹是合同屏/煤池屏的
+录入 UI（Step 1-5），录入结果（模板/保证值/覆盖）已经有 Task 7 这条链路消费,
+不需要额外的组装代码。
 
 - [ ] **Step 7: 运行测试与构建**
 
@@ -2576,7 +2623,8 @@ cd doudou_blend && npm test && npm run build
 - [ ] **Step 8: 提交**
 
 ```bash
-git add doudou_blend/src/screens/ContractScreen.tsx doudou_blend/src/screens/CoalPoolScreen.tsx doudou_blend/src/screens/TodayScreen.tsx
+# TodayScreen.tsx 不在这里改 —— 组装 purchase_terms (原 Step 6) 已经在 Task 7 做完.
+git add doudou_blend/src/screens/ContractScreen.tsx doudou_blend/src/screens/CoalPoolScreen.tsx
 git commit -m "feat(contract): 合同屏计价条款录入与煤池屏采购保证值"
 ```
 
@@ -2615,11 +2663,17 @@ cd doudou_blend && npm test && npm run build && npm run check:consistency && npm
 启动本地服务与前端，在合同屏按本合同录入：灰 ≤10% 计价 80 元/吨·%、拒收 11.5；
 粘结 ≥85 计价 5 元/吨·点、拒收 80。求解后确认：
 
-- 成本卡大字号主位变成净成本（不再等于到厂价），**标签同步从"最低到厂价"变成
-  "最低净成本"**，下方出现"到厂价"与"预计扣款"两行明细（没有计价条款的煤池
-  对照组应该看不到任何明细行，标签仍是"最低到厂价"，只有大字号）
+- 成本卡大字号主位变成实际成本（不再等于到厂价），**标签同步从"最低到厂价"
+  变成"最低实际成本"**（不是"最低净成本"——"净"暗示更便宜，但卖出扣款会把
+  这个数字推到到厂价之上），下方出现"到厂价"与"预计扣款"两行明细（没有计价
+  条款的煤池对照组应该看不到任何明细行，标签仍是"最低到厂价"，只有大字号）
 - 粘结指标显示"扣 N 元/吨"而非红色不合格
-- 配方相对全硬约束时更便宜（净成本更低）
+- 配方相对全硬约束时更便宜（实际成本更低）
+- 求解请求里该煤的 `purchase_terms` 字段带着正确的条款（浏览器 devtools
+  Network 面板看 `/api/solve` 的请求体，或临时在 `runSolve` 里打个断点）——
+  这条验证的是 BLOCKING 2 的实际效果: 光有孤儿告警不够, 匹配到模板的煤必须
+  真的把 `purchase_terms` 送进请求, 买入折扣才会体现在 `purchase_adjust_per_ton`
+  里, 不然告警说的"已按无扣款计入成本"对所有煤都成立, 不只是孤儿
 
 - [ ] **Step 5: 完整变更审查**
 

@@ -1,5 +1,6 @@
 import type { BlendRequest, BlendResult } from "../types";
-import type { OrphanedGuaranteeWarning, PriceStatus } from "./resolvedCoal";
+import type { PriceStatus } from "./resolvedCoal";
+import type { OrphanedGuaranteeWarning } from "./purchaseTerms";
 
 export interface SolveSnapshot {
   requestId: number;

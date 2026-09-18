@@ -16,11 +16,16 @@ import {
 } from "react";
 import { getBackend } from "../backend";
 import {
-  collectOrphanedGuarantees,
   resolveCoalPool,
   summarizePriceStatus,
   toBlendCoal,
 } from "../domain/resolvedCoal";
+import {
+  extractOrphanedGuarantees,
+  purchaseTermsByCoalName,
+  resolvePurchaseTerms,
+} from "../domain/purchaseTerms";
+import { hasCostAdjustments } from "../domain/costBreakdown";
 import { buildPriceAnchor } from "../domain/priceDrift";
 import { fetchCoalIndexRatioSince } from "../coal_index";
 import {
@@ -135,11 +140,12 @@ function buildOrderText(
   if (cost) {
     const quality = QUALITY_STATUS_LABEL[result.quality_status ?? "Estimated"];
     const netPerTon = cost.net_per_ton ?? cost.cif_per_ton;
-    // 净成本才是真结算价; 跟到厂价没差别时不重复报两遍.
-    const priceLine =
-      Math.abs(netPerTon - cost.cif_per_ton) > 1e-6
-        ? `净成本 ${netPerTon.toFixed(2)} 元/吨 (到厂价 ${cost.cif_per_ton.toFixed(2)})`
-        : `到厂价 ${cost.cif_per_ton.toFixed(2)} 元/吨`;
+    // 实际成本才是真结算价; 跟到厂价没差别时不重复报两遍. 用共享判定
+    // hasCostAdjustments, 不要自己拼 |net-cif|>eps —— 见 CostCard.tsx 同款注释:
+    // 买入折扣与卖出扣款刚好抵消时 net===cif, 但两笔调整确实各自发生过.
+    const priceLine = hasCostAdjustments(cost)
+      ? `实际成本 ${netPerTon.toFixed(2)} 元/吨 (到厂价 ${cost.cif_per_ton.toFixed(2)})`
+      : `到厂价 ${cost.cif_per_ton.toFixed(2)} 元/吨`;
     lines.push(`${priceLine} | 数值界内 ${passing}/${total} | 质量 ${quality}`);
   }
   lines.push("──────────────────");
@@ -300,13 +306,19 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       const priceStatus = summarizePriceStatus(pool, anchor.coals);
       // 采购扣款模板只存本机 localStorage, 不跨设备同步 (见 penaltyStorage.ts);
       // 换设备后煤的保证值同步了但模板没有, 会悄悄漏算扣款, 必须提示用户.
-      const orphanedGuarantees = collectOrphanedGuarantees(
+      //
+      // 只跑一次 resolvePurchaseTerms: 求解请求要挂的 purchase_terms 和
+      // 孤儿保证值告警都从这一次扫描派生, 不要分两处各自调 mergePurchaseTerms
+      // —— 两处各自算同一件事, 数据一变就可能悄悄分叉 (这个项目撞过很多次)。
+      const purchaseTermsEntries = resolvePurchaseTerms(
         pool,
         prefs,
         getPenaltyTemplate(),
       );
+      const termsByCoal = purchaseTermsByCoalName(purchaseTermsEntries);
+      const orphanedGuarantees = extractOrphanedGuarantees(purchaseTermsEntries);
       const coals = pool
-        .map(toBlendCoal)
+        .map((resolved) => toBlendCoal(resolved, termsByCoal.get(resolved.name)))
         .filter((coal) => coal != null);
 
       if (coals.length === 0) {
