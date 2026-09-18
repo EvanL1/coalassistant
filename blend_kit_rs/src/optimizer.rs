@@ -517,6 +517,14 @@ fn solve_once(
         total_cif: request
             .total_quantity
             .map(|quantity| quantity * cif_per_ton),
+        purchase_adjust_per_ton: 0.0,
+        penalty_per_ton: 0.0,
+        net_per_ton: cif_per_ton,
+        total_purchase_adjust: request.total_quantity.map(|_| 0.0),
+        total_penalty: request.total_quantity.map(|_| 0.0),
+        total_net: request
+            .total_quantity
+            .map(|quantity| quantity * cif_per_ton),
     };
     let mut orders: Vec<OrderItem> = coals
         .iter()
@@ -531,6 +539,7 @@ fn solve_once(
                 fob_amount: tons.map(|value| value * coal.fob),
                 frt_amount: tons.map(|value| value * coal.frt),
                 cif_amount: tons.map(|value| value * coal.cif()),
+                cif_eff: coal.cif(),
             }
         })
         .collect();
@@ -566,6 +575,7 @@ fn solve_once(
                     method: EvaluationMethod::Unavailable,
                     status: EvaluationStatus::Unverified,
                     model: None,
+                    penalty_per_ton: None,
                 });
             }
             continue;
@@ -614,6 +624,7 @@ fn solve_once(
             method: formula.method,
             status: outcome.status,
             model: model_summary,
+            penalty_per_ton: None,
         });
     }
 

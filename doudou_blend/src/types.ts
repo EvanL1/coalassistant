@@ -2,7 +2,7 @@
 
 export type IndicatorKey = "S" | "A" | "V" | "G" | "Y" | "petro" | "CSR" | "M";
 export type AcceptanceMode = "Raw" | "Truncate" | "Round";
-export type Enforcement = "Hard" | "Soft" | "Advisory";
+export type Enforcement = "Hard" | "Soft" | "Advisory" | "Priced";
 export type EvaluationMethod =
   | "Linear"
   | "ProvisionalLinear"
@@ -49,6 +49,39 @@ export interface AcceptanceRule {
   tolerance: number;
 }
 
+/** 扣款档位: 覆盖 width 宽度的偏离, 按 rate (元/吨·指标单位) 计费. */
+export interface PenaltyTier {
+  /** 本档覆盖的偏离宽度; 省略 = 末档, 无上限. */
+  width?: number | null;
+  /** 元/吨 per 1 个指标单位. 合同"每 0.1% 扣 8 元" → 80. */
+  rate: number;
+}
+
+/** 单项指标的计价条款. tiers 的 rate 必须严格递增(凸性). */
+export interface Penalty {
+  tiers: PenaltyTier[];
+  /** 拒收线: 越过即硬不可行. */
+  reject: number;
+}
+
+/** 单条采购合同计价条款 (买入侧). */
+export interface PurchaseClause {
+  indicator: string;
+  /** 只接受 Upper / Lower. */
+  direction: Direction;
+  guarantee: number;
+  penalty: Penalty;
+}
+
+/** 采购合同条款; 全局模板与单煤覆盖已在前端合并完毕. */
+export interface PurchaseTerms {
+  clauses: PurchaseClause[];
+  /** 合同水分 (%). */
+  contract_moisture?: number | null;
+  /** 超过该水分 (%) 时超出部分双倍折算. */
+  moisture_double_threshold?: number | null;
+}
+
 export interface Spec {
   indicator: string;
   direction: Direction;
@@ -59,6 +92,7 @@ export interface Spec {
   margin?: number | null;
   acceptance?: AcceptanceRule | null;
   enforcement?: Enforcement;
+  penalty?: Penalty | null;
 }
 
 /** 单煤煤岩数据 (MT/T 507 化验单: 反射率直方图 + 镜质组含量). */
@@ -80,6 +114,7 @@ export interface Coal {
   frt: number;
   /** 可选煤岩数据; 提供时混煤 σ 走直方图精确计算. */
   petrography?: Petrography | null;
+  purchase_terms?: PurchaseTerms | null;
 }
 
 /** 本次指标评估实际采用的模型摘要. */
@@ -107,6 +142,15 @@ export interface CostBreakdown {
   total_fob?: number | null;
   total_frt?: number | null;
   total_cif?: number | null;
+  /** 买入侧扣款折扣 + 水分折算带来的到厂价修正合计, 元/吨. 负值 = 成本下降. */
+  purchase_adjust_per_ton: number;
+  /** 卖出侧质量扣款合计, 元/吨. */
+  penalty_per_ton: number;
+  /** 真实吨成本 = cif + purchase_adjust + penalty. */
+  net_per_ton: number;
+  total_purchase_adjust?: number | null;
+  total_penalty?: number | null;
+  total_net?: number | null;
 }
 
 export interface OrderItem {
@@ -116,6 +160,8 @@ export interface OrderItem {
   fob_amount?: number | null;
   frt_amount?: number | null;
   cif_amount?: number | null;
+  /** 该煤买入侧修正后的单价, 采购按此价核对. */
+  cif_eff: number;
 }
 
 export interface IndicatorCheck {
@@ -134,6 +180,8 @@ export interface IndicatorCheck {
   method?: EvaluationMethod;
   status?: EvaluationStatus;
   model?: ModelSummary | null;
+  /** 本项卖出侧扣款, 元/吨. 非计价指标为 None. */
+  penalty_per_ton?: number | null;
 }
 
 /** 岩相凹口检测结果. */

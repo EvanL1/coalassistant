@@ -54,6 +54,7 @@ pub fn coal_from_tuple(name: &str, t: (f64, f64, f64, f64, f64, f64, f64, f64, f
         fob,
         frt,
         petrography: None,
+        purchase_terms: None,
     }
 }
 
@@ -1021,5 +1022,47 @@ mod tests {
             (csr_value(&r) - 70.0).abs() < 1e-6,
             "基础 JSON 求解应保留录入 CSR"
         );
+    }
+
+    /// 不含 penalty / purchase_terms 的旧请求: 求解结果不变, 新字段取中性值.
+    #[test]
+    fn test_legacy_request_keeps_neutral_penalty_fields() {
+        let coals = vec![
+            coal_from_tuple(
+                "甲",
+                (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 50.0),
+            ),
+            coal_from_tuple(
+                "乙",
+                (0.8, 8.0, 26.0, 90.0, 18.0, 0.10, 66.0, 8.0, 1100.0, 50.0),
+            ),
+        ];
+        let request = BlendRequest {
+            coals,
+            specs: vec![Spec::upper("A", 10.0)],
+            total_quantity: Some(1000.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "存量请求应可解: {:?}", result.reason);
+
+        let cost = result.cost.expect("应有成本");
+        assert_eq!(cost.penalty_per_ton, 0.0, "无计价条款时卖出侧扣款应为 0");
+        assert_eq!(
+            cost.purchase_adjust_per_ton, 0.0,
+            "无采购条款时买入侧修正应为 0"
+        );
+        assert!(
+            (cost.net_per_ton - cost.cif_per_ton).abs() < 1e-9,
+            "净成本应等于到厂价"
+        );
+        assert_eq!(cost.total_penalty, Some(0.0));
+
+        for order in &result.orders {
+            assert!(order.cif_eff.is_finite(), "cif_eff 应已填充");
+        }
+        for check in &result.indicator_check {
+            assert_eq!(check.penalty_per_ton, None, "非计价指标扣款应为 None");
+        }
     }
 }

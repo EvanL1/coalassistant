@@ -81,6 +81,12 @@ function makeResult(cif: number, quantity: number): BlendResult {
       total_fob: (cif - 100) * quantity,
       total_frt: 100 * quantity,
       total_cif: cif * quantity,
+      purchase_adjust_per_ton: 0,
+      penalty_per_ton: 0,
+      net_per_ton: cif,
+      total_purchase_adjust: 0,
+      total_penalty: 0,
+      total_net: cif * quantity,
     },
     orders: [
       {
@@ -88,6 +94,7 @@ function makeResult(cif: number, quantity: number): BlendResult {
         ratio: 1,
         tons: quantity,
         cif_amount: cif * quantity,
+        cif_eff: cif,
       },
     ],
     indicator_check: [],

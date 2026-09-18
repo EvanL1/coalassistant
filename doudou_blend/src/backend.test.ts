@@ -69,7 +69,14 @@ describe("Backend 历史契约", () => {
     const result = {
       ok: true,
       recipe: { 测试煤: 1 },
-      cost: { fob_per_ton: 900, frt_per_ton: 100, cif_per_ton: 1000 },
+      cost: {
+        fob_per_ton: 900,
+        frt_per_ton: 100,
+        cif_per_ton: 1000,
+        purchase_adjust_per_ton: 0,
+        penalty_per_ton: 0,
+        net_per_ton: 1000,
+      },
       orders: [],
       indicator_check: [],
       warnings: [],

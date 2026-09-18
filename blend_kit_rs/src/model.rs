@@ -57,6 +57,9 @@ pub struct Coal {
     /// 提供时: 混煤 σ 走直方图精确计算; props 缺 petro 标量时自动用直方图 σ 补齐.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub petrography: Option<crate::petrography::Petrography>,
+    /// 该煤采购合同条款. None = 按报价原值, 不做买入侧修正.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purchase_terms: Option<PurchaseTerms>,
 }
 
 impl Coal {
@@ -83,6 +86,53 @@ pub enum Direction {
     Lower,
     /// 目标范围, min 和 max 都起作用 (挥发/反射率典型)
     Range,
+}
+
+/// 扣款档位: 从上一档终点起, 覆盖 width 宽度的偏离, 按 rate 计费.
+///
+/// 合同写"每超 0.1% 扣 8 元/吨"时, rate = 80.0 (元/吨 per 1 个指标单位).
+/// 单位换算由前端完成, core 只收换算后的斜率.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PenaltyTier {
+    /// 本档覆盖的偏离宽度 (指标单位). None = 末档, 无上限.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    /// 元/吨 per 1 个指标单位.
+    pub rate: f64,
+}
+
+/// 单项指标的计价条款.
+///
+/// tiers 的 rate 必须严格递增: 凸性是"档位变量可用 LP 精确表达"的前提,
+/// 递减的 rate 会让求解器填错档并低估扣款.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Penalty {
+    pub tiers: Vec<PenaltyTier>,
+    /// 拒收线: 越过即硬不可行. Upper 向是上限, Lower 向是下限.
+    pub reject: f64,
+}
+
+/// 单条采购合同计价条款 (买入侧).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PurchaseClause {
+    pub indicator: String,
+    /// 只接受 Upper (超标扣) / Lower (低于扣).
+    pub direction: Direction,
+    /// 该煤采购合同的保证值.
+    pub guarantee: f64,
+    pub penalty: Penalty,
+}
+
+/// 采购合同条款. 前端已把全局模板与单煤覆盖合并完毕后传入.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PurchaseTerms {
+    pub clauses: Vec<PurchaseClause>,
+    /// 合同水分 (%), 用于结算量折算. None = 不折算.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_moisture: Option<f64>,
+    /// 超过该水分 (%) 时超出部分双倍折算. None = 不启用.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moisture_double_threshold: Option<f64>,
 }
 
 /// 合同值采用的报告判定方式.
@@ -125,6 +175,9 @@ pub enum Enforcement {
     Soft,
     /// 只展示结果，不影响总体质量状态.
     Advisory,
+    /// 进入 LP, 但超界不判不可行, 而是按 Penalty 折算成元/吨计入目标;
+    /// 越过 Penalty.reject 仍然硬不可行.
+    Priced,
 }
 
 /// 单条合同约束.
@@ -152,6 +205,9 @@ pub struct Spec {
     /// Hard/Soft/Advisory. 旧请求默认为 Hard.
     #[serde(default)]
     pub enforcement: Enforcement,
+    /// enforcement == Priced 时必填的计价条款.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub penalty: Option<Penalty>,
 }
 
 fn default_enabled() -> bool {
@@ -169,6 +225,7 @@ impl Spec {
             margin: None,
             acceptance: None,
             enforcement: Enforcement::Hard,
+            penalty: None,
         }
     }
     pub fn lower(indicator: &str, min: f64) -> Self {
@@ -181,6 +238,7 @@ impl Spec {
             margin: None,
             acceptance: None,
             enforcement: Enforcement::Hard,
+            penalty: None,
         }
     }
     pub fn range(indicator: &str, min: f64, max: f64) -> Self {
@@ -193,6 +251,7 @@ impl Spec {
             margin: None,
             acceptance: None,
             enforcement: Enforcement::Hard,
+            penalty: None,
         }
     }
 }
@@ -259,6 +318,15 @@ pub struct CostBreakdown {
     pub total_fob: Option<f64>,
     pub total_frt: Option<f64>,
     pub total_cif: Option<f64>,
+    /// 买入侧扣款折扣 + 水分折算带来的到厂价修正合计, 元/吨. 负值 = 成本下降.
+    pub purchase_adjust_per_ton: f64,
+    /// 卖出侧质量扣款合计, 元/吨.
+    pub penalty_per_ton: f64,
+    /// 真实吨成本 = cif + purchase_adjust + penalty.
+    pub net_per_ton: f64,
+    pub total_purchase_adjust: Option<f64>,
+    pub total_penalty: Option<f64>,
+    pub total_net: Option<f64>,
 }
 
 /// 视图 B: 单条实物订单 (给采购).
@@ -272,6 +340,8 @@ pub struct OrderItem {
     pub fob_amount: Option<f64>,
     pub frt_amount: Option<f64>,
     pub cif_amount: Option<f64>,
+    /// 该煤买入侧修正后的单价, 采购按此价核对.
+    pub cif_eff: f64,
 }
 
 /// 视图 C: 单项指标的体检结果 (给质检/销售).
@@ -302,6 +372,8 @@ pub struct IndicatorCheck {
     #[serde(default)]
     pub status: EvaluationStatus,
     pub model: Option<ModelSummary>,
+    /// 本项卖出侧扣款, 元/吨. 非计价指标为 None.
+    pub penalty_per_ton: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
