@@ -64,10 +64,11 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
         }
     }
 
-    // 只有 Hard 约束会剔除缺字段煤；Soft/Advisory 不能改变候选煤池。
+    // 只有 Hard/Priced 约束会剔除缺字段煤；Soft/Advisory 不能改变候选煤池。
+    // Priced 同样入列: 它的拒收线是 LP 硬行, 缺输入时无法建约束, 必须和 Hard 一样剔煤。
     let mut required: HashSet<String> = active_specs
         .iter()
-        .filter(|spec| spec.enforcement == Enforcement::Hard)
+        .filter(|spec| matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced))
         .map(|spec| spec.indicator.clone())
         .collect();
     if evaluators.csr.is_some() && required.remove("CSR") {
@@ -102,7 +103,8 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
     if let Some(spec) = active_specs
         .iter()
         .find(|spec| {
-            spec.enforcement == Enforcement::Hard && !formulas.contains_key(&spec.indicator)
+            matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced)
+                && !formulas.contains_key(&spec.indicator)
         })
         .copied()
     {

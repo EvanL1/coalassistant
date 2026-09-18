@@ -1395,4 +1395,135 @@ mod tests {
         let result = solve(&request);
         assert!(!result.ok, "低于拒收线应不可行");
     }
+
+    /// Priced 的拒收线是 LP 硬行, 缺输入就建不出约束 —— 必须和 Hard 一样剔煤并留 warning.
+    /// 回归 Task 4 引入的不一致: 此前 Priced 不参与剔煤, 缺 A 的煤会把整次求解拖成
+    /// "约束冲突, LP 不可行" 且不指名罪魁, 而同样煤池在 Hard 下能剔煤后正常求解.
+    #[test]
+    fn test_priced_spec_culls_coal_missing_indicator() {
+        let mut incomplete = coal_from_tuple(
+            "缺灰",
+            (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 900.0, 0.0),
+        );
+        incomplete.props.remove("A");
+        let complete = coal_from_tuple(
+            "完整",
+            (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+        );
+        let request = BlendRequest {
+            coals: vec![incomplete, complete],
+            specs: vec![priced_upper_spec(
+                "A",
+                10.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 80.0,
+                }],
+                13.0,
+            )],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "剔掉缺输入的煤后应可解: {:?}", result.reason);
+        assert!(
+            !result.recipe.contains_key("缺灰"),
+            "缺灰分输入的煤不应进配方"
+        );
+        assert!(result.recipe.contains_key("完整"), "完整煤应进配方");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("剔除") && warning.contains("缺灰")),
+            "应有指名缺灰的剔除 warning, 实得 {:?}",
+            result.warnings
+        );
+    }
+
+    /// 两条计价约束同时生效: 档位列块必须互不重叠且各自读回自己的扣款.
+    ///
+    /// 只有一个块时 offset 恒等于 count, 偏移算错也看不出来; 第二个块才真正检验
+    /// 块间偏移. 两块故意取不同档数 (A 两档宽 2 列, G 一档宽 1 列), 等宽会掩盖差一错误.
+    /// 布局: 列 0 = 配比, 列 1~2 = A 的两档, 列 3 = G 的单档.
+    #[test]
+    fn test_two_priced_specs_keep_separate_tier_blocks() {
+        let request = BlendRequest {
+            coals: vec![coal_from_tuple(
+                "甲",
+                (1.0, 11.5, 24.0, 83.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+            )],
+            specs: vec![
+                // 灰分超 1.5: 一档(宽 1.0, 10 元)满 + 二档(30 元)承接 0.5 ⇒ 25 元/吨.
+                priced_upper_spec(
+                    "A",
+                    10.0,
+                    vec![
+                        PenaltyTier {
+                            width: Some(1.0),
+                            rate: 10.0,
+                        },
+                        PenaltyTier {
+                            width: None,
+                            rate: 30.0,
+                        },
+                    ],
+                    13.0,
+                ),
+                // 粘结欠 2 点 × 5 元/吨·点 ⇒ 10 元/吨.
+                priced_lower_spec(
+                    "G",
+                    85.0,
+                    vec![PenaltyTier {
+                        width: None,
+                        rate: 5.0,
+                    }],
+                    80.0,
+                ),
+            ],
+            total_quantity: Some(100.0),
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "两条计价约束应可解: {:?}", result.reason);
+
+        let penalty_of = |indicator: &str| -> f64 {
+            result
+                .indicator_check
+                .iter()
+                .find(|check| check.indicator == indicator)
+                .unwrap_or_else(|| panic!("应有 {indicator} 体检"))
+                .penalty_per_ton
+                .unwrap_or_else(|| panic!("{indicator} 应带扣款额"))
+        };
+        // 各记各的: 25 / 10, 既不串块也不是合计 35.
+        assert!(
+            (penalty_of("A") - 25.0).abs() < 1e-3,
+            "灰分扣款应为 25 元/吨, 实得 {}",
+            penalty_of("A")
+        );
+        assert!(
+            (penalty_of("G") - 10.0).abs() < 1e-3,
+            "粘结扣款应为 10 元/吨, 实得 {}",
+            penalty_of("G")
+        );
+
+        let cost = result.cost.expect("应有成本");
+        assert!(
+            (cost.penalty_per_ton - 35.0).abs() < 1e-3,
+            "合计扣款应为 35 元/吨, 实得 {}",
+            cost.penalty_per_ton
+        );
+        assert!(
+            (cost.net_per_ton - (cost.cif_per_ton + 35.0)).abs() < 1e-3,
+            "净成本应为 cif + 35, 实得 {} (cif {})",
+            cost.net_per_ton,
+            cost.cif_per_ton
+        );
+        assert!(
+            (cost.net_per_ton - 1035.0).abs() < 1e-3,
+            "净成本应为 1035, 实得 {}",
+            cost.net_per_ton
+        );
+    }
 }

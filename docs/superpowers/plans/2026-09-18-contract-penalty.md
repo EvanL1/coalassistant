@@ -837,7 +837,13 @@ git commit -m "refactor(optimizer): LpProblem 区分配比列与附加列, 为�
             "净成本应为 1025, 实得 {}",
             cost.net_per_ton
         );
-        assert_eq!(cost.total_penalty, Some(2500.0));
+        // 内点法收敛到 ~1e-6, 总额不能用 assert_eq! 比浮点.
+        assert!(
+            cost.total_penalty
+                .is_some_and(|value| (value - 2500.0).abs() < 1e-2),
+            "扣款总额应为 2500, 实得 {:?}",
+            cost.total_penalty
+        );
 
         let ash = result
             .indicator_check
@@ -1088,12 +1094,41 @@ struct PricedBlock {
 > `solve_once` 末尾"Hard spec 判 Fail 即返回 None"的早退逻辑按 `== Enforcement::Hard` 过滤，
 > 新增的 `Priced` 自动被排除，无需改动。
 
+- [ ] **Step 4b: `Priced` 必须与 `Hard` 一同参与选煤（本计划初稿遗漏）**
+
+Task 4 之前 `Priced` 不产生任何 LP 行；实现后它产生拒收线硬行，于是"LP 里是硬约束、
+选煤时却按非硬处理"成了 Task 4 自己引入的不一致。缺该指标的煤不被剔除，
+`formula_for` 返回 `None`，整次求解退化为 `"约束冲突, LP 不可行"` 且 warning 为空——
+同样煤池在 `Hard` 下本会剔煤、指名罪魁并正常求解。**可解的场景变成不可解。**
+
+两处都改为 `matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced)`：
+- `optimizer.rs` 的 `required` 集合构造（"只有 Hard 约束会剔除缺字段煤"）
+- 其后的"缺少可用输入"预检查
+
+紧随 `required` 的 CSR 特判 `if evaluators.csr.is_some() && required.remove("CSR")`
+**无需改动**：它作用于 `required` 的内容而非 enforcement，`Priced` 的 CSR 指标进集合后
+会被同一套 remove/extend 自动换成 S/A/V/G/Y/M 六项回归输入，语义正确。
+
+配套测试 `test_priced_spec_culls_coal_missing_indicator`：煤池 = 缺该指标的煤 + 完整煤，
+断言 `ok == true`、缺输入煤不在配方、warning 指名该煤。
+
+- [ ] **Step 4c: 两条计价约束并存的测试（本计划初稿遗漏）**
+
+只有一个块时 `offset` 恒等于 `count`，偏移算错**完全不可观测**——单块用例全绿。
+必须有第二个块才真正检验块间偏移。`test_two_priced_specs_keep_separate_tier_blocks`
+故意取不同档数（灰分 Upper 两档占 2 列 + 粘结 Lower 一档占 1 列），等宽会掩盖差一错误。
+断言：两个指标各自的 `penalty_per_ton` 互不串块（25 / 10），合计 35，
+且 `net_per_ton == cif_per_ton + 35`。
+
+> 已用变异测试验证其有效性：把 `offset: total_columns` 改成 `offset: count`
+> （单块时与正确实现等价）后，5 条单块用例**全部仍然通过**，只有这条两块用例失败。
+
 - [ ] **Step 6: 运行测试**
 
 ```bash
 cd blend_kit_rs && cargo test --release && cargo clippy --release -- -D warnings
 ```
-预期：Task 4 的 4 个新测试 PASS，既有测试无回归。
+预期：Task 4 的 8 个新测试 PASS（optimizer.rs 1 条不变式 + lib.rs 7 条行为），既有测试无回归。
 
 - [ ] **Step 7: 提交**
 
