@@ -480,12 +480,14 @@ fn solve_once(
     append_hard_model_domains(coals, specs, models, &mut inequalities, &mut bounds)?;
 
     let problem = LpProblem {
+        ratio_count: count,
         n: count,
         c: costs,
         a_ub: inequalities,
         b_ub: bounds,
     };
-    let (ratios, _) = problem.solve()?;
+    let (solution, _) = problem.solve()?;
+    let ratios = solution[..count].to_vec();
 
     let recipe = coals
         .iter()
@@ -776,6 +778,9 @@ fn finalize_quality_status(result: &mut BlendResult, specs: &[&Spec]) {
 // ============================================================================
 
 struct LpProblem {
+    /// 参与 Σx=1 的前若干列 (配比变量).
+    ratio_count: usize,
+    /// 总列数 = ratio_count + 档位变量数.
     n: usize,
     c: Vec<f64>,
     a_ub: Vec<Vec<f64>>,
@@ -789,7 +794,7 @@ impl LpProblem {
         let total_rows = 1 + inequality_count + n;
         let mut triplets = Vec::new();
 
-        for column in 0..n {
+        for column in 0..self.ratio_count {
             triplets.push((0, column, 1.0));
         }
         for (row_index, row) in self.a_ub.iter().enumerate() {
@@ -828,7 +833,7 @@ impl LpProblem {
             return None;
         }
         let mut solution = solver.solution.x.clone();
-        let raw_sum: f64 = solution.iter().sum();
+        let raw_sum: f64 = solution[..self.ratio_count].iter().sum();
         let raw_valid = solution
             .iter()
             .all(|value| value.is_finite() && *value >= -SOLUTION_TOLERANCE)
@@ -839,11 +844,11 @@ impl LpProblem {
         for value in &mut solution {
             *value = value.max(0.0);
         }
-        let normalized_sum: f64 = solution.iter().sum();
+        let normalized_sum: f64 = solution[..self.ratio_count].iter().sum();
         if !normalized_sum.is_finite() || normalized_sum <= 0.0 {
             return None;
         }
-        for value in &mut solution {
+        for value in &mut solution[..self.ratio_count] {
             *value /= normalized_sum;
         }
         let valid = self.a_ub.iter().zip(&self.b_ub).all(|(row, bound)| {
@@ -881,4 +886,66 @@ fn build_csc(rows: usize, columns: usize, triplets: &[(usize, usize, f64)]) -> C
         column_pointers.push(row_values.len());
     }
     CscMatrix::new(rows, columns, column_pointers, row_values, nonzero_values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 档位列不得参与 Σx=1, 也不得被配比归一化缩放.
+    #[test]
+    fn test_lp_problem_only_normalizes_ratio_columns() {
+        let problem = LpProblem {
+            ratio_count: 2,
+            n: 3,
+            c: vec![10.0, 20.0, 5.0],
+            a_ub: Vec::new(),
+            b_ub: Vec::new(),
+        };
+        let (solution, objective) = problem.solve().expect("应可解");
+        assert_eq!(solution.len(), 3, "解应含全部列");
+        assert!(
+            (solution[0] + solution[1] - 1.0).abs() < 1e-6,
+            "前 ratio_count 列之和应为 1, 实得 {}",
+            solution[0] + solution[1]
+        );
+        assert!(solution[0] > 0.999, "应全选更便宜的第 0 列");
+        assert!(solution[2].abs() < 1e-6, "附加列成本为正, 最优应取 0");
+        assert!(
+            (objective - 10.0).abs() < 1e-4,
+            "目标值应为 10, 实得 {objective}"
+        );
+    }
+
+    /// 附加列在最优解处非零时, 三处改动(等式行/raw_sum/归一化)才全部可检验.
+    ///
+    /// 约束 x0 + x1 − d ≤ 0.5, 因 Σx = 1 故等价于强制 d ≥ 0.5.
+    /// 若 raw_sum 仍对全部列求和: 1 + 0.5 = 1.5 ≠ 1 ⇒ 可行性校验失败 ⇒ solve 返回 None ⇒ 本测试 panic.
+    /// 若归一化仍对全部列做: 配比被 1.5 除 ⇒ 前两列之和变成 0.667 ⇒ 断言失败.
+    #[test]
+    fn test_lp_problem_handles_nonzero_extra_column() {
+        let problem = LpProblem {
+            ratio_count: 2,
+            n: 3,
+            c: vec![10.0, 20.0, 5.0],
+            a_ub: vec![vec![1.0, 1.0, -1.0]],
+            b_ub: vec![0.5],
+        };
+        let (solution, objective) = problem.solve().expect("应可解");
+        assert!(
+            (solution[0] + solution[1] - 1.0).abs() < 1e-6,
+            "配比列之和应为 1, 实得 {}",
+            solution[0] + solution[1]
+        );
+        assert!(
+            (solution[2] - 0.5).abs() < 1e-5,
+            "附加列应被约束逼到 0.5, 实得 {}",
+            solution[2]
+        );
+        // 10·1 + 20·0 + 5·0.5 = 12.5
+        assert!(
+            (objective - 12.5).abs() < 1e-4,
+            "目标值应为 12.5, 实得 {objective}"
+        );
+    }
 }
