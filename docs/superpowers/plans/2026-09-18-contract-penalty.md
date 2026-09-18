@@ -1199,12 +1199,23 @@ activity <= bound + FEASIBILITY_TOLERANCE * (1.0 + magnitude)
 > 变异验证：复算退回绝对 `SOLUTION_TOLERANCE` → 前者与墙测试失败（96 过 2 failed）；
 > 非负性门限退回 `SOLUTION_TOLERANCE` → 零偏离测试失败（97 过 1 failed）。
 
+**容限必须两侧同改。** 体检的 `Fail → TolerancePass` 复核也在拿复算值比拒收线，
+只改 LP 侧会让两者判据不一致：LP 放行 `FEASIBILITY_TOLERANCE*(1+magnitude)`，
+体检却卡绝对 1e-8，于是 LP 认可的解被判 `Fail`，再经 `finalize_quality_status`
+变成 `NeedsReview`——正确配方被盖上"需要复核"。实测业务量级内可复现
+（便宜脏煤压悬崖，超线 1.0e-8~9.1e-8）。两臂统一为
+`FEASIBILITY_TOLERANCE * (1.0 + penalty.reject.abs())`，由
+`test_priced_indicator_check_tolerance_matches_lp_wall` 钉住（复算值
+12.75000003279332539，超线 3.28e-8，旧容限兜不住）。
+
+> 变异验证：该臂退回 `SOLUTION_TOLERANCE` → 仅此测试失败（98 过 1 failed，`left: Fail`）。
+
 - [ ] **Step 6: 运行测试**
 
 ```bash
 cd blend_kit_rs && cargo test --release && cargo clippy --release -- -D warnings
 ```
-预期：Task 4 的 13 个新测试 PASS（optimizer.rs 1 条不变式 + lib.rs 12 条行为），既有测试无回归。
+预期：Task 4 的 14 个新测试 PASS（optimizer.rs 1 条不变式 + lib.rs 13 条行为），既有测试无回归。
 
 - [ ] **Step 7: 提交**
 

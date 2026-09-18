@@ -1583,10 +1583,6 @@ mod tests {
     /// margin 必须真的收紧拒收线 —— 否则"margin 不影响扣款"可以靠彻底废掉
     /// margin 来伪造通过. 灰分 11.25 落在 [拒收线 − margin, 拒收线] 区间内:
     /// 无 margin 时未越 12.0 拒收线应可解, margin 1.0 把线收到 11.0 后必须不可行.
-    ///
-    /// 参数取值受限于已知缺陷: `LpProblem::solve` 的可行性复算用绝对 1e-8,
-    /// 比 Clarabel 在档位列上的收敛残差还紧, 约 27% 的良态计价输入会被误判
-    /// "约束冲突, LP 不可行". 上述取值经扫描确认落在稳定区; 该缺陷修复后可放宽.
     #[test]
     fn test_priced_margin_tightens_reject_line() {
         let solves_with_margin = |margin: Option<f64>| -> bool {
@@ -1720,5 +1716,65 @@ mod tests {
 
         assert!(solves(12.0), "正好压拒收线应可行");
         assert!(!solves(12.01), "超拒收线 0.01% (化验一个刻度) 必须判不可行");
+    }
+
+    /// 回归: 体检复核的容限必须与 LP 拒收行同量级.
+    ///
+    /// LP 的拒收行放行 `FEASIBILITY_TOLERANCE * (1 + magnitude)`, 于是最优解可能把
+    /// 混合值顶到拒收线上、再高出浮点噪声那一丝. 体检的 `Fail → TolerancePass` 复核
+    /// 若仍用绝对 `SOLUTION_TOLERANCE` (1e-8), 就会把 LP 认可的解判成 Fail,
+    /// 再经 `finalize_quality_status` 变成 `NeedsReview` —— 正确配方被盖上"需要复核".
+    ///
+    /// 本例: 便宜脏煤(灰 13.25) + 干净贵煤(灰 8.0), 拒收线 12.75. 最优解顶在线上,
+    /// 复算值 12.75000003279332539, 超线 3.28e-8 —— 旧的绝对 1e-8 兜不住.
+    #[test]
+    fn test_priced_indicator_check_tolerance_matches_lp_wall() {
+        let request = BlendRequest {
+            coals: vec![
+                coal_from_tuple(
+                    "脏便宜",
+                    (1.0, 13.25, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1500.0, 0.0),
+                ),
+                coal_from_tuple(
+                    "净贵",
+                    (1.0, 8.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 2000.0, 0.0),
+                ),
+            ],
+            specs: vec![priced_upper_spec(
+                "A",
+                10.0,
+                vec![PenaltyTier {
+                    width: None,
+                    rate: 5.0,
+                }],
+                12.75,
+            )],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+        assert!(result.ok, "应可解: {:?}", result.reason);
+
+        let ash = result
+            .indicator_check
+            .iter()
+            .find(|check| check.indicator == "A")
+            .expect("应有灰分体检");
+        assert!(
+            ash.value > 12.75,
+            "本用例须让复算值高出拒收线一丝才有意义, 实得 {}",
+            ash.value
+        );
+        assert_ne!(
+            ash.status,
+            EvaluationStatus::Fail,
+            "LP 已认可的解不应被体检判 Fail (复算值 {}, 拒收线 12.75)",
+            ash.value
+        );
+        assert_ne!(
+            result.quality_status,
+            QualityStatus::NeedsReview,
+            "正确配方不应被盖上需要复核"
+        );
     }
 }
