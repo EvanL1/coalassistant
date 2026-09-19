@@ -314,6 +314,7 @@ function SpecRow({
 
   return (
     <div
+      data-testid={`spec-${spec.indicator}`}
       style={{
         padding: "12px 14px",
         borderBottom: isLast ? "none" : "1px solid var(--c-border)",

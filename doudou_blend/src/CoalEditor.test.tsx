@@ -92,7 +92,7 @@ describe("煤卡采购保证值", () => {
     expect(savedPref().purchase_guarantees).toEqual({ A: 10 });
   });
 
-  it("重置为 master 默认值会连保证值一起清掉, 确认框里得说出来", () => {
+  it("重置前的确认框说明保证值会一并清掉, 点取消则什么都不动", () => {
     const confirmSpy = vi.fn().mockReturnValue(false);
     vi.stubGlobal("confirm", confirmSpy);
     mocks.getCoalPref.mockReturnValue({
@@ -103,6 +103,25 @@ describe("煤卡采购保证值", () => {
     fireEvent.click(screen.getByText("重置为 master 默认值"));
     expect(confirmSpy.mock.calls[0][0]).toContain("采购保证值");
     expect(mocks.clearCoalPref).not.toHaveBeenCalled();
+    expect((screen.getByLabelText("灰保证值") as HTMLInputElement).value).toBe("10");
+  });
+
+  it("确认重置后保证值真的没了 —— 不是只在确认框里吓唬一下", () => {
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
+    mocks.getCoalPref.mockReturnValue({
+      purchase_guarantees: { A: 10 },
+      fob_override: 1200,
+    });
+    render(<CoalEditor coal={coal} onClose={() => {}} />);
+    expect((screen.getByLabelText("灰保证值") as HTMLInputElement).value).toBe("10");
+
+    fireEvent.click(screen.getByText("重置为 master 默认值"));
+    expect(mocks.clearCoalPref).toHaveBeenCalledWith(coal.name);
+    // 界面上也跟着空了, 否则用户以为还在, 一保存又写回去
+    expect((screen.getByLabelText("灰保证值") as HTMLInputElement).value).toBe("");
+
+    fireEvent.click(screen.getByText("保存"));
+    expect(savedPref().purchase_guarantees).toBeUndefined();
   });
 
   it("没填保证值的煤不写出空的 purchase_guarantees", () => {

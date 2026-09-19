@@ -384,12 +384,9 @@ describe("penaltyFromDraft 与 Rust validate_penalty 同规则", () => {
     expect(error).toContain("区间");
   });
 
-  it("边界未知(采购模板: 保证值逐煤不同)时跳过拒收线比对, 其余规则照查", () => {
+  it("边界未知(采购模板: 保证值逐煤不同)时跳过拒收线比对", () => {
     const options = { ...ashOptions, bound: null, boundLabel: "保证值" };
     expect(penaltyFromDraft({ ...ashDraft, reject: "1" }, options).error).toBeNull();
-    expect(
-      penaltyFromDraft({ tiers: [], reject: "1" }, options).penalty,
-    ).toBeNull();
   });
 });
 
@@ -736,6 +733,8 @@ describe("tierRate 溢出防护", () => {
 describe("与 core 共享的计价条款用例", () => {
   interface SharedCase {
     name: string;
+    /** 这条用例钉的是哪条规则; 用来区分"只有拒收线越界"的那几条. */
+    rule: string;
     direction: Direction;
     bound: number;
     penalty: Penalty;
@@ -761,6 +760,23 @@ describe("与 core 共享的计价条款用例", () => {
         boundLabel: "合同上限",
       });
       expect(error == null).toBe(testCase.valid);
+    },
+  );
+
+  // 采购扣款模板没有可比的边界(保证值逐煤不同), 但它不是"少校验一点"——
+  // 除拒收线那一条外的每条规则都照查. 用同一份用例反过来钉死: 只因拒收线
+  // 越界而不合法的用例, 在 bound=null 下必须放行; 其余不合法的仍要拦住.
+  it.each(fixture.cases.map((c) => [c.name, c] as const))(
+    "边界未知时: %s",
+    (_name, testCase) => {
+      const { error } = penaltyFromDraft(penaltyToDraft(testCase.penalty), {
+        indicator: "A",
+        direction: testCase.direction,
+        bound: null,
+        boundLabel: "保证值",
+      });
+      const onlyRejectWasWrong = testCase.rule === "拒收线在边界之外";
+      expect(error == null).toBe(testCase.valid || onlyRejectWasWrong);
     },
   );
 });
