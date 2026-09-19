@@ -221,16 +221,24 @@ export function rejectCrossWord(direction: Direction): string {
  * 而且界面上没有任何东西看起来是坏的。所以八项逐一列全, 不靠"其余按 %"兜底
  * —— 兜底正是 Y(mm) 和 petro(无量纲) 被标成 % 的原因。
  *
- * 数据来源是 `blend_kit_rs/data/coal_master.json` 的字段说明:
- * "Y": "胶质层最大厚度 mm", "petro": "岩相 (反射率分布度量)"。
+ * 数据来源是 `blend_kit_rs/data/coal_master.json` 的 schema.fields, 逐项对照过;
+ * 唯一有意偏离 schema 的是 CSR(schema 写 %, 这里用"点"), 理由见下面那条注释。
  */
 const INDICATOR_UNIT: Record<string, string> = {
   S: "%",
   A: "%",
   V: "%",
   M: "%",
-  // 粘结指数 G 与焦炭强度 CSR 是无量纲的, 配煤师论"点".
+  // 粘结指数 G 按 master schema 是无量纲的, 配煤师论"点".
   G: "点",
+  // CSR 按 master schema 是百分数("焦炭反应后强度 %"), 这里刻意不写 % ——
+  // 合同原话是"热后强度低 1, 扣 10 元/吨", 一个单位都不带; 行业里 CSR 的差额
+  // 说的是"个百分点", 口语就是"点", 所以"每 1 点扣 10 元"比"每 1 % 扣 10 元"
+  // 更贴合同原话, 也跟同属强度族的 G 读起来一致。
+  //
+  // 这一条不是正确性问题: 输入框收的是"偏离步长", 无论标签写什么, 用户照抄
+  // 合同都会填 1, 换算结果相同。是可读性取舍, 所以必须写下来, 免得下一个人
+  // 看成是漏改了 —— 与 Y/petro 那两处真的标错单位不是一回事。
   CSR: "点",
   Y: "mm",
   // 岩相是反射率的分布度量, 没有单位 —— 空字符串, 宁可不写也不能写错.
@@ -490,10 +498,10 @@ export function templateFromDraft(draft: TemplateDraft): TemplateDraftResult {
 
   // 整份模板层面的错, 与条款自身的错各报各的: 掺在一起会让"灰有两条条款"
   // 被一个无关的档位错盖住, 改完那个才冒出来.
-  const templateError = templateLevelError(draft);
+  const level = templateLevel(draft);
 
-  if (templateError != null || clauseErrors.some((error) => error != null)) {
-    return { template: null, error: templateError, clauseErrors };
+  if (level.error != null || clauseErrors.some((error) => error != null)) {
+    return { template: null, error: level.error, clauseErrors };
   }
 
   const clauses: PenaltyTemplateClause[] = draft.clauses.map((clause, index) => ({
@@ -504,36 +512,53 @@ export function templateFromDraft(draft: TemplateDraft): TemplateDraftResult {
   return {
     template: {
       clauses,
-      contract_moisture: optionalPercent(draft.contractMoisture) as number | null,
-      moisture_excess_double_threshold: optionalPercent(
-        draft.doubleThreshold,
-      ) as number | null,
+      contract_moisture: level.contractMoisture,
+      moisture_excess_double_threshold: level.doubleThreshold,
     },
     error: null,
     clauseErrors,
   };
 }
 
-/** 整份模板层面的错(与单条条款无关的那些); null = 这一层没问题. */
-function templateLevelError(draft: TemplateDraft): string | null {
+/**
+ * 整份模板层面的校验(与单条条款无关的那些)。
+ *
+ * 通过时把已经解析好的水分字段一并交出来: 调用方再调一次 `optionalPercent`
+ * 就得用 `as number | null` 把"填坏了"这种可能断言掉 —— 而那正是这里刚排除过
+ * 的情况, 断言只是把重算的事实藏起来。
+ */
+type TemplateLevel =
+  | { error: string; contractMoisture: null; doubleThreshold: null }
+  | { error: null; contractMoisture: number | null; doubleThreshold: number | null };
+
+function templateLevel(draft: TemplateDraft): TemplateLevel {
+  const fail = (error: string): TemplateLevel => ({
+    error,
+    contractMoisture: null,
+    doubleThreshold: null,
+  });
+
   if (draft.clauses.length === 0) {
-    return "至少要有一条扣款条款: 不想要模板了就按「清空模板」";
+    return fail("至少要有一条扣款条款: 不想要模板了就按「清空模板」");
   }
   const seen = new Set<string>();
   for (const clause of draft.clauses) {
     if (seen.has(clause.indicator)) {
       const label = INDICATOR_LABEL[clause.indicator] ?? clause.indicator;
-      return `${label}有两条条款: 同一项只能留一条, 否则这项的扣款会被算两遍`;
+      return fail(`${label}有两条条款: 同一项只能留一条, 否则这项的扣款会被算两遍`);
     }
     seen.add(clause.indicator);
   }
-  if (optionalPercent(draft.contractMoisture) === undefined) {
-    return "合同水分要填 0~100 之间的数";
+
+  const contractMoisture = optionalPercent(draft.contractMoisture);
+  if (contractMoisture === undefined) {
+    return fail("合同水分要填 0~100 之间的数");
   }
-  if (optionalPercent(draft.doubleThreshold) === undefined) {
-    return "水分双倍阈值要填 0~100 之间的数";
+  const doubleThreshold = optionalPercent(draft.doubleThreshold);
+  if (doubleThreshold === undefined) {
+    return fail("水分双倍阈值要填 0~100 之间的数");
   }
-  return null;
+  return { error: null, contractMoisture, doubleThreshold };
 }
 
 /** 把已存的模板回显成录入态. */

@@ -2641,12 +2641,29 @@ cd ../blend_kit_rs && cargo test --release && cargo clippy --release --all-targe
 5. **单煤保证值落在 `CoalEditor.tsx`**（计划写的是 `CoalPoolScreen.tsx`，但化验
    覆盖区块实际在煤卡弹层里），配 `guaranteeIssue()` 做字段级校验：拒收线与保证值
    自洽、水分扣量/扣价互斥、缺条款时只提示不拦。
-6. **方向与单位的词只有一处定义**：`indicatorUnit()`（八项逐一列全，Y 是 mm、
-   petro 无量纲）、`deviationNoun()`、`offSpecWord()`、`rejectCrossWord()`。
-   界面文案与报错文案共用，避免下限型指标被写成"超出"。
+6. **方向与单位的词只有一处定义**：`indicatorUnit()`、`deviationNoun()`、
+   `offSpecWord()`、`rejectCrossWord()`。界面文案与报错文案共用，避免下限型
+   指标被写成"超出"。
+
+   单位逐项对照 `coal_master.json` 的 `schema.fields`（不用"其余按 %"兜底 ——
+   那个兜底正是 Y/petro 被标错的原因）：S/A/V/M 是 %，G 无量纲论"点"，
+   **Y 是 mm**，**petro 无量纲（空字符串）**。
+
+   唯一有意偏离 schema 的是 **CSR**：schema 写"焦炭反应后强度 %"，界面用"点"。
+   理由：合同原话是"热后强度低 1，扣 10 元/吨"，一个单位都不带；行业里 CSR 的
+   差额说的是"个百分点"，口语即"点"，所以"每 1 点扣 10 元"比"每 1 % 扣 10 元"
+   更贴合同原话，也跟同属强度族的 G 读起来一致。这不是正确性问题 —— 输入框收的
+   是偏离步长，标签写什么用户都填 1，换算结果相同；是可读性取舍，写在
+   `penalty.ts` 的 `INDICATOR_UNIT` 注释里，免得被后来者当成漏改。
 7. **前端校验与 Rust 的防分叉证据**：`blend_kit_rs/data/penalty_cases.json`
    由两端各跑一遍（Rust `quality::tests::shared_penalty_cases_match_fixture`，
    TS `penalty.test.ts` 的"与 core 共享的计价条款用例"）。改任一端规则先加用例。
+
+   这份用例**管不到**两件事，文件头的 `_comment` 里也写了：JSON 表达不了
+   NaN/Infinity，所以 Rust 的两条 `is_finite` 不在其中；TS 侧入口经
+   `penaltyToDraft` 把"每 ___"归一成 `"1"`，所以合同原文两栏换算（每 0.1% 扣 8 元
+   → rate 80）这一步用例覆盖不到 —— 而那是整个功能最容易出错的一步，由
+   `penaltyFromDraft 单位换算` 与两个屏幕的组件测试专门盯着。
 8. **停用的 spec 不参与计价校验** —— core 的校验循环本就 `filter(|item| item.enabled)`，
    前端若照拦，会出现"提示让你关掉计价开关、而那个开关已 disabled"的死角。
 

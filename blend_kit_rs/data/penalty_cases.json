@@ -5,7 +5,16 @@
     "  - TS:   doudou_blend/src/penalty.test.ts (合同屏/煤池屏的字段级即时提示)",
     "前端校验是 Rust 规则的镜像, 两份实现难免各自演化; 这份用例是它们不许分叉的证据.",
     "改任何一端的规则时, 先在这里加一条用例, 两端都会跟着红.",
-    "valid=true 表示该条款合法(Rust Ok / TS 无报错), false 表示两端都必须拒绝."
+    "valid=true 表示该条款合法(Rust Ok / TS 无报错), false 表示两端都必须拒绝.",
+    "",
+    "这份用例管不到的两件事 —— 别把「共享用例」读成「两端已被完全钉死」:",
+    "  1. JSON 表达不了 NaN/Infinity, 所以 Rust 的两条 is_finite 校验(rate 有限、",
+    "     reject 有限)不在这里. 各自单测: Rust 见 quality.rs 同模块其余用例;",
+    "     TS 见 penalty.test.ts 的「tierRate 溢出防护」与「拒收线留空时报错」.",
+    "  2. TS 侧入口是 penaltyToDraft 回显出来的录入态, 它把「每 ___」一律归一成",
+    "     \"1\", 所以合同原文两栏录入(每 0.1% 扣 8 元 → rate 80)这一步用例覆盖不到",
+    "     —— 而那是整个功能最容易出错的一步. 它由 penalty.test.ts 的",
+    "     「penaltyFromDraft 单位换算」与两个屏幕的组件测试专门盯着."
   ],
   "cases": [
     {
