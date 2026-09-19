@@ -8,7 +8,7 @@
  * 组件自己不判对错: `error` 由父层调一次 `penaltyFromDraft` 得出, 同一个结果
  * 既用来显示错误也用来决定能不能存, 不会出现"红字在这、保存却过了"。
  */
-import { deviationNoun } from "./penalty";
+import { deviationNoun, rejectCrossWord } from "./penalty";
 import type { PenaltyDraft, TierDraft } from "./penalty";
 
 interface Props {
@@ -23,8 +23,10 @@ interface Props {
 }
 
 export function PenaltyEditor({ draft, unit, direction, error, onChange }: Props) {
-  // 上限型是"超出", 下限型是"不足" —— 用词跟着方向走, 与报错文案同一处定义.
+  // 方向决定的三个词(偏离叫什么、越线叫什么、判定叫什么)都在 penalty.ts 里
+  // 一处定义, 界面文案与报错文案共用同一份, 不各写各的.
   const noun = deviationNoun(direction);
+  const crossWord = rejectCrossWord(direction);
 
   function patchTier(index: number, patch: Partial<TierDraft>) {
     onChange({
@@ -141,12 +143,12 @@ export function PenaltyEditor({ draft, unit, direction, error, onChange }: Props
         }}
       >
         <span style={{ fontSize: 10, color: "var(--c-text-3)" }}>
-          拒收线（{direction === "Upper" ? "超过" : "低于"}它整批不收，不再按扣款算）
+          拒收线（{crossWord}它整批不收，不再按扣款算）
         </span>
         <input
           type="number"
           inputMode="decimal"
-          aria-label={`拒收线（${direction === "Upper" ? "超过" : "低于"}它整批不收）`}
+          aria-label={`拒收线（${crossWord}它整批不收）`}
           value={draft.reject}
           onChange={(event) => onChange({ ...draft, reject: event.target.value })}
           style={{

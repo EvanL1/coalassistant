@@ -3,6 +3,8 @@ import {
   deviationNoun,
   guaranteeIssue,
   indicatorUnit,
+  offSpecWord,
+  rejectCrossWord,
   mergePurchaseTerms,
   penaltyFromDraft,
   penaltyToDraft,
@@ -10,6 +12,8 @@ import {
   tierRate,
 } from "./penalty";
 import type { PenaltyDraft, PenaltyTemplate } from "./penalty";
+import type { Direction, Penalty } from "./types";
+import penaltyCasesRaw from "../../blend_kit_rs/data/penalty_cases.json?raw";
 
 describe("tierRate", () => {
   it("把合同原文的每 0.1% 扣 8 元换算成 80 元/吨·%", () => {
@@ -182,15 +186,6 @@ describe.each([
     const after = mergePurchaseTerms(template, roundTripped, { A: 10 });
     expect(after.terms?.[field]).toBe(before.terms?.[field]);
     expect(before.terms?.[field]).toBe(templateValue); // 双重确认: 往返前后都是"继承", 不是巧合地都错
-  });
-});
-
-describe("indicatorUnit", () => {
-  it("粘结与焦炭强度按点计, 其余按百分点计", () => {
-    expect(indicatorUnit("G")).toBe("点");
-    expect(indicatorUnit("CSR")).toBe("点");
-    expect(indicatorUnit("A")).toBe("%");
-    expect(indicatorUnit("S")).toBe("%");
   });
 });
 
@@ -575,8 +570,8 @@ describe("templateFromDraft", () => {
     expect(error).toContain("灰");
   });
 
-  it("某条条款的档位填错时, 报错要指名道姓是哪一项", () => {
-    const { template, error } = templateFromDraft({
+  it("某条条款的档位填错时, 错跟着那一条走(界面据此显示在它下面)", () => {
+    const { template, error, clauseErrors } = templateFromDraft({
       clauses: [
         ashClause,
         {
@@ -589,7 +584,26 @@ describe("templateFromDraft", () => {
       doubleThreshold: "",
     });
     expect(template).toBeNull();
-    expect(error).toContain("硫");
+    expect(clauseErrors[0]).toBeNull();
+    expect(clauseErrors[1]).toContain("「扣」要填");
+    // 条款自己的错不冒充整份模板的错 —— 否则界面会把它显示两遍.
+    expect(error).toBeNull();
+  });
+
+  it("重复指标与条款自身的错各报各的 —— 不会被对方盖住", () => {
+    const broken = {
+      indicator: "A",
+      direction: "Upper" as const,
+      penalty: { tiers: [{ step: "0.1", amount: "", width: "" }], reject: "12" },
+    };
+    const { template, error, clauseErrors } = templateFromDraft({
+      clauses: [ashClause, broken],
+      contractMoisture: "",
+      doubleThreshold: "",
+    });
+    expect(template).toBeNull();
+    expect(error).toContain("两条条款");
+    expect(clauseErrors[1]).toContain("「扣」要填");
   });
 
   it("合同水分不在 0~100 之间时报错", () => {
@@ -674,4 +688,79 @@ describe("下限型指标的提示用词", () => {
     expect(deviationNoun("Upper")).toBe("超出");
     expect(deviationNoun("Lower")).toBe("不足");
   });
+});
+
+describe("指标单位 (八项逐一钉死)", () => {
+  // 单位写错与"填 8 而不是 80"是同一类事故: 用户照抄合同, 界面标着错单位,
+  // 抄得再忠实也是错的, 而且没有任何东西看起来是坏的.
+  it.each([
+    ["S", "%", "硫按百分比"],
+    ["A", "%", "灰按百分比"],
+    ["V", "%", "挥发分按百分比"],
+    ["M", "%", "水分按百分比"],
+    ["G", "点", "粘结指数是无量纲指数, 配煤师论点"],
+    ["CSR", "点", "焦炭强度论点"],
+    ["Y", "mm", "胶质层最大厚度是毫米 (见 coal_master.json 字段说明)"],
+    ["petro", "", "岩相是反射率分布度量, 没有单位, 宁可不写也不能写错"],
+  ])("%s 的单位是「%s」(%s)", (indicator, unit) => {
+    expect(indicatorUnit(indicator)).toBe(unit);
+  });
+});
+
+describe("方向词也只有一处定义", () => {
+  it.each([
+    ["Upper", "超出", "超标", "超过"],
+    ["Lower", "不足", "不达标", "低于"],
+  ])("%s 型: 偏离叫「%s」, 判定叫「%s」, 越拒收线叫「%s」", (direction, noun, offSpec, cross) => {
+    const d = direction as "Upper" | "Lower";
+    expect(deviationNoun(d)).toBe(noun);
+    expect(offSpecWord(d)).toBe(offSpec);
+    expect(rejectCrossWord(d)).toBe(cross);
+  });
+});
+
+describe("tierRate 溢出防护", () => {
+  it("换算结果溢出成 Infinity 时返回 null —— core 的 is_finite 会拒掉它", () => {
+    expect(tierRate({ step: 1e-320, amount: 1e300 })).toBeNull();
+  });
+});
+
+/**
+ * 与 Rust 共享的计价条款用例 (`blend_kit_rs/data/penalty_cases.json`)。
+ *
+ * 同一份数据 `quality.rs::tests::shared_penalty_cases_match_fixture` 也跑一遍。
+ * 前端这套校验是 Rust 规则的镜像 —— 它存在的意义是让用户在字段旁就看到错,
+ * 而不是等求解失败; 一旦两端分叉, 用户会遇到"界面放行、求解报错"或反过来
+ * "界面拦住了 core 其实接受的合同"。这份用例就是不许分叉的证据。
+ */
+describe("与 core 共享的计价条款用例", () => {
+  interface SharedCase {
+    name: string;
+    direction: Direction;
+    bound: number;
+    penalty: Penalty;
+    valid: boolean;
+  }
+
+  // 用 ?raw 取原文再解析, 不走 node:fs —— 这个前端工程刻意没装 @types/node
+  // (vite.config.ts 里那句 @ts-expect-error 就是证据), 用了会让 tsc 直接红.
+  const fixture = JSON.parse(penaltyCasesRaw) as { cases: SharedCase[] };
+
+  it("用例数量足够覆盖每条规则", () => {
+    expect(fixture.cases.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it.each(fixture.cases.map((c) => [c.name, c] as const))(
+    "%s",
+    (_name, testCase) => {
+      // 先回显成录入态再换算回去: 走的正是用户在界面上看到并改的那条路径.
+      const { error } = penaltyFromDraft(penaltyToDraft(testCase.penalty), {
+        indicator: "A",
+        direction: testCase.direction,
+        bound: testCase.bound,
+        boundLabel: "合同上限",
+      });
+      expect(error == null).toBe(testCase.valid);
+    },
+  );
 });

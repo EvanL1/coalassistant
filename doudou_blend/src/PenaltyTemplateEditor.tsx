@@ -13,7 +13,6 @@ import { PenaltyEditor } from "./PenaltyEditor";
 import {
   emptyPenaltyDraft,
   indicatorUnit,
-  penaltyFromDraft,
   templateFromDraft,
   templateToDraft,
   type TemplateClauseDraft,
@@ -37,21 +36,10 @@ export function PenaltyTemplateEditor() {
   );
   const [savedFlag, setSavedFlag] = useState(false);
 
-  // 整份模板只换算校验这一次: 能不能保存、写盘的内容都读它.
-  const { template, error } = templateFromDraft(draft);
-  // 每条条款自己的错单独算一份, 只为把红字显示在出错那条条款下面.
-  // 底部那行整体报错因此要避开已经就地显示过的 —— 同一句话说两遍, 用户会
-  // 以为是两处毛病.
-  const clauseErrors = draft.clauses.map(
-    (clause) =>
-      penaltyFromDraft(clause.penalty, {
-        indicator: clause.indicator,
-        direction: clause.direction,
-        bound: null,
-        boundLabel: "保证值",
-      }).error,
-  );
-  const shownAtClause = clauseErrors.some((clauseError) => clauseError != null);
+  // 整份模板只换算校验这一次: 能不能保存、写盘的内容、每条条款的红字都读它.
+  // `error` 是模板层面的问题, `clauseErrors[i]` 是第 i 条条款自己的问题,
+  // 两者各显示各的, 不会互相遮住.
+  const { template, error, clauseErrors } = templateFromDraft(draft);
 
   function patchClause(index: number, patch: Partial<TemplateClauseDraft>) {
     setDraft({
@@ -201,7 +189,7 @@ export function PenaltyTemplateEditor() {
         />
       </div>
 
-      {error && !shownAtClause && (
+      {error && (
         <div style={{ marginTop: 10, fontSize: 11, color: "var(--c-danger)", lineHeight: 1.5 }}>
           {error}
         </div>

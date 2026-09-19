@@ -69,7 +69,10 @@ export function tierRate({
 }): number | null {
   if (!Number.isFinite(step) || step <= 0) return null;
   if (!Number.isFinite(amount) || amount < 0) return null;
-  return amount / step;
+  const rate = amount / step;
+  // 两个各自合法的数也能除出 Infinity (1e300 / 1e-320). core 的 is_finite()
+  // 会拒掉它, 前端不能先放行 —— 这是整个功能算钱的那一步.
+  return Number.isFinite(rate) ? rate : null;
 }
 
 /**
@@ -201,9 +204,41 @@ export function deviationNoun(direction: Direction): string {
   return direction === "Lower" ? "不足" : "超出";
 }
 
-/** 指标在合同里的计量单位: 粘结/焦炭强度论"点", 其余论"%". */
+/** 判定说法: 上限型"超标", 下限型"不达标". 与 [`deviationNoun`] 同一处定义. */
+export function offSpecWord(direction: Direction): string {
+  return direction === "Lower" ? "不达标" : "超标";
+}
+
+/** 越过拒收线的说法: 上限型"超过", 下限型"低于". */
+export function rejectCrossWord(direction: Direction): string {
+  return direction === "Lower" ? "低于" : "超过";
+}
+
+/**
+ * 指标在合同里的计量单位。
+ *
+ * 单位标错与"该填 80 却填了 8"是同一类事故: 用户照抄合同, 抄得再忠实也是错的,
+ * 而且界面上没有任何东西看起来是坏的。所以八项逐一列全, 不靠"其余按 %"兜底
+ * —— 兜底正是 Y(mm) 和 petro(无量纲) 被标成 % 的原因。
+ *
+ * 数据来源是 `blend_kit_rs/data/coal_master.json` 的字段说明:
+ * "Y": "胶质层最大厚度 mm", "petro": "岩相 (反射率分布度量)"。
+ */
+const INDICATOR_UNIT: Record<string, string> = {
+  S: "%",
+  A: "%",
+  V: "%",
+  M: "%",
+  // 粘结指数 G 与焦炭强度 CSR 是无量纲的, 配煤师论"点".
+  G: "点",
+  CSR: "点",
+  Y: "mm",
+  // 岩相是反射率的分布度量, 没有单位 —— 空字符串, 宁可不写也不能写错.
+  petro: "",
+};
+
 export function indicatorUnit(indicator: string): string {
-  return indicator === "G" || indicator === "CSR" ? "点" : "%";
+  return INDICATOR_UNIT[indicator] ?? "";
 }
 
 /** 空白视作 NaN: `Number("")` 是 0, 会把"没填"错当成"填了 0". */
@@ -322,7 +357,9 @@ export function penaltyFromDraft(
       const width = draftNumber(tier.width);
       if (!Number.isFinite(width) || width <= 0) {
         return fail(
-          `第 ${position} 档要填「本档覆盖」: 这一档管${noun}的前几${unit}, 填满才进下一档`,
+          // 不往这句里嵌单位: 岩相没有单位("这一档管超出的前几" 读不通),
+          // 而输入框旁边本来就标着单位.
+          `第 ${position} 档要填「本档覆盖」: 这一档管${noun}的前一段, 填满才进下一档`,
         );
       }
       tiers.push({ rate, width });
@@ -400,6 +437,18 @@ export interface TemplateClauseDraft {
   penalty: PenaltyDraft;
 }
 
+/**
+ * 模板换算结果。`error` 只报整份模板层面的问题(重复指标、水分范围、一条条款
+ * 都没有), 单条条款自己的问题在 `clauseErrors[i]` 里, 与该条款一一对应 ——
+ * 这样界面能把每条错显示在出错的那条下面, 又不必自己再算一遍。
+ * `template` 非空 ⟺ `error` 为 null 且 `clauseErrors` 全为 null。
+ */
+export interface TemplateDraftResult {
+  template: PenaltyTemplate | null;
+  error: string | null;
+  clauseErrors: (string | null)[];
+}
+
 export interface TemplateDraft {
   clauses: TemplateClauseDraft[];
   /** 合同水分 (%), 走扣量; 留空 = 不设. */
@@ -425,53 +474,66 @@ function optionalPercent(raw: string): number | null | undefined {
  * 两条都在录保证值的地方查 (见 [`guaranteeIssue`]) —— 在这里查会对"没填水分
  * 保证值的煤"误报, 而那些煤根本不会产出水分条款。
  */
-export function templateFromDraft(draft: TemplateDraft): {
-  template: PenaltyTemplate | null;
-  error: string | null;
-} {
-  const fail = (error: string) => ({ template: null, error });
-
-  if (draft.clauses.length === 0) {
-    return fail("至少要有一条扣款条款: 不想要模板了就按「清空模板」");
-  }
-
-  const clauses: PenaltyTemplateClause[] = [];
-  const seen = new Set<string>();
-  for (const clause of draft.clauses) {
-    const label = INDICATOR_LABEL[clause.indicator] ?? clause.indicator;
-    if (seen.has(clause.indicator)) {
-      return fail(`${label}有两条条款: 同一项只能留一条, 否则这项的扣款会被算两遍`);
-    }
-    seen.add(clause.indicator);
-
-    const { penalty, error } = penaltyFromDraft(clause.penalty, {
+export function templateFromDraft(draft: TemplateDraft): TemplateDraftResult {
+  // 每条条款各自的错只在这里算一次, 调用方直接用 clauseErrors[i] 显示在那条
+  // 条款下面 —— 界面再算一遍就是同一件事两处实现, 这个功能其余部分都在躲它.
+  const converted = draft.clauses.map((clause) =>
+    penaltyFromDraft(clause.penalty, {
       indicator: clause.indicator,
       direction: clause.direction,
       // 保证值逐煤不同, 模板这里没有可比的边界.
       bound: null,
       boundLabel: "保证值",
-    });
-    if (error || !penalty) return fail(`${label}: ${error}`);
-    clauses.push({
-      indicator: clause.indicator,
-      direction: clause.direction,
-      penalty,
-    });
+    }),
+  );
+  const clauseErrors = converted.map((result) => result.error);
+
+  // 整份模板层面的错, 与条款自身的错各报各的: 掺在一起会让"灰有两条条款"
+  // 被一个无关的档位错盖住, 改完那个才冒出来.
+  const templateError = templateLevelError(draft);
+
+  if (templateError != null || clauseErrors.some((error) => error != null)) {
+    return { template: null, error: templateError, clauseErrors };
   }
 
-  const contract_moisture = optionalPercent(draft.contractMoisture);
-  if (contract_moisture === undefined) {
-    return fail("合同水分要填 0~100 之间的数");
-  }
-  const moisture_excess_double_threshold = optionalPercent(draft.doubleThreshold);
-  if (moisture_excess_double_threshold === undefined) {
-    return fail("水分双倍阈值要填 0~100 之间的数");
-  }
-
+  const clauses: PenaltyTemplateClause[] = draft.clauses.map((clause, index) => ({
+    indicator: clause.indicator,
+    direction: clause.direction,
+    penalty: converted[index].penalty!,
+  }));
   return {
-    template: { clauses, contract_moisture, moisture_excess_double_threshold },
+    template: {
+      clauses,
+      contract_moisture: optionalPercent(draft.contractMoisture) as number | null,
+      moisture_excess_double_threshold: optionalPercent(
+        draft.doubleThreshold,
+      ) as number | null,
+    },
     error: null,
+    clauseErrors,
   };
+}
+
+/** 整份模板层面的错(与单条条款无关的那些); null = 这一层没问题. */
+function templateLevelError(draft: TemplateDraft): string | null {
+  if (draft.clauses.length === 0) {
+    return "至少要有一条扣款条款: 不想要模板了就按「清空模板」";
+  }
+  const seen = new Set<string>();
+  for (const clause of draft.clauses) {
+    if (seen.has(clause.indicator)) {
+      const label = INDICATOR_LABEL[clause.indicator] ?? clause.indicator;
+      return `${label}有两条条款: 同一项只能留一条, 否则这项的扣款会被算两遍`;
+    }
+    seen.add(clause.indicator);
+  }
+  if (optionalPercent(draft.contractMoisture) === undefined) {
+    return "合同水分要填 0~100 之间的数";
+  }
+  if (optionalPercent(draft.doubleThreshold) === undefined) {
+    return "水分双倍阈值要填 0~100 之间的数";
+  }
+  return null;
 }
 
 /** 把已存的模板回显成录入态. */

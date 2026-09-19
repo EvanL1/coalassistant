@@ -503,6 +503,45 @@ fn validate_penalty(
 mod tests {
     use super::*;
 
+    /// 计价条款校验的共享用例 (`data/penalty_cases.json`).
+    ///
+    /// 同一份用例前端也跑一遍 (`doudou_blend/src/penalty.test.ts`): 前端那套
+    /// 字段级提示是本函数规则的镜像, 两份实现各自演化就会出现"界面放行、求解
+    /// 报错"或反过来. 用例是它们不许分叉的证据 —— 改规则时先往这份数据里加
+    /// 一条, 两端会同时红.
+    #[derive(serde::Deserialize)]
+    struct PenaltyCase {
+        name: String,
+        direction: Direction,
+        bound: f64,
+        penalty: Penalty,
+        valid: bool,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct PenaltyCases {
+        cases: Vec<PenaltyCase>,
+    }
+
+    #[test]
+    fn shared_penalty_cases_match_fixture() {
+        let raw = include_str!("../data/penalty_cases.json");
+        let fixture: PenaltyCases = serde_json::from_str(raw).expect("用例文件必须是合法 JSON");
+        assert!(fixture.cases.len() >= 10, "用例太少, 覆盖不到每条规则");
+
+        for case in &fixture.cases {
+            let result = validate_penalty("A", case.direction, case.bound, &case.penalty);
+            assert_eq!(
+                result.is_ok(),
+                case.valid,
+                "用例「{}」: 期望 valid={}, 实际 {:?}",
+                case.name,
+                case.valid,
+                result
+            );
+        }
+    }
+
     #[test]
     fn test_truncate_upper_boundary() {
         let rule = AcceptanceRule {

@@ -2460,7 +2460,7 @@ git commit -m "feat(today): 成本卡拆出独立组件, 展示买入修正/卖�
 > 同等对待, 两者都回退模板; 只有显式传 `null` 才会关闭该项。这个坑已经在
 > Task 6 堵死, 不需要本任务的表单逻辑操心。
 
-- [ ] **Step 1: 合同屏 —— 每条 spec 的计价开关**
+- [x] **Step 1: 合同屏 —— 每条 spec 的计价开关**
 
 在 `ContractScreen.tsx` 每条 spec 行下方新增可折叠区块。状态更新函数：
 
@@ -2491,7 +2491,7 @@ function togglePriced(spec: Spec, on: boolean): Spec {
 </label>
 ```
 
-- [ ] **Step 2: 合同屏 —— 档位表按合同原文两栏录入**
+- [x] **Step 2: 合同屏 —— 档位表按合同原文两栏录入**
 
 每档一行，用户照抄合同的"每 0.1%"与"扣 8 元"，前端换算：
 
@@ -2538,7 +2538,7 @@ function togglePriced(spec: Spec, on: boolean): Spec {
 `tierSteps` / `tierAmounts` 是组件内 `useState` 的展示态数组，只用于回显用户录入的原文；
 存进 `Spec.penalty` 的永远是换算后的 `rate`。
 
-- [ ] **Step 3: 合同屏 —— 拒收线输入与前端预校验**
+- [x] **Step 3: 合同屏 —— 拒收线输入与前端预校验**
 
 ```tsx
 <label>
@@ -2578,7 +2578,7 @@ function penaltyError(spec: Spec): string | null {
 
 顶部加 `import { tierRate } from "../penalty";`。
 
-- [ ] **Step 4: 煤池屏 —— 单煤保证值录入**
+- [x] **Step 4: 煤池屏 —— 单煤保证值录入**
 
 在 `CoalPoolScreen.tsx` 每种煤的化验覆盖区块旁，新增保证值输入。写回 `CoalPref`：
 
@@ -2588,7 +2588,7 @@ setCoalPref(coal.name, {
 });
 ```
 
-- [ ] **Step 5: 煤池屏 —— 全局模板入口**
+- [x] **Step 5: 煤池屏 —— 全局模板入口**
 
 屏顶加一个"采购扣款模板"折叠区，复用 Step 2 的档位录入 UI，读写
 `getPenaltyTemplate()` / `setPenaltyTemplate()`。顶部加：
@@ -2613,20 +2613,42 @@ import { getPenaltyTemplate, setPenaltyTemplate } from "../penaltyStorage";
 录入 UI（Step 1-5），录入结果（模板/保证值/覆盖）已经有 Task 7 这条链路消费,
 不需要额外的组装代码。
 
-- [ ] **Step 7: 运行测试与构建**
+- [x] **Step 7: 运行测试与构建**
 
 ```bash
-cd doudou_blend && npm test && npm run build
+cd doudou_blend && npm test && npx tsc --noEmit && npm run build && npm run check:consistency
+cd ../blend_kit_rs && cargo test --release && cargo clippy --release --all-targets -- -D warnings
 ```
-预期：全部 PASS。
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
-```bash
-# TodayScreen.tsx 不在这里改 —— 组装 purchase_terms (原 Step 6) 已经在 Task 7 做完.
-git add doudou_blend/src/screens/ContractScreen.tsx doudou_blend/src/screens/CoalPoolScreen.tsx
-git commit -m "feat(contract): 合同屏计价条款录入与煤池屏采购保证值"
-```
+---
+
+#### 实际交付与计划的差异（按实现顺序，供后续任务参考）
+
+上面 Step 1-5 的代码片段是计划期写的，实际落地时改了以下几处，**以本节为准**：
+
+1. **录入原文是界面真源，`Spec.penalty` 由它换算得出**（不是计划里"`tierSteps`/`tierAmounts`
+   只做回显、rate 直接写回 spec"）。`FormSpec.penaltyDraft` 存字符串，保存时经
+   `penaltyFromDraft` 一次换算 —— 两边各存一份就会出现"界面显示每 0.1% 扣 8 元、
+   存下去却是另一个数"。关掉计价后草稿留着，再打开不用重填。
+2. **拒收线不预填**。计划的 `(bound ?? 0) * 1.1` 会把一个合同从没写过的数放在
+   "拒收线"标签旁边。留空 + 字段级报错。
+3. **`penaltyError` 换成 `penaltyFromDraft`**，返回 `{penalty, error}`：同一次调用
+   同时供给红字、保存拦截和写盘，杜绝"红字在这、保存却过了"。
+4. **档位表抽成 `src/PenaltyEditor.tsx`**，合同屏与采购扣款模板共用；采购模板
+   本体抽成 `src/PenaltyTemplateEditor.tsx`，煤池屏只挂一个折叠入口。
+5. **单煤保证值落在 `CoalEditor.tsx`**（计划写的是 `CoalPoolScreen.tsx`，但化验
+   覆盖区块实际在煤卡弹层里），配 `guaranteeIssue()` 做字段级校验：拒收线与保证值
+   自洽、水分扣量/扣价互斥、缺条款时只提示不拦。
+6. **方向与单位的词只有一处定义**：`indicatorUnit()`（八项逐一列全，Y 是 mm、
+   petro 无量纲）、`deviationNoun()`、`offSpecWord()`、`rejectCrossWord()`。
+   界面文案与报错文案共用，避免下限型指标被写成"超出"。
+7. **前端校验与 Rust 的防分叉证据**：`blend_kit_rs/data/penalty_cases.json`
+   由两端各跑一遍（Rust `quality::tests::shared_penalty_cases_match_fixture`，
+   TS `penalty.test.ts` 的"与 core 共享的计价条款用例"）。改任一端规则先加用例。
+8. **停用的 spec 不参与计价校验** —— core 的校验循环本就 `filter(|item| item.enabled)`，
+   前端若照拦，会出现"提示让你关掉计价开关、而那个开关已 disabled"的死角。
 
 ---
 

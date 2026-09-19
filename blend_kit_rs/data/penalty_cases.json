@@ -1,0 +1,150 @@
+{
+  "_comment": [
+    "计价条款校验的共享用例. 两端各跑一遍同一份数据:",
+    "  - Rust: quality.rs::tests::shared_penalty_cases_match_fixture (权威, 求解前拦截)",
+    "  - TS:   doudou_blend/src/penalty.test.ts (合同屏/煤池屏的字段级即时提示)",
+    "前端校验是 Rust 规则的镜像, 两份实现难免各自演化; 这份用例是它们不许分叉的证据.",
+    "改任何一端的规则时, 先在这里加一条用例, 两端都会跟着红.",
+    "valid=true 表示该条款合法(Rust Ok / TS 无报错), false 表示两端都必须拒绝."
+  ],
+  "cases": [
+    {
+      "name": "基准: 灰 ≤10%, 每超 0.1% 扣 8 元/吨, 超 12% 拒收",
+      "rule": "合法基准",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": { "tiers": [{ "rate": 80.0 }], "reject": 12.0 },
+      "valid": true
+    },
+    {
+      "name": "两档递增, 非末档带宽度",
+      "rule": "合法基准",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": {
+        "tiers": [{ "rate": 80.0, "width": 0.5 }, { "rate": 150.0 }],
+        "reject": 12.0
+      },
+      "valid": true
+    },
+    {
+      "name": "零费率首档是合法的(某段不扣钱)",
+      "rule": "合法基准",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": {
+        "tiers": [{ "rate": 0.0, "width": 0.2 }, { "rate": 80.0 }],
+        "reject": 12.0
+      },
+      "valid": true
+    },
+    {
+      "name": "一档都没有",
+      "rule": "tiers 非空",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": { "tiers": [], "reject": 12.0 },
+      "valid": false
+    },
+    {
+      "name": "后一档比前一档扣得松",
+      "rule": "费率严格递增(凸性)",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": {
+        "tiers": [{ "rate": 80.0, "width": 0.5 }, { "rate": 60.0 }],
+        "reject": 12.0
+      },
+      "valid": false
+    },
+    {
+      "name": "两档费率相等(必须严格递增, 不是非递减)",
+      "rule": "费率严格递增(凸性)",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": {
+        "tiers": [{ "rate": 80.0, "width": 0.5 }, { "rate": 80.0 }],
+        "reject": 12.0
+      },
+      "valid": false
+    },
+    {
+      "name": "负费率(扣款倒贴钱)",
+      "rule": "费率非负",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": { "tiers": [{ "rate": -80.0 }], "reject": 12.0 },
+      "valid": false
+    },
+    {
+      "name": "非末档没有宽度",
+      "rule": "非末档必须有正宽度",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": {
+        "tiers": [{ "rate": 80.0 }, { "rate": 150.0 }],
+        "reject": 12.0
+      },
+      "valid": false
+    },
+    {
+      "name": "非末档宽度为 0",
+      "rule": "非末档必须有正宽度",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": {
+        "tiers": [{ "rate": 80.0, "width": 0.0 }, { "rate": 150.0 }],
+        "reject": 12.0
+      },
+      "valid": false
+    },
+    {
+      "name": "末档带了宽度上限",
+      "rule": "末档无宽度",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": { "tiers": [{ "rate": 80.0, "width": 0.5 }], "reject": 12.0 },
+      "valid": false
+    },
+    {
+      "name": "上限型: 拒收线正好等于合同上限",
+      "rule": "拒收线在边界之外",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": { "tiers": [{ "rate": 80.0 }], "reject": 10.0 },
+      "valid": true
+    },
+    {
+      "name": "上限型: 拒收线低于合同上限(还没超就先拒收)",
+      "rule": "拒收线在边界之外",
+      "direction": "Upper",
+      "bound": 10.0,
+      "penalty": { "tiers": [{ "rate": 80.0 }], "reject": 9.0 },
+      "valid": false
+    },
+    {
+      "name": "下限型: 粘结 ≥75, 每差 1 点扣 5 元, 低于 70 拒收",
+      "rule": "拒收线在边界之外",
+      "direction": "Lower",
+      "bound": 75.0,
+      "penalty": { "tiers": [{ "rate": 5.0 }], "reject": 70.0 },
+      "valid": true
+    },
+    {
+      "name": "下限型: 拒收线高于合同下限",
+      "rule": "拒收线在边界之外",
+      "direction": "Lower",
+      "bound": 75.0,
+      "penalty": { "tiers": [{ "rate": 5.0 }], "reject": 80.0 },
+      "valid": false
+    },
+    {
+      "name": "区间型指标不支持计价",
+      "rule": "方向限 Upper/Lower",
+      "direction": "Range",
+      "bound": 10.0,
+      "penalty": { "tiers": [{ "rate": 80.0 }], "reject": 12.0 },
+      "valid": false
+    }
+  ]
+}

@@ -90,6 +90,17 @@ describe("合同屏计价开关", () => {
     expect(savedSpecs()[0].penalty).toBeNull();
   });
 
+  it("停用的指标即使留着填坏的计价条款, 也不该挡住保存 —— 那个开关已经点不动了", async () => {
+    await renderScreen();
+    fireEvent.click(pricedToggle()); // 打开计价, 但"扣"留空
+    fireEvent.change(screen.getByLabelText(/每多少/), { target: { value: "0.1" } });
+    // 停用这一项: 计价开关随之 disabled, 用户再也关不掉它
+    fireEvent.click(screen.getByLabelText("启用灰约束"));
+    expect(pricedToggle().disabled).toBe(true);
+    fireEvent.click(screen.getByText("保存合同"));
+    expect(mocks.setUserContract).toHaveBeenCalledTimes(1);
+  });
+
   it("软约束的指标打开计价再关掉, 回到软约束而不是被悄悄收紧成硬约束", async () => {
     mocks.getUserContract.mockReturnValue([
       { ...specs[0], enforcement: "Soft" },

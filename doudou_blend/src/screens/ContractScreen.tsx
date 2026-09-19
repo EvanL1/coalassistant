@@ -21,6 +21,7 @@ import type {
 import {
   emptyPenaltyDraft,
   indicatorUnit,
+  offSpecWord,
   penaltyFromDraft,
   penaltyToDraft,
   type PenaltyDraft,
@@ -114,7 +115,10 @@ function optionalNumber(value: string): number | null {
  * —— 各算各的就会出现"红字在这、保存却过了"这种分叉。
  */
 function specPenalty(f: FormSpec): PenaltyDraftResult {
-  if (f.enforcement !== "Priced") return { penalty: null, error: null };
+  // 停用的项 core 根本不看 (quality.rs 的校验循环 filter(|item| item.enabled)),
+  // 前端也不能因为它挡住保存: 停用后计价开关跟着 disabled, 提示里那句"先关掉
+  // 那项的计价开关"就指向了一个点不动的控件, 用户没有出路.
+  if (!f.enabled || f.enforcement !== "Priced") return { penalty: null, error: null };
   const isUpper = f.direction === "Upper";
   const boundLabel = isUpper ? "合同上限" : "合同下限";
   if (f.direction !== "Range") {
@@ -294,7 +298,7 @@ function SpecRow({
   const label = INDICATOR_LABEL[spec.indicator] || spec.indicator;
   const isPriced = spec.enforcement === "Priced";
   // 上限型超了才扣, 下限型不达标才扣 —— 说反了用户会照着反的方向填合同.
-  const offSpecWord = spec.direction === "Lower" ? "不达标" : "超标";
+  const offSpec = offSpecWord(spec.direction);
   // 区间型指标 core 不支持计价(上下限两头都要卡, 扣款算不出方向).
   const canPrice = spec.direction !== "Range";
   const enforcementOptions = isPriced
@@ -336,6 +340,7 @@ function SpecRow({
         </div>
         <div
           className={`toggle ${spec.enabled ? "on" : ""}`}
+          aria-label={`启用${label}约束`}
           onClick={() => onChange({ enabled: !spec.enabled })}
         />
       </div>
@@ -455,7 +460,7 @@ function SpecRow({
             : spec.enforcement === "Soft"
               ? "软约束允许输出，但会标记偏差"
               : spec.enforcement === "Priced"
-                ? `计价项不判不合格，${offSpecWord}按合同扣款折进每吨成本`
+                ? `计价项不判不合格，${offSpec}按合同扣款折进每吨成本`
                 : "仅提示项不限制最低成本方案"}
         </div>
 
@@ -488,7 +493,7 @@ function SpecRow({
                 )
               }
             />
-            按扣款计价（{offSpecWord}不判不合格，按合同扣款折进成本）
+            按扣款计价（{offSpec}不判不合格，按合同扣款折进成本）
           </label>
           {!canPrice && (
             <div style={{ marginTop: 4, fontSize: 10, color: "var(--c-text-3)" }}>
