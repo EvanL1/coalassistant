@@ -10,8 +10,15 @@ const EPSILON = 1e-6;
  * 用户理应看到这两笔明细, 而不是被"合计没差异"糊弄成什么都没发生过。
  */
 export function hasCostAdjustments(cost: CostBreakdown): boolean {
-  return (
-    Math.abs(cost.purchase_adjust_per_ton ?? 0) > EPSILON ||
-    Math.abs(cost.penalty_per_ton ?? 0) > EPSILON
-  );
+  return hasPurchaseAdjust(cost) || hasSellPenalty(cost);
+}
+
+/** 买入侧修正是否非零 (成本卡按行显隐用). 与 `hasCostAdjustments` 共用同一阈值. */
+export function hasPurchaseAdjust(cost: CostBreakdown): boolean {
+  return Math.abs(cost.purchase_adjust_per_ton ?? 0) > EPSILON;
+}
+
+/** 卖出侧扣款是否非零 (成本卡按行显隐用). 与 `hasCostAdjustments` 共用同一阈值. */
+export function hasSellPenalty(cost: CostBreakdown): boolean {
+  return Math.abs(cost.penalty_per_ton ?? 0) > EPSILON;
 }

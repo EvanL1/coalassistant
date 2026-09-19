@@ -1,7 +1,11 @@
 import { INDICATOR_LABEL } from "../types";
 import type { CostBreakdown } from "../types";
 import type { OrphanedGuaranteeWarning } from "../domain/purchaseTerms";
-import { hasCostAdjustments } from "../domain/costBreakdown";
+import {
+  hasCostAdjustments,
+  hasPurchaseAdjust,
+  hasSellPenalty,
+} from "../domain/costBreakdown";
 
 const YUAN = (value: number) => `${value.toFixed(2)} 元/吨`;
 
@@ -52,11 +56,11 @@ export function CostCard({
   cost: CostBreakdown;
   orphanedGuarantees?: OrphanedGuaranteeWarning[];
 }) {
-  const hasAdjust = Math.abs(cost.purchase_adjust_per_ton ?? 0) > 1e-6;
-  const hasPenalty = Math.abs(cost.penalty_per_ton ?? 0) > 1e-6;
-  // 用共享判定, 不要在这里重新拼 hasAdjust||hasPenalty ——
+  // 三个判定全部来自 domain/costBreakdown.ts, 不在这里手写阈值 ——
   // TodayScreen.tsx 的 buildOrderText 曾经用 |net-cif|>eps 单独判过一次,
-  // 两笔调整刚好抵消时会算出不同结果, 见 domain/costBreakdown.ts。
+  // 两笔调整刚好抵消时会算出不同结果。
+  const hasAdjust = hasPurchaseAdjust(cost);
+  const hasPenalty = hasSellPenalty(cost);
   const detailed = hasCostAdjustments(cost);
   const netPerTon = cost.net_per_ton ?? cost.cif_per_ton;
   const { int: costInt, dec: costDec } = formatPrice(netPerTon);
