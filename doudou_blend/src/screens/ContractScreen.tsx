@@ -15,8 +15,18 @@ import type {
   AcceptanceMode,
   CoalMaster,
   Enforcement,
+  Penalty,
   Spec,
 } from "../types";
+import {
+  emptyPenaltyDraft,
+  indicatorUnit,
+  penaltyFromDraft,
+  penaltyToDraft,
+  type PenaltyDraft,
+  type PenaltyDraftResult,
+} from "../penalty";
+import { PenaltyEditor } from "../PenaltyEditor";
 
 const ACCEPTANCE_OPTIONS: ReadonlyArray<{
   value: AcceptanceMode;
@@ -36,6 +46,12 @@ const ENFORCEMENT_OPTIONS: ReadonlyArray<{
   { value: "Advisory", label: "仅提示" },
 ];
 
+/**
+ * 计价不在约束级别下拉里选, 只由计价开关控制 —— 两个入口写同一个字段, 改了
+ * 一个忘了另一个就会分叉。下拉在计价打开时禁用, 这一项只为把它显示出来。
+ */
+const PRICED_OPTION = { value: "Priced" as Enforcement, label: "计价" };
+
 interface FormSpec {
   indicator: string;
   direction: "Upper" | "Lower" | "Range";
@@ -47,6 +63,17 @@ interface FormSpec {
   decimals: string;
   tolerance: string;
   enforcement: Enforcement;
+  /**
+   * 关掉计价时回到哪个约束级别。直接写死回 "Hard" 会把软约束/仅提示的指标
+   * 悄悄收紧成硬约束, 用户看不出来, 却可能让方案从可行变不可行。
+   */
+  enforcementFallback: Enforcement;
+  /**
+   * 档位录入原文。真源是它, `Spec.penalty` 在保存时由它换算得出 ——
+   * 两边各存一份就会出现"界面显示每 0.1% 扣 8 元、存下去却是另一个数"。
+   * 关掉计价后仍然留着, 用户再打开不用重填。
+   */
+  penaltyDraft: PenaltyDraft;
 }
 
 function specToForm(s: Spec): FormSpec {
@@ -69,6 +96,8 @@ function specToForm(s: Spec): FormSpec {
     tolerance:
       s.acceptance?.tolerance != null ? String(s.acceptance.tolerance) : "",
     enforcement: s.enforcement ?? "Hard",
+    enforcementFallback: s.enforcement === "Priced" ? "Hard" : s.enforcement ?? "Hard",
+    penaltyDraft: s.penalty ? penaltyToDraft(s.penalty) : emptyPenaltyDraft(),
   };
 }
 
@@ -78,7 +107,40 @@ function optionalNumber(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function formToSpec(f: FormSpec): Spec {
+/**
+ * 这条 spec 的计价条款: 换算结果与报错一次算出。
+ *
+ * 界面上的红字、保存按钮能不能按、存进 `Spec.penalty` 的数, 全都读这一个结果
+ * —— 各算各的就会出现"红字在这、保存却过了"这种分叉。
+ */
+function specPenalty(f: FormSpec): PenaltyDraftResult {
+  if (f.enforcement !== "Priced") return { penalty: null, error: null };
+  const isUpper = f.direction === "Upper";
+  const boundLabel = isUpper ? "合同上限" : "合同下限";
+  if (f.direction !== "Range") {
+    const bound = optionalNumber(isUpper ? f.max : f.min);
+    if (bound == null) {
+      return {
+        penalty: null,
+        error: `先填${boundLabel}: 扣款要从这条线开始算`,
+      };
+    }
+    return penaltyFromDraft(f.penaltyDraft, {
+      indicator: f.indicator,
+      direction: f.direction,
+      bound,
+      boundLabel,
+    });
+  }
+  return penaltyFromDraft(f.penaltyDraft, {
+    indicator: f.indicator,
+    direction: f.direction,
+    bound: null,
+    boundLabel,
+  });
+}
+
+function formToSpec(f: FormSpec, penalty: Penalty | null): Spec {
   const min = optionalNumber(f.min);
   const max = optionalNumber(f.max);
   const margin = optionalNumber(f.margin);
@@ -100,6 +162,7 @@ function formToSpec(f: FormSpec): Spec {
       tolerance: Math.max(0, tolerance ?? 0),
     },
     enforcement: f.enforcement,
+    penalty,
   };
 }
 
@@ -122,13 +185,24 @@ export function ContractScreen() {
   function updateSpec(i: number, patch: Partial<FormSpec>) {
     setForm((prev) => {
       const next = [...prev];
-      next[i] = { ...next[i], ...patch };
+      const merged = { ...next[i], ...patch };
+      // 约束级别一旦落在非计价档位上, 就记成"关掉计价后回哪去"。下拉和计价
+      // 开关都会写 enforcement, 派生放这一处, 不在两个 onChange 里各记一次。
+      if (merged.enforcement !== "Priced") {
+        merged.enforcementFallback = merged.enforcement;
+      }
+      next[i] = merged;
       return next;
     });
   }
 
+  // 每条 spec 的计价条款只算这一次, 下面的红字、保存拦截、写盘都用它.
+  const penalties = form.map(specPenalty);
+  const penaltyErrorCount = penalties.filter((p) => p.error != null).length;
+
   function save() {
-    const specs = form.map(formToSpec);
+    if (penaltyErrorCount > 0) return;
+    const specs = form.map((f, i) => formToSpec(f, penalties[i].penalty));
     setUserContract(specs);
     setSavedFlag(true);
     setTimeout(() => setSavedFlag(false), 2000);
@@ -158,17 +232,36 @@ export function ContractScreen() {
           <SpecRow
             key={f.indicator}
             spec={f}
+            penaltyError={penalties[i].error}
             onChange={(patch) => updateSpec(i, patch)}
             isLast={i === form.length - 1}
           />
         ))}
       </div>
 
+      {penaltyErrorCount > 0 && (
+        <div
+          style={{
+            marginTop: 12,
+            fontSize: 12,
+            color: "var(--c-danger)",
+            padding: "0 4px",
+          }}
+        >
+          有 {penaltyErrorCount} 项的计价条款还没填对，改好才能保存（也可以先关掉那项的计价开关）
+        </div>
+      )}
+
       <div className="action-row">
         <button className="btn btn-secondary" onClick={reset}>
           重置默认
         </button>
-        <button className="btn btn-primary" onClick={save}>
+        <button
+          className="btn btn-primary"
+          disabled={penaltyErrorCount > 0}
+          style={{ opacity: penaltyErrorCount > 0 ? 0.5 : 1 }}
+          onClick={save}
+        >
           {savedFlag ? "✓ 已保存" : "保存合同"}
         </button>
       </div>
@@ -189,16 +282,26 @@ export function ContractScreen() {
 
 function SpecRow({
   spec,
+  penaltyError,
   onChange,
   isLast,
 }: {
   spec: FormSpec;
+  penaltyError: string | null;
   onChange: (patch: Partial<FormSpec>) => void;
   isLast: boolean;
 }) {
   const label = INDICATOR_LABEL[spec.indicator] || spec.indicator;
+  const isPriced = spec.enforcement === "Priced";
+  // 上限型超了才扣, 下限型不达标才扣 —— 说反了用户会照着反的方向填合同.
+  const offSpecWord = spec.direction === "Lower" ? "不达标" : "超标";
+  // 区间型指标 core 不支持计价(上下限两头都要卡, 扣款算不出方向).
+  const canPrice = spec.direction !== "Range";
+  const enforcementOptions = isPriced
+    ? [...ENFORCEMENT_OPTIONS, PRICED_OPTION]
+    : ENFORCEMENT_OPTIONS;
   const enforcementLabel =
-    ENFORCEMENT_OPTIONS.find((option) => option.value === spec.enforcement)
+    enforcementOptions.find((option) => option.value === spec.enforcement)
       ?.label ?? spec.enforcement;
   const acceptanceLabel =
     ACCEPTANCE_OPTIONS.find(
@@ -301,8 +404,8 @@ function SpecRow({
           <SelectInput
             label="约束级别"
             value={spec.enforcement}
-            disabled={!spec.enabled}
-            options={ENFORCEMENT_OPTIONS}
+            disabled={!spec.enabled || isPriced}
+            options={enforcementOptions}
             onChange={(v) => onChange({ enforcement: v as Enforcement })}
           />
           <SelectInput
@@ -351,7 +454,56 @@ function SpecRow({
             ? "硬约束参与求解并决定方案可行性"
             : spec.enforcement === "Soft"
               ? "软约束允许输出，但会标记偏差"
-              : "仅提示项不限制最低成本方案"}
+              : spec.enforcement === "Priced"
+                ? `计价项不判不合格，${offSpecWord}按合同扣款折进每吨成本`
+                : "仅提示项不限制最低成本方案"}
+        </div>
+
+        <div
+          style={{
+            marginTop: 8,
+            paddingTop: 8,
+            borderTop: "1px dashed var(--c-border)",
+          }}
+        >
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 12,
+              color: "var(--c-text-2)",
+              opacity: spec.enabled && canPrice ? 1 : 0.5,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={isPriced}
+              disabled={!spec.enabled || !canPrice}
+              onChange={(event) =>
+                onChange(
+                  event.target.checked
+                    ? { enforcement: "Priced" }
+                    : { enforcement: spec.enforcementFallback },
+                )
+              }
+            />
+            按扣款计价（{offSpecWord}不判不合格，按合同扣款折进成本）
+          </label>
+          {!canPrice && (
+            <div style={{ marginTop: 4, fontSize: 10, color: "var(--c-text-3)" }}>
+              区间型指标不能计价：改成只卡上限或只卡下限才能按扣款算
+            </div>
+          )}
+          {isPriced && (
+            <PenaltyEditor
+              draft={spec.penaltyDraft}
+              unit={indicatorUnit(spec.indicator)}
+              direction={spec.direction === "Lower" ? "Lower" : "Upper"}
+              error={penaltyError}
+              onChange={(penaltyDraft) => onChange({ penaltyDraft })}
+            />
+          )}
         </div>
       </details>
     </div>

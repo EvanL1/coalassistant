@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { mergePurchaseTerms, tierRate } from "./penalty";
-import type { PenaltyTemplate } from "./penalty";
+import {
+  deviationNoun,
+  guaranteeIssue,
+  indicatorUnit,
+  mergePurchaseTerms,
+  penaltyFromDraft,
+  penaltyToDraft,
+  templateFromDraft,
+  tierRate,
+} from "./penalty";
+import type { PenaltyDraft, PenaltyTemplate } from "./penalty";
 
 describe("tierRate", () => {
   it("把合同原文的每 0.1% 扣 8 元换算成 80 元/吨·%", () => {
@@ -173,5 +182,496 @@ describe.each([
     const after = mergePurchaseTerms(template, roundTripped, { A: 10 });
     expect(after.terms?.[field]).toBe(before.terms?.[field]);
     expect(before.terms?.[field]).toBe(templateValue); // 双重确认: 往返前后都是"继承", 不是巧合地都错
+  });
+});
+
+describe("indicatorUnit", () => {
+  it("粘结与焦炭强度按点计, 其余按百分点计", () => {
+    expect(indicatorUnit("G")).toBe("点");
+    expect(indicatorUnit("CSR")).toBe("点");
+    expect(indicatorUnit("A")).toBe("%");
+    expect(indicatorUnit("S")).toBe("%");
+  });
+});
+
+/** 合同原文: 灰分 ≤10%, 每超 0.1% 扣 8 元/吨, 超过 12% 拒收. */
+const ashDraft: PenaltyDraft = {
+  tiers: [{ step: "0.1", amount: "8", width: "" }],
+  reject: "12",
+};
+
+const ashOptions = {
+  indicator: "A",
+  direction: "Upper" as const,
+  bound: 10,
+  boundLabel: "合同上限",
+};
+
+describe("penaltyFromDraft 单位换算", () => {
+  it("照抄合同的每 0.1% 扣 8 元, 换算成 rate 80", () => {
+    const { penalty, error } = penaltyFromDraft(ashDraft, ashOptions);
+    expect(error).toBeNull();
+    expect(penalty).toEqual({ tiers: [{ rate: 80 }], reject: 12 });
+  });
+
+  it("末档不带 width —— core 用缺席表示无上限", () => {
+    const { penalty } = penaltyFromDraft(ashDraft, ashOptions);
+    expect(penalty?.tiers[0]).not.toHaveProperty("width");
+  });
+
+  it("多档: 每档各自换算, 非末档带 width", () => {
+    const draft: PenaltyDraft = {
+      tiers: [
+        { step: "0.1", amount: "8", width: "0.5" },
+        { step: "0.1", amount: "15", width: "" },
+      ],
+      reject: "12",
+    };
+    const { penalty, error } = penaltyFromDraft(draft, ashOptions);
+    expect(error).toBeNull();
+    expect(penalty).toEqual({
+      tiers: [{ rate: 80, width: 0.5 }, { rate: 150 }],
+      reject: 12,
+    });
+  });
+
+  it("扣款金额留空时报错, 不能当成 0 元/吨悄悄存下去", () => {
+    const draft: PenaltyDraft = {
+      tiers: [{ step: "0.1", amount: "", width: "" }],
+      reject: "12",
+    };
+    const { penalty, error } = penaltyFromDraft(draft, ashOptions);
+    expect(penalty).toBeNull();
+    expect(error).toContain("扣");
+  });
+
+  it("扣款金额为负时报错 —— 负扣款等于倒贴钱", () => {
+    const draft: PenaltyDraft = {
+      tiers: [{ step: "0.1", amount: "-8", width: "" }],
+      reject: "12",
+    };
+    expect(penaltyFromDraft(draft, ashOptions).penalty).toBeNull();
+  });
+
+  it("0 元/吨是合法的零扣款档位, 不是错误", () => {
+    const draft: PenaltyDraft = {
+      tiers: [
+        { step: "0.1", amount: "0", width: "0.5" },
+        { step: "0.1", amount: "8", width: "" },
+      ],
+      reject: "12",
+    };
+    const { penalty, error } = penaltyFromDraft(draft, ashOptions);
+    expect(error).toBeNull();
+    expect(penalty?.tiers[0].rate).toBe(0);
+  });
+
+  it("「每」栏留空或填 0 时报错, 不能除出 Infinity", () => {
+    for (const step of ["", "0", "-0.1"]) {
+      const draft: PenaltyDraft = {
+        tiers: [{ step, amount: "8", width: "" }],
+        reject: "12",
+      };
+      const { penalty, error } = penaltyFromDraft(draft, ashOptions);
+      expect(penalty).toBeNull();
+      expect(error).toContain("每");
+    }
+  });
+});
+
+describe("penaltyFromDraft 与 Rust validate_penalty 同规则", () => {
+  it("一档都没有时报错", () => {
+    const { penalty, error } = penaltyFromDraft(
+      { tiers: [], reject: "12" },
+      ashOptions,
+    );
+    expect(penalty).toBeNull();
+    expect(error).toContain("一档");
+  });
+
+  it("后一档扣款率不高于前一档时报错(凸性: 档位必须一档比一档狠)", () => {
+    const draft: PenaltyDraft = {
+      tiers: [
+        { step: "0.1", amount: "8", width: "0.5" },
+        { step: "0.1", amount: "6", width: "" },
+      ],
+      reject: "12",
+    };
+    const { penalty, error } = penaltyFromDraft(draft, ashOptions);
+    expect(penalty).toBeNull();
+    expect(error).toContain("第 2 档");
+  });
+
+  it("换算后扣款率相等也不行 —— Rust 要求严格递增", () => {
+    const draft: PenaltyDraft = {
+      tiers: [
+        { step: "0.1", amount: "8", width: "0.5" },
+        { step: "1", amount: "80", width: "" },
+      ],
+      reject: "12",
+    };
+    expect(penaltyFromDraft(draft, ashOptions).penalty).toBeNull();
+  });
+
+  it("非末档缺「本档覆盖」宽度时报错", () => {
+    const draft: PenaltyDraft = {
+      tiers: [
+        { step: "0.1", amount: "8", width: "" },
+        { step: "0.1", amount: "15", width: "" },
+      ],
+      reject: "12",
+    };
+    const { penalty, error } = penaltyFromDraft(draft, ashOptions);
+    expect(penalty).toBeNull();
+    expect(error).toContain("第 1 档");
+  });
+
+  it("非末档宽度必须为正数", () => {
+    const draft: PenaltyDraft = {
+      tiers: [
+        { step: "0.1", amount: "8", width: "0" },
+        { step: "0.1", amount: "15", width: "" },
+      ],
+      reject: "12",
+    };
+    expect(penaltyFromDraft(draft, ashOptions).penalty).toBeNull();
+  });
+
+  it("末档填了宽度时报错 —— 末档吃掉剩余全部超出", () => {
+    const draft: PenaltyDraft = {
+      tiers: [{ step: "0.1", amount: "8", width: "0.5" }],
+      reject: "12",
+    };
+    const { penalty, error } = penaltyFromDraft(draft, ashOptions);
+    expect(penalty).toBeNull();
+    expect(error).toContain("末档");
+  });
+
+  it("拒收线留空时报错", () => {
+    const { penalty, error } = penaltyFromDraft(
+      { ...ashDraft, reject: "" },
+      ashOptions,
+    );
+    expect(penalty).toBeNull();
+    expect(error).toContain("拒收线");
+  });
+
+  it("上限型: 拒收线低于合同上限时报错, 等于上限时通过", () => {
+    expect(
+      penaltyFromDraft({ ...ashDraft, reject: "9" }, ashOptions).penalty,
+    ).toBeNull();
+    expect(
+      penaltyFromDraft({ ...ashDraft, reject: "10" }, ashOptions).error,
+    ).toBeNull();
+  });
+
+  it("下限型: 拒收线高于合同下限时报错, 等于下限时通过", () => {
+    const options = {
+      indicator: "G",
+      direction: "Lower" as const,
+      bound: 75,
+      boundLabel: "合同下限",
+    };
+    const draft: PenaltyDraft = {
+      tiers: [{ step: "1", amount: "5", width: "" }],
+      reject: "80",
+    };
+    expect(penaltyFromDraft(draft, options).penalty).toBeNull();
+    expect(penaltyFromDraft({ ...draft, reject: "75" }, options).error).toBeNull();
+  });
+
+  it("区间型指标不支持计价", () => {
+    const { penalty, error } = penaltyFromDraft(ashDraft, {
+      ...ashOptions,
+      direction: "Range",
+    });
+    expect(penalty).toBeNull();
+    expect(error).toContain("区间");
+  });
+
+  it("边界未知(采购模板: 保证值逐煤不同)时跳过拒收线比对, 其余规则照查", () => {
+    const options = { ...ashOptions, bound: null, boundLabel: "保证值" };
+    expect(penaltyFromDraft({ ...ashDraft, reject: "1" }, options).error).toBeNull();
+    expect(
+      penaltyFromDraft({ tiers: [], reject: "1" }, options).penalty,
+    ).toBeNull();
+  });
+});
+
+describe("penaltyToDraft", () => {
+  it("回显成每 1 单位扣 rate 元 —— 原文的每 0.1% 无法还原, 但换算等价且不引入浮点噪声", () => {
+    expect(penaltyToDraft({ tiers: [{ rate: 80 }], reject: 12 })).toEqual({
+      tiers: [{ step: "1", amount: "80", width: "" }],
+      reject: "12",
+    });
+  });
+
+  it("非末档的宽度照样回显", () => {
+    const draft = penaltyToDraft({
+      tiers: [{ rate: 80, width: 0.5 }, { rate: 150 }],
+      reject: 12,
+    });
+    expect(draft.tiers).toEqual([
+      { step: "1", amount: "80", width: "0.5" },
+      { step: "1", amount: "150", width: "" },
+    ]);
+  });
+
+  it("往返不改变 core 看到的条款", () => {
+    const penalty = { tiers: [{ rate: 80, width: 0.5 }, { rate: 150 }], reject: 12 };
+    const back = penaltyFromDraft(penaltyToDraft(penalty), ashOptions);
+    expect(back.penalty).toEqual(penalty);
+  });
+});
+
+describe("guaranteeIssue", () => {
+  const upperOnly: PenaltyTemplate = {
+    clauses: [
+      {
+        indicator: "A",
+        direction: "Upper",
+        penalty: { tiers: [{ rate: 80 }], reject: 12 },
+      },
+    ],
+  };
+
+  it("保证值在拒收线之内时没有问题", () => {
+    expect(
+      guaranteeIssue({
+        template: upperOnly,
+        override: undefined,
+        indicator: "A",
+        guarantee: 10,
+      }),
+    ).toBeNull();
+  });
+
+  it("上限型: 保证值高于拒收线时报错 —— 这条条款 core 会直接拒绝", () => {
+    const issue = guaranteeIssue({
+      template: upperOnly,
+      override: undefined,
+      indicator: "A",
+      guarantee: 13,
+    });
+    expect(issue?.level).toBe("error");
+    expect(issue?.message).toContain("拒收线");
+  });
+
+  it("下限型: 保证值低于拒收线时报错", () => {
+    const lower: PenaltyTemplate = {
+      clauses: [
+        {
+          indicator: "G",
+          direction: "Lower",
+          penalty: { tiers: [{ rate: 5 }], reject: 80 },
+        },
+      ],
+    };
+    const issue = guaranteeIssue({
+      template: lower,
+      override: undefined,
+      indicator: "G",
+      guarantee: 75,
+    });
+    expect(issue?.level).toBe("error");
+  });
+
+  it("没有对应条款时只提示不拦 —— 用户可能先填保证值再配模板", () => {
+    const issue = guaranteeIssue({
+      template: null,
+      override: undefined,
+      indicator: "A",
+      guarantee: 10,
+    });
+    expect(issue?.level).toBe("hint");
+    expect(issue?.message).toContain("采购扣款模板");
+  });
+
+  it("被单煤排除的指标不提示 —— 那是用户主动排除, 不是漏配", () => {
+    expect(
+      guaranteeIssue({
+        template: upperOnly,
+        override: { excluded_indicators: ["A"] },
+        indicator: "A",
+        guarantee: 10,
+      }),
+    ).toBeNull();
+  });
+
+  it("水分已按扣量计时不能再填水分保证值 —— core 明确禁止两种机制并用", () => {
+    const both: PenaltyTemplate = {
+      contract_moisture: 8,
+      clauses: [
+        {
+          indicator: "M",
+          direction: "Upper",
+          penalty: { tiers: [{ rate: 30 }], reject: 14 },
+        },
+      ],
+    };
+    const issue = guaranteeIssue({
+      template: both,
+      override: undefined,
+      indicator: "M",
+      guarantee: 9,
+    });
+    expect(issue?.level).toBe("error");
+    expect(issue?.message).toContain("水分");
+  });
+
+  it("保证值不是数时报错", () => {
+    const issue = guaranteeIssue({
+      template: upperOnly,
+      override: undefined,
+      indicator: "A",
+      guarantee: Number.NaN,
+    });
+    expect(issue?.level).toBe("error");
+  });
+});
+
+describe("templateFromDraft", () => {
+  const ashClause = {
+    indicator: "A",
+    direction: "Upper" as const,
+    penalty: { tiers: [{ step: "0.1", amount: "8", width: "" }], reject: "12" },
+  };
+
+  it("照抄的每 0.1% 扣 8 元, 模板里存成 80 元/吨·%", () => {
+    const { template, error } = templateFromDraft({
+      clauses: [ashClause],
+      contractMoisture: "",
+      doubleThreshold: "",
+    });
+    expect(error).toBeNull();
+    expect(template?.clauses[0].penalty).toEqual({ tiers: [{ rate: 80 }], reject: 12 });
+  });
+
+  it("合同水分与双倍阈值照常带进模板, 留空则不设", () => {
+    const filled = templateFromDraft({
+      clauses: [ashClause],
+      contractMoisture: "8",
+      doubleThreshold: "12",
+    });
+    expect(filled.template?.contract_moisture).toBe(8);
+    expect(filled.template?.moisture_excess_double_threshold).toBe(12);
+
+    const blank = templateFromDraft({
+      clauses: [ashClause],
+      contractMoisture: "",
+      doubleThreshold: "",
+    });
+    expect(blank.template?.contract_moisture).toBeNull();
+    expect(blank.template?.moisture_excess_double_threshold).toBeNull();
+  });
+
+  it("同一指标两条条款时报错 —— core 会把两条扣款各算一遍, 把煤价算便宜", () => {
+    const { template, error } = templateFromDraft({
+      clauses: [ashClause, { ...ashClause }],
+      contractMoisture: "",
+      doubleThreshold: "",
+    });
+    expect(template).toBeNull();
+    expect(error).toContain("灰");
+  });
+
+  it("某条条款的档位填错时, 报错要指名道姓是哪一项", () => {
+    const { template, error } = templateFromDraft({
+      clauses: [
+        ashClause,
+        {
+          indicator: "S",
+          direction: "Upper",
+          penalty: { tiers: [{ step: "0.01", amount: "", width: "" }], reject: "1" },
+        },
+      ],
+      contractMoisture: "",
+      doubleThreshold: "",
+    });
+    expect(template).toBeNull();
+    expect(error).toContain("硫");
+  });
+
+  it("合同水分不在 0~100 之间时报错", () => {
+    const { template, error } = templateFromDraft({
+      clauses: [ashClause],
+      contractMoisture: "120",
+      doubleThreshold: "",
+    });
+    expect(template).toBeNull();
+    expect(error).toContain("合同水分");
+  });
+
+  it("双倍阈值不在 0~100 之间时报错", () => {
+    expect(
+      templateFromDraft({
+        clauses: [ashClause],
+        contractMoisture: "8",
+        doubleThreshold: "-1",
+      }).template,
+    ).toBeNull();
+  });
+
+  it("一条条款都没有时报错 —— 只填水分不会影响任何成本", () => {
+    const { template, error } = templateFromDraft({
+      clauses: [],
+      contractMoisture: "8",
+      doubleThreshold: "",
+    });
+    expect(template).toBeNull();
+    expect(error).toContain("清空模板");
+  });
+
+  it("模板里的拒收线不跟任何边界比 —— 保证值逐煤不同, 那一步留给煤卡录保证值时查", () => {
+    const { error } = templateFromDraft({
+      clauses: [{ ...ashClause, penalty: { ...ashClause.penalty, reject: "0.5" } }],
+      contractMoisture: "",
+      doubleThreshold: "",
+    });
+    expect(error).toBeNull();
+  });
+});
+
+describe("下限型指标的提示用词", () => {
+  const lowerOptions = {
+    indicator: "G",
+    direction: "Lower" as const,
+    bound: 75,
+    boundLabel: "合同下限",
+  };
+
+  it("下限型说的是「不足」而不是「超出」—— 粘结差 5 点是不够, 不是超标", () => {
+    const { error } = penaltyFromDraft(
+      {
+        tiers: [
+          { step: "1", amount: "5", width: "" },
+          { step: "1", amount: "9", width: "" },
+        ],
+        reject: "70",
+      },
+      lowerOptions,
+    );
+    expect(error).toContain("不足");
+    expect(error).not.toContain("超出");
+  });
+
+  it("上限型仍然说「超出」", () => {
+    const { error } = penaltyFromDraft(
+      {
+        tiers: [
+          { step: "0.1", amount: "8", width: "" },
+          { step: "0.1", amount: "15", width: "" },
+        ],
+        reject: "12",
+      },
+      { indicator: "A", direction: "Upper", bound: 10, boundLabel: "合同上限" },
+    );
+    expect(error).toContain("超出");
+    expect(error).not.toContain("不足");
+  });
+
+  it("deviationNoun 一处定义, 界面文案与报错文案共用", () => {
+    expect(deviationNoun("Upper")).toBe("超出");
+    expect(deviationNoun("Lower")).toBe("不足");
   });
 });

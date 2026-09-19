@@ -10,6 +10,8 @@
  */
 import { useEffect, useState } from "react";
 import { resolveCoal, type CoalOrigin } from "./domain/resolvedCoal";
+import { guaranteeIssue } from "./penalty";
+import { getPenaltyTemplate } from "./penaltyStorage";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "./types";
 import type { MasterCoalEntry } from "./types";
 import {
@@ -40,6 +42,8 @@ interface FormState {
   /** 作为价格锚点参与推算 */
   isAnchor: boolean;
   props: Record<string, string>;
+  /** 该煤采购合同的保证值 (买入侧): 达不到这个数供应商扣钱, 到厂价更低. */
+  guarantees: Record<string, string>;
 }
 
 function toForm(
@@ -58,6 +62,12 @@ function toForm(
         key,
         resolved.props[key] != null ? String(resolved.props[key]) : "",
       ]),
+    ),
+    guarantees: Object.fromEntries(
+      INDICATOR_ORDER.map((key) => {
+        const value = pref?.purchase_guarantees?.[key];
+        return [key, value != null ? String(value) : ""];
+      }),
     ),
   };
 }
@@ -88,6 +98,9 @@ export function CoalEditor({
   const [form, setForm] = useState<FormState>(() =>
     toForm(coal, pref, origin),
   );
+  // 采购扣款模板只在打开煤卡时读一次: 模板的编辑入口在煤池屏顶部, 与这个
+  // 弹层不会同时开着.
+  const [template] = useState(() => getPenaltyTemplate());
   const resolved = resolveCoal(coal, pref, origin);
   const isHidden = resolved.hidden;
   const quotedAt = resolved.fob_quoted_at ?? masterUpdatedAt ?? null;
@@ -118,12 +131,23 @@ export function CoalEditor({
     const fobNum = parseNumOrNull(form.fob);
     const frtNum = parseNumOrNull(form.frt);
 
+    const guarantees: Record<string, number> = {};
+    for (const k of INDICATOR_ORDER) {
+      const value = parseNumOrNull(form.guarantees[k]);
+      if (value != null) guarantees[k] = value;
+    }
+
     setCoalPref(coal.name, {
       enabled: form.enabled,
       fob_override: fobNum !== coal.fob ? fobNum : null,
       frt_override: frtNum !== coal.frt ? frtNum : null,
       is_price_anchor: form.isAnchor,
       props_override: Object.keys(propsOverride).length > 0 ? propsOverride : undefined,
+      // 清空某项保证值就得让它从 map 里消失: 留着 undefined 会被
+      // mergePurchaseTerms 跳过(它只认有限数), 但 JSON 往返后行为一致, 干脆整
+      // 份重写 —— 界面上 8 项全在, 这份 map 就是完整的真源.
+      purchase_guarantees:
+        Object.keys(guarantees).length > 0 ? guarantees : undefined,
     });
     // 出厂价变了才记一次报价. 报价历史是漂移推算唯一的数据来源, 没有它锚点算不出比例.
     if (fobNum != null && fobNum !== resolved.fob) {
@@ -139,7 +163,13 @@ export function CoalEditor({
   }
 
   function resetToMaster() {
-    if (!confirm(`重置 ${coal.name} 的所有修改, 回到 master 默认值?`)) return;
+    // 采购保证值没有 master 默认值(master 不含采购合同), 但它跟价格/化验覆盖
+    // 存在同一份 CoalPref 里, 重置会一并清掉 —— 得在确认框里说出来.
+    const alsoDropped =
+      filledGuarantees > 0 ? `\n已填的 ${filledGuarantees} 项采购保证值也会一并清掉。` : "";
+    if (!confirm(`重置 ${coal.name} 的所有修改, 回到 master 默认值?${alsoDropped}`)) {
+      return;
+    }
     clearCoalPref(coal.name);
     setPref(null);
     setForm(toForm(coal, null, origin));
@@ -164,6 +194,9 @@ export function CoalEditor({
   }
 
   const hasOverrides = resolved.hasOverrides;
+  const filledGuarantees = INDICATOR_ORDER.filter(
+    (k) => form.guarantees[k].trim() !== "",
+  ).length;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -305,6 +338,74 @@ export function CoalEditor({
               </div>
             ))}
           </div>
+
+          {/* 采购保证值 (买入侧): 条款在煤池顶部的模板里, 保证值逐煤不同 */}
+          <details className="edit-section">
+            <summary
+              className="edit-section-title"
+              style={{ cursor: "pointer", listStyle: "revert" }}
+            >
+              采购保证值 · {filledGuarantees > 0 ? `已填 ${filledGuarantees} 项` : "未填"}
+            </summary>
+            <div style={{ fontSize: 10, color: "var(--c-text-3)", padding: "4px 0 8px" }}>
+              这个煤的采购合同保证到多少。达不到保证值供应商扣钱，你少付，到厂价更低。
+              扣多少由煤池顶部的「采购扣款模板」定。
+            </div>
+            {/*
+              红字(error 级)只提示, 不挡保存 —— 与合同屏刻意不同。
+              合同屏的条款自成一体, 填不对就该拦住; 这里的对错取决于模板里的
+              拒收线, 用户完全可能先填保证值再去改模板, 拦住等于逼他先放弃这次
+              修改(而这个弹层里还有价格和化验值要存)。
+            */}
+            {INDICATOR_ORDER.map((k) => {
+              const raw = form.guarantees[k];
+              const issue =
+                raw.trim() === ""
+                  ? null
+                  : guaranteeIssue({
+                      template,
+                      override: pref?.purchase_override,
+                      indicator: k,
+                      guarantee: parseNumOrNull(raw) ?? Number.NaN,
+                    });
+              return (
+                <div key={k}>
+                  <div className="edit-row">
+                    <div className="edit-row-label">{INDICATOR_LABEL[k]}</div>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      className="edit-input"
+                      aria-label={`${INDICATOR_LABEL[k]}保证值`}
+                      value={raw}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          guarantees: { ...form.guarantees, [k]: e.target.value },
+                        })
+                      }
+                      placeholder="未填"
+                    />
+                  </div>
+                  {issue && (
+                    <div
+                      style={{
+                        fontSize: 10,
+                        lineHeight: 1.5,
+                        padding: "0 0 8px",
+                        color:
+                          issue.level === "error"
+                            ? "var(--c-danger)"
+                            : "var(--c-text-3)",
+                      }}
+                    >
+                      {issue.message}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </details>
 
           {hasOverrides && (
             <button
