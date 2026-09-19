@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CoalPref } from "../storage";
-import type { MasterCoalEntry } from "../types";
+import type { MasterCoalEntry, PurchaseTerms } from "../types";
 import {
   resolveCoal,
   resolveCoalPool,
@@ -248,7 +248,7 @@ describe("resolveCoalPool", () => {
       "duplicate_name",
       "duplicate_name",
     ]);
-    expect(resolved.map(toBlendCoal)).toEqual([null, null]);
+    expect(resolved.map((coal) => toBlendCoal(coal))).toEqual([null, null]);
   });
 });
 
@@ -413,5 +413,50 @@ describe("summarizePriceStatus", () => {
       drift,
     );
     expect(summarizePriceStatus(pool, []).oldestQuotedAt).toBe("2026-06-30");
+  });
+});
+
+describe("toBlendCoal 的 purchaseTerms 参数 (调用方传入, 不在这里重算)", () => {
+  it("传入 terms 时挂到 purchase_terms 上", () => {
+    const resolved = resolveCoal(masterCoal, null, "master");
+    const terms: PurchaseTerms = {
+      clauses: [
+        {
+          indicator: "S",
+          direction: "Upper",
+          guarantee: 0.5,
+          penalty: { tiers: [{ rate: 80 }], reject: 1.5 },
+        },
+      ],
+    };
+
+    expect(toBlendCoal(resolved, terms)).toEqual({
+      name: "测试主煤",
+      props: masterCoal.props,
+      fob: 1_000,
+      frt: 100,
+      purchase_terms: terms,
+    });
+  });
+
+  it("不传或传 null 时不产出 purchase_terms 字段 (undefined, 不是显式 null)", () => {
+    const resolved = resolveCoal(masterCoal, null, "master");
+
+    const withoutArg = toBlendCoal(resolved);
+    const withNull = toBlendCoal(resolved, null);
+
+    expect(withoutArg?.purchase_terms).toBeUndefined();
+    expect(withNull?.purchase_terms).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(withoutArg, "purchase_terms")).toBe(true);
+    // 值是 undefined, 但 JSON.stringify 会把这个键整个丢掉 —— 这才是关键效果.
+    expect(JSON.parse(JSON.stringify(withoutArg))).not.toHaveProperty(
+      "purchase_terms",
+    );
+  });
+
+  it("非 ready 的煤仍然返回 null, 不受 purchaseTerms 参数影响", () => {
+    const resolved = resolveCoal(masterCoal, { enabled: false }, "master");
+
+    expect(toBlendCoal(resolved, { clauses: [] })).toBeNull();
   });
 });

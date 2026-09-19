@@ -3,6 +3,7 @@ import type {
   Coal,
   CoalStatus,
   MasterCoalEntry,
+  PurchaseTerms,
 } from "../types";
 import { INDICATOR_ORDER } from "../types";
 import { normalizeCoalName } from "./coalName";
@@ -272,7 +273,17 @@ export function resolveCoalPool(
   );
 }
 
-export function toBlendCoal(coal: ResolvedCoal): Coal | null {
+/**
+ * `purchaseTerms` 由调用方传入: 单次 `resolvePurchaseTerms` 扫描
+ * (domain/purchaseTerms.ts) 的结果, 不要在这里重新调用 `mergePurchaseTerms`
+ * —— 两处各自算一遍同一件事, 正是这个项目反复出现的分叉缺陷形状。
+ * `null`/缺省都表示该煤没有可用采购条款, 落到 `Coal.purchase_terms` 上就是
+ * 不产出这个字段(用 `undefined`, 不是显式 `null`, 让 JSON.stringify 省略它)。
+ */
+export function toBlendCoal(
+  coal: ResolvedCoal,
+  purchaseTerms?: PurchaseTerms | null,
+): Coal | null {
   if (
     coal.readiness !== "ready" ||
     coal.fob == null ||
@@ -286,6 +297,7 @@ export function toBlendCoal(coal: ResolvedCoal): Coal | null {
     props: { ...coal.props },
     fob: coal.fob_drifted ?? coal.fob,
     frt: coal.frt,
+    purchase_terms: purchaseTerms ?? undefined,
   };
 }
 
@@ -336,3 +348,7 @@ export function summarizePriceStatus(
     anchors: [...anchors],
   };
 }
+
+// 采购扣款模板缺失告警 (曾在这里, Step 8) 已经搬到 domain/purchaseTerms.ts 的
+// resolvePurchaseTerms/extractOrphanedGuarantees —— 跟 toBlendCoal 用的
+// purchase_terms 出自同一次 mergePurchaseTerms 扫描, 不再各自算一遍。

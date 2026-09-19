@@ -4,6 +4,7 @@
 //! 显式接收已训练且通过门控的评估器，岩相在 LP 后按全方差定律复验并收紧重算。
 
 use crate::model::*;
+use crate::penalty::{cif_eff, cif_eff_or_quoted, clauses_missing_assay};
 use crate::petrography::{self, Petrography, NOTCH_WINDOW};
 use crate::predict::EvaluatorSet;
 use crate::quality::{
@@ -17,6 +18,22 @@ use std::collections::{HashMap, HashSet};
 const MAX_EVALUATION_ITERATIONS: usize = 4;
 const PETRO_SHRINK_SAFETY: f64 = 0.999;
 const SOLUTION_TOLERANCE: f64 = 1e-8;
+/// 可行性复核的相对容限. 比 SOLUTION_TOLERANCE 宽, 因为档位列不经归一化重投影,
+/// 残差保持在 Clarabel 的原始收敛量级 (~1e-8..1e-7).
+///
+/// 判据是 `activity <= bound + 本值 * (1 + magnitude)`, 其中
+/// `magnitude = Σ|aᵢxᵢ|` 再与 `|bound|` 取大. 它**对所有行生效**, 不止计价行:
+/// 纯 Hard 配方没有档位列, 残差本就在 1e-13 量级, 远用不满这点容限, 故不受影响
+/// (master_demo 输出逐字节不变可证).
+///
+/// 取值依据: 92 组良态计价输入 (合同上限 10.0, 单档 rate 10, ash 10.0~13.0 ×
+/// reject 11.0~15.0) 实测 156 行, 最大 residual/(1+magnitude) = 6.36e-9,
+/// 本值留出约 16 倍余量. 这份实测记录是常量的唯一依据, 勿在没有重测的情况下调紧.
+///
+/// 安全边界: 放行量是 `本值 × (1 + magnitude)`, 随行量级变化 —— 灰分行约 3e-7,
+/// 宽煤池上的 CSR/G 行可达约 2.6e-6 (指标单位). 即便按后者算, 仍比化验 0.01%
+/// 的分辨率细 4 个数量级, 拒收线仍是硬墙.
+const FEASIBILITY_TOLERANCE: f64 = 1e-7;
 const OUTPUT_RATIO_TOLERANCE: f64 = 1e-5;
 
 /// 基础求解入口，不读取训练样本，也不在求解期间拟合模型.
@@ -64,10 +81,11 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
         }
     }
 
-    // 只有 Hard 约束会剔除缺字段煤；Soft/Advisory 不能改变候选煤池。
+    // 只有 Hard/Priced 约束会剔除缺字段煤；Soft/Advisory 不能改变候选煤池。
+    // Priced 同样入列: 它的拒收线是 LP 硬行, 缺输入时无法建约束, 必须和 Hard 一样剔煤。
     let mut required: HashSet<String> = active_specs
         .iter()
-        .filter(|spec| spec.enforcement == Enforcement::Hard)
+        .filter(|spec| matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced))
         .map(|spec| spec.indicator.clone())
         .collect();
     if evaluators.csr.is_some() && required.remove("CSR") {
@@ -81,7 +99,33 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
             .filter(|indicator| !coal.has(indicator))
             .collect();
         if missing.is_empty() {
-            kept.push(coal);
+            // 自身化验值越过采购合同拒收线的煤根本收不进来, 与缺指标同样剔出煤池.
+            match cif_eff(coal) {
+                Err(reason) => warnings.push(format!(
+                    "剔除 {}: {} 实测 {} 越过采购合同拒收线 {}",
+                    coal.name,
+                    label_zh(&reason.indicator),
+                    reason.value,
+                    reason.reject
+                )),
+                Ok(_) => {
+                    // 缺化验值的采购条款只是算不出扣款, 不该废掉这个煤 —— 全局模板下
+                    // 化验单缺项是常态. 留煤, 但要让用户知道这几项没计进扣款.
+                    let skipped = clauses_missing_assay(coal);
+                    if !skipped.is_empty() {
+                        warnings.push(format!(
+                            "{}: 采购条款缺化验值 {}, 本次不计买入扣款",
+                            coal.name,
+                            skipped
+                                .iter()
+                                .map(|indicator| label_zh(indicator))
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        ));
+                    }
+                    kept.push(coal);
+                }
+            }
         } else {
             warnings.push(format!(
                 "剔除 {}: 缺指标 {}",
@@ -102,7 +146,8 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
     if let Some(spec) = active_specs
         .iter()
         .find(|spec| {
-            spec.enforcement == Enforcement::Hard && !formulas.contains_key(&spec.indicator)
+            matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced)
+                && !formulas.contains_key(&spec.indicator)
         })
         .copied()
     {
@@ -431,6 +476,126 @@ fn append_hard_model_domains(
     Some(())
 }
 
+/// 一条计价约束在 LP 中占用的档位列区间.
+struct PricedBlock {
+    indicator: String,
+    /// 档位变量的起始列下标.
+    offset: usize,
+    /// 各档扣款率 (元/吨 per 1 指标单位), 长度即本块列数.
+    rates: Vec<f64>,
+}
+
+/// 为每条计价约束追加档位列与三类行, 返回各块的列区间.
+///
+/// 与 [`append_hard_model_domains`] 同一个接缝形状: 就地追加进 `costs`/`inequalities`/`bounds`.
+///
+/// **调用方必须在本函数之前写完 `costs` 的配比段**——本函数只在尾部追加档位列的
+/// rate, 之后再覆写 `costs` 会把扣款率一起冲掉, 且能编译通过、只是算错钱.
+fn append_priced_blocks(
+    specs: &[&Spec],
+    formulas: &HashMap<String, MetricFormula>,
+    request: &BlendRequest,
+    ratio_count: usize,
+    costs: &mut Vec<f64>,
+    inequalities: &mut Vec<Vec<f64>>,
+    bounds: &mut Vec<f64>,
+) -> Option<Vec<PricedBlock>> {
+    debug_assert_eq!(
+        costs.len(),
+        ratio_count,
+        "append_priced_blocks 必须在配比段写完后调用"
+    );
+    let priced: Vec<&Spec> = specs
+        .iter()
+        .filter(|spec| spec.enforcement == Enforcement::Priced)
+        .copied()
+        .collect();
+
+    // 先分配列: 三类行都要按最终总列数补宽, 故列数必须先定下来.
+    let mut blocks: Vec<PricedBlock> = Vec::new();
+    for spec in &priced {
+        let penalty = spec.penalty.as_ref()?;
+        let rates: Vec<f64> = penalty.tiers.iter().map(|tier| tier.rate).collect();
+        blocks.push(PricedBlock {
+            indicator: spec.indicator.clone(),
+            offset: costs.len(),
+            rates: rates.clone(),
+        });
+        costs.extend(rates);
+    }
+    let total_columns = costs.len();
+
+    for (spec, block) in priced.iter().zip(&blocks) {
+        let formula = formulas.get(&spec.indicator)?;
+        let penalty = spec.penalty.as_ref()?;
+        let rule = acceptance_rule(spec, request.truncate_decimal);
+        let margin = spec.margin.unwrap_or(0.0);
+
+        // 合同界是精确的合同数字, 不加 margin; margin 只收紧拒收线.
+        let (limit, reject) = match spec.direction {
+            Direction::Upper => (
+                effective_upper(spec.max?, &rule),
+                effective_upper(penalty.reject, &rule) - margin,
+            ),
+            Direction::Lower => (
+                effective_lower(spec.min?, &rule),
+                effective_lower(penalty.reject, &rule) + margin,
+            ),
+            Direction::Range => return None,
+        };
+        let row_for = |target: f64| -> Option<(Vec<f64>, f64)> {
+            let (mut row, bound) = match spec.direction {
+                Direction::Upper => formula.upper_constraint(target),
+                Direction::Lower => formula.lower_constraint(target),
+                Direction::Range => return None,
+            };
+            // 补宽到总列数: build_csc 会零填充短行, 少补不会报错, 只会静默失真.
+            row.resize(total_columns, 0.0);
+            Some((row, bound))
+        };
+
+        // 吸收行与悬崖行只差档位列上那一串 -1: 有 -1 才能"花钱买超标",
+        // 没有 -1 就是无人承接的硬墙. 这一处差异即"可计价"与"拒收"的全部分界.
+        let (mut row, bound) = row_for(limit)?;
+        for index in 0..block.rates.len() {
+            row[block.offset + index] = -1.0;
+        }
+        inequalities.push(row);
+        bounds.push(bound);
+
+        // 档宽行: 末档无上限, 不生成.
+        for (index, tier) in penalty.tiers.iter().enumerate() {
+            if let Some(width) = tier.width {
+                let mut row = vec![0.0; total_columns];
+                row[block.offset + index] = 1.0;
+                inequalities.push(row);
+                bounds.push(width);
+            }
+        }
+
+        let (row, bound) = row_for(reject)?;
+        inequalities.push(row);
+        bounds.push(bound);
+    }
+    Some(blocks)
+}
+
+/// 从解向量里按块读回各指标的扣款额 (元/吨).
+fn read_back_penalties(blocks: &[PricedBlock], solution: &[f64]) -> HashMap<String, f64> {
+    blocks
+        .iter()
+        .map(|block| {
+            let amount: f64 = block
+                .rates
+                .iter()
+                .enumerate()
+                .map(|(index, rate)| rate * solution[block.offset + index].max(0.0))
+                .sum();
+            (block.indicator.clone(), amount)
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_once(
     coals: &[&Coal],
@@ -443,7 +608,8 @@ fn solve_once(
     mut warnings: Vec<String>,
 ) -> Option<(BlendResult, Vec<f64>)> {
     let count = coals.len();
-    let costs: Vec<f64> = coals.iter().map(|coal| coal.cif()).collect();
+    // 买入侧扣款与水分折算已折进成本系数; 越拒收线的煤在候选筛选阶段已剔除, 此处兜底用报价.
+    let mut costs: Vec<f64> = coals.iter().map(|coal| cif_eff_or_quoted(coal)).collect();
     let mut inequalities = Vec::new();
     let mut bounds = Vec::new();
 
@@ -479,13 +645,29 @@ fn solve_once(
     }
     append_hard_model_domains(coals, specs, models, &mut inequalities, &mut bounds)?;
 
+    let blocks = append_priced_blocks(
+        specs,
+        formulas,
+        request,
+        count,
+        &mut costs,
+        &mut inequalities,
+        &mut bounds,
+    )?;
+    let total_columns = costs.len();
+
     let problem = LpProblem {
-        n: count,
+        ratio_count: count,
+        n: total_columns,
         c: costs,
         a_ub: inequalities,
         b_ub: bounds,
     };
-    let (ratios, _) = problem.solve()?;
+    let (solution, _) = problem.solve()?;
+    let ratios = solution[..count].to_vec();
+
+    let penalty_by_indicator = read_back_penalties(&blocks, &solution);
+    let penalty_per_ton: f64 = penalty_by_indicator.values().sum();
 
     let recipe = coals
         .iter()
@@ -504,6 +686,14 @@ fn solve_once(
         .map(|(coal, ratio)| coal.frt * ratio)
         .sum();
     let cif_per_ton = fob_per_ton + frt_per_ton;
+    // 逐煤先算"修正价 − 报价"再加权, 而不是拿两个千元级总额相减.
+    // 无采购条款时每一项恰是 0.0·x, 求和仍是精确 0; 相减形式数学上等价, 浮点上会留下
+    // 1e-13 量级残差, 再乘以总吨数放大成一笔并不存在的买入修正.
+    let purchase_adjust_per_ton: f64 = coals
+        .iter()
+        .zip(&ratios)
+        .map(|(coal, ratio)| (cif_eff_or_quoted(coal) - coal.cif()) * ratio)
+        .sum();
     let cost = CostBreakdown {
         fob_per_ton,
         frt_per_ton,
@@ -517,6 +707,18 @@ fn solve_once(
         total_cif: request
             .total_quantity
             .map(|quantity| quantity * cif_per_ton),
+        purchase_adjust_per_ton,
+        penalty_per_ton,
+        net_per_ton: cif_per_ton + purchase_adjust_per_ton + penalty_per_ton,
+        total_purchase_adjust: request
+            .total_quantity
+            .map(|quantity| quantity * purchase_adjust_per_ton),
+        total_penalty: request
+            .total_quantity
+            .map(|quantity| quantity * penalty_per_ton),
+        total_net: request
+            .total_quantity
+            .map(|quantity| quantity * (cif_per_ton + purchase_adjust_per_ton + penalty_per_ton)),
     };
     let mut orders: Vec<OrderItem> = coals
         .iter()
@@ -524,6 +726,7 @@ fn solve_once(
         .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
         .map(|(coal, ratio)| {
             let tons = request.total_quantity.map(|quantity| quantity * ratio);
+            let effective = cif_eff_or_quoted(coal);
             OrderItem {
                 coal: coal.name.clone(),
                 ratio: *ratio,
@@ -531,6 +734,8 @@ fn solve_once(
                 fob_amount: tons.map(|value| value * coal.fob),
                 frt_amount: tons.map(|value| value * coal.frt),
                 cif_amount: tons.map(|value| value * coal.cif()),
+                cif_eff_per_ton: effective,
+                cif_eff_amount: tons.map(|value| value * effective),
             }
         })
         .collect();
@@ -566,6 +771,7 @@ fn solve_once(
                     method: EvaluationMethod::Unavailable,
                     status: EvaluationStatus::Unverified,
                     model: None,
+                    penalty_per_ton: None,
                 });
             }
             continue;
@@ -589,6 +795,31 @@ fn solve_once(
         let mut outcome = check_value(evaluated, spec, request.truncate_decimal, verified);
         if invalid_model_output {
             outcome.status = EvaluationStatus::Fail;
+        }
+        // 计价指标超合同界是预期行为(已折算成扣款), 只要未越拒收线就不判 Fail.
+        // 拒收线本身是 LP 硬约束, 但非线性评估器的复算值可能与 LP 代理不同, 故仍显式复核.
+        //
+        // 容限必须与 LP 拒收行同量级: LP 放行 FEASIBILITY_TOLERANCE*(1+magnitude),
+        // 这里若仍用绝对 SOLUTION_TOLERANCE, 就会把 LP 认可的解判成 Fail,
+        // 经 finalize_quality_status 变成 NeedsReview —— 正确配方被盖上"需要复核".
+        //
+        // 注意参照值不同, 这是刻意的: LP 悬崖行用 effective_upper(reject)∓margin
+        // (含安全余量的代理), 这里比的是原始 penalty.reject (合同白纸黑字那条线).
+        // 体检回答的是"是否越过合同拒收线", 不是"是否越过内部安全代理"; 不要把两者改成一致.
+        if let Some(spec) = spec {
+            if spec.enforcement == Enforcement::Priced && outcome.status == EvaluationStatus::Fail {
+                let within_reject = spec.penalty.as_ref().is_some_and(|penalty| {
+                    let slack = FEASIBILITY_TOLERANCE * (1.0 + penalty.reject.abs());
+                    match spec.direction {
+                        Direction::Upper => evaluated <= penalty.reject + slack,
+                        Direction::Lower => evaluated + slack >= penalty.reject,
+                        Direction::Range => false,
+                    }
+                });
+                if within_reject {
+                    outcome.status = EvaluationStatus::TolerancePass;
+                }
+            }
         }
         if model_summary
             .as_ref()
@@ -614,6 +845,7 @@ fn solve_once(
             method: formula.method,
             status: outcome.status,
             model: model_summary,
+            penalty_per_ton: penalty_by_indicator.get(indicator).copied(),
         });
     }
 
@@ -765,6 +997,9 @@ fn finalize_quality_status(result: &mut BlendResult, specs: &[&Spec]) {
 // ============================================================================
 
 struct LpProblem {
+    /// 参与 Σx=1 的前若干列 (配比变量).
+    ratio_count: usize,
+    /// 总列数 = ratio_count + 档位变量数.
     n: usize,
     c: Vec<f64>,
     a_ub: Vec<Vec<f64>>,
@@ -773,12 +1008,22 @@ struct LpProblem {
 
 impl LpProblem {
     fn solve(&self) -> Option<(Vec<f64>, f64)> {
+        debug_assert!(
+            self.ratio_count <= self.n
+                && self.c.len() == self.n
+                && self.a_ub.len() == self.b_ub.len()
+                && self.a_ub.iter().all(|row| row.len() <= self.n),
+            "LpProblem 宽度不一致: ratio_count={}, n={}, c={}",
+            self.ratio_count,
+            self.n,
+            self.c.len()
+        );
         let n = self.n;
         let inequality_count = self.a_ub.len();
         let total_rows = 1 + inequality_count + n;
         let mut triplets = Vec::new();
 
-        for column in 0..n {
+        for column in 0..self.ratio_count {
             triplets.push((0, column, 1.0));
         }
         for (row_index, row) in self.a_ub.iter().enumerate() {
@@ -817,10 +1062,13 @@ impl LpProblem {
             return None;
         }
         let mut solution = solver.solution.x.clone();
-        let raw_sum: f64 = solution.iter().sum();
+        let raw_sum: f64 = solution[..self.ratio_count].iter().sum();
+        // 非负性同样受档位列不归一化之累: 最优解 d=0 时内点法从下方逼近, 会落在
+        // -1e-8 量级. 下面立刻 max(0.0) 夹回, 故放宽到 FEASIBILITY_TOLERANCE 是安全的;
+        // 它仍比 OUTPUT_RATIO_TOLERANCE(1e-5) 严两个数量级. raw_sum 保持 SOLUTION_TOLERANCE.
         let raw_valid = solution
             .iter()
-            .all(|value| value.is_finite() && *value >= -SOLUTION_TOLERANCE)
+            .all(|value| value.is_finite() && *value >= -FEASIBILITY_TOLERANCE)
             && (raw_sum - 1.0).abs() <= SOLUTION_TOLERANCE;
         if !raw_valid {
             return None;
@@ -828,19 +1076,29 @@ impl LpProblem {
         for value in &mut solution {
             *value = value.max(0.0);
         }
-        let normalized_sum: f64 = solution.iter().sum();
+        let normalized_sum: f64 = solution[..self.ratio_count].iter().sum();
         if !normalized_sum.is_finite() || normalized_sum <= 0.0 {
             return None;
         }
-        for value in &mut solution {
+        for value in &mut solution[..self.ratio_count] {
             *value /= normalized_sum;
         }
         let valid = self.a_ub.iter().zip(&self.b_ub).all(|(row, bound)| {
-            row.iter()
+            let activity: f64 = row
+                .iter()
                 .zip(&solution)
                 .map(|(coefficient, value)| coefficient * value)
+                .sum();
+            // 相对判据: 配比列经归一化重投影后残差塌到 ~1e-13, 但档位列不归一化,
+            // 残差保持在 Clarabel 的原始收敛量级; 而吸收行在每个计价最优解处按构造都是紧的.
+            // 绝对容限会因此否掉正确解 —— 容限必须随行与解的量级缩放.
+            let magnitude: f64 = row
+                .iter()
+                .zip(&solution)
+                .map(|(coefficient, value)| (coefficient * value).abs())
                 .sum::<f64>()
-                <= bound + SOLUTION_TOLERANCE
+                .max(bound.abs());
+            activity <= bound + FEASIBILITY_TOLERANCE * (1.0 + magnitude)
         });
         let objective = self
             .c
@@ -870,4 +1128,168 @@ fn build_csc(rows: usize, columns: usize, triplets: &[(usize, usize, f64)]) -> C
         column_pointers.push(row_values.len());
     }
     CscMatrix::new(rows, columns, column_pointers, row_values, nonzero_values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 计价约束行的线性性依赖 den·x = Σx = 1.
+    /// 若将来引入非单位分母的 MetricFormula, 罚项行会静默失真 —— 用这条测试钉住.
+    #[test]
+    fn test_all_formulas_have_unit_denominators() {
+        let coals = [
+            crate::coal_from_tuple(
+                "甲",
+                (1.0, 9.0, 24.0, 88.0, 16.0, 0.10, 65.0, 8.0, 1000.0, 0.0),
+            ),
+            crate::coal_from_tuple(
+                "乙",
+                (0.8, 8.0, 26.0, 90.0, 18.0, 0.10, 66.0, 8.0, 1100.0, 0.0),
+            ),
+        ];
+        let refs: Vec<&Coal> = coals.iter().collect();
+
+        let check = |label: &str, formulas: &HashMap<String, MetricFormula>| {
+            assert!(!formulas.is_empty(), "{label}: 应至少构造出一个公式");
+            for (indicator, formula) in formulas {
+                assert_eq!(
+                    formula.denominators.len(),
+                    refs.len(),
+                    "{label}: {indicator} 的分母长度应与煤数一致"
+                );
+                assert!(
+                    formula
+                        .denominators
+                        .iter()
+                        .all(|value| (value - 1.0).abs() < 1e-12),
+                    "{label}: {indicator} 的分母非单位, 计价约束将失真"
+                );
+            }
+        };
+
+        // 无评估器: 只走 formula_for 的 MetricFormula::linear 路径.
+        check(
+            "默认评估器",
+            &build_formulas(&refs, &EvaluatorSet::default()),
+        );
+
+        // 有评估器: 覆盖 build_formulas 里两处手写 MetricFormula —— G 仿射标定与
+        // CSR 回归. 这两处是最可能被引入非单位分母的地方, 默认评估器根本到不了.
+        let trained = trained_evaluators();
+        let formulas = build_formulas(&refs, &trained);
+        assert_eq!(
+            formulas["G"].method,
+            EvaluationMethod::AffineCalibration,
+            "应走到 G 仿射标定分支"
+        );
+        assert_eq!(
+            formulas["CSR"].method,
+            EvaluationMethod::Regression,
+            "应走到 CSR 回归分支"
+        );
+        check("已训练评估器", &formulas);
+    }
+
+    /// 直接构造两个已门控模型, 用于把 `build_formulas` 的手写 MetricFormula 分支走到.
+    /// 不用 `EvaluatorSet::train`: 那会把测试耦合到样本量门槛等训练策略上.
+    fn trained_evaluators() -> EvaluatorSet {
+        EvaluatorSet {
+            g: Some(crate::predict::ValidatedGModel {
+                predictor: crate::predict::GAffinePredictor {
+                    intercept: 5.0,
+                    slope: 0.9,
+                    sample_count: 30,
+                },
+                version: "test-g".into(),
+                cv_mae: 1.0,
+                p90_abs_error: 2.0,
+                bias: 0.0,
+                training_min: 60.0,
+                training_max: 100.0,
+            }),
+            csr: Some(crate::predict::ValidatedCsrModel {
+                predictor: crate::predict::CsrPredictor {
+                    intercept: 20.0,
+                    beta_s: -1.0,
+                    beta_a: -0.5,
+                    beta_v: -0.2,
+                    beta_g: 0.4,
+                    beta_y: 0.3,
+                    beta_m: -0.1,
+                    r_squared: 0.9,
+                    n_samples: 30,
+                },
+                version: "test-csr".into(),
+                cv_mae: 1.0,
+                p90_abs_error: 3.0,
+                bias: 0.0,
+                training_min: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                training_max: [10.0, 20.0, 40.0, 110.0, 30.0, 20.0],
+            }),
+            warnings: Vec::new(),
+            extrapolation_ratio: 0.1,
+        }
+    }
+
+    /// 档位列不得参与 Σx=1.
+    ///
+    /// 本测试中附加列最优解为 0, 归一化是否误缩放它不可观测——
+    /// 归一化只对配比列生效由 [`test_lp_problem_handles_nonzero_extra_column`] 覆盖.
+    #[test]
+    fn test_lp_problem_excludes_extra_columns_from_sum() {
+        let problem = LpProblem {
+            ratio_count: 2,
+            n: 3,
+            c: vec![10.0, 20.0, 5.0],
+            a_ub: Vec::new(),
+            b_ub: Vec::new(),
+        };
+        let (solution, objective) = problem.solve().expect("应可解");
+        assert_eq!(solution.len(), 3, "解应含全部列");
+        assert!(
+            (solution[0] + solution[1] - 1.0).abs() < 1e-6,
+            "前 ratio_count 列之和应为 1, 实得 {}",
+            solution[0] + solution[1]
+        );
+        assert!(solution[0] > 0.999, "应全选更便宜的第 0 列");
+        assert!(solution[2].abs() < 1e-6, "附加列成本为正, 最优应取 0");
+        assert!(
+            (objective - 10.0).abs() < 1e-4,
+            "目标值应为 10, 实得 {objective}"
+        );
+    }
+
+    /// 附加列在最优解处非零时, 三处改动(等式行/raw_sum/归一化)才全部可检验——
+    /// 本测试是"归一化只对配比列生效"这一断言唯一能证伪的用例.
+    ///
+    /// 约束 x0 + x1 − d ≤ 0.5 (d 即附加列 solution[2]), 因 Σx = 1 故等价于强制 d ≥ 0.5.
+    /// 若 raw_sum 仍对全部列求和: 1 + 0.5 = 1.5 ≠ 1 ⇒ 可行性校验失败 ⇒ solve 返回 None ⇒ 本测试 panic.
+    /// 若归一化仍对全部列做: 配比被 1.5 除 ⇒ 前两列之和变成 0.667 ⇒ 断言失败.
+    #[test]
+    fn test_lp_problem_handles_nonzero_extra_column() {
+        let problem = LpProblem {
+            ratio_count: 2,
+            n: 3,
+            c: vec![10.0, 20.0, 5.0],
+            a_ub: vec![vec![1.0, 1.0, -1.0]],
+            b_ub: vec![0.5],
+        };
+        let (solution, objective) = problem.solve().expect("应可解");
+        assert!(
+            (solution[0] + solution[1] - 1.0).abs() < 1e-6,
+            "配比列之和应为 1, 实得 {}",
+            solution[0] + solution[1]
+        );
+        assert!(
+            (solution[2] - 0.5).abs() < 1e-5,
+            "附加列应被约束逼到 0.5, 实得 {}",
+            solution[2]
+        );
+        // 10·1 + 20·0 + 5·0.5 = 12.5
+        assert!(
+            (objective - 12.5).abs() < 1e-4,
+            "目标值应为 12.5, 实得 {objective}"
+        );
+    }
 }

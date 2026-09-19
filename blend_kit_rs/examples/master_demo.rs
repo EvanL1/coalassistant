@@ -56,6 +56,7 @@ fn main() {
             Enforcement::Hard => "Hard",
             Enforcement::Soft => "Soft",
             Enforcement::Advisory => "Advisory",
+            Enforcement::Priced => "Priced",
         };
         println!("  {} {} [{}]", s.indicator, constraint, enforcement);
     }

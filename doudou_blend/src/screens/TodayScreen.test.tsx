@@ -10,6 +10,8 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BlendResult, CoalMaster } from "../types";
+import type { CoalPrefs } from "../storage";
+import { setPenaltyTemplate } from "../penaltyStorage";
 import { TodayScreen } from "./TodayScreen";
 
 const mocks = vi.hoisted(() => ({
@@ -19,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   writeText: vi.fn(),
   fetchCoalIndexRatioSince: vi.fn(),
   quantity: { value: 3_700 },
+  coalPrefs: { value: {} as CoalPrefs },
 }));
 
 vi.mock("../coal_index", () => ({
@@ -34,7 +37,7 @@ vi.mock("../master_loader", () => ({
 }));
 
 vi.mock("../storage", () => ({
-  getCoalPrefs: () => ({}),
+  getCoalPrefs: () => mocks.coalPrefs.value,
   getQuantity: () => mocks.quantity.value,
   getUserContract: () => null,
   getUserCoals: () => [],
@@ -81,6 +84,12 @@ function makeResult(cif: number, quantity: number): BlendResult {
       total_fob: (cif - 100) * quantity,
       total_frt: 100 * quantity,
       total_cif: cif * quantity,
+      purchase_adjust_per_ton: 0,
+      penalty_per_ton: 0,
+      net_per_ton: cif,
+      total_purchase_adjust: 0,
+      total_penalty: 0,
+      total_net: cif * quantity,
     },
     orders: [
       {
@@ -88,6 +97,7 @@ function makeResult(cif: number, quantity: number): BlendResult {
         ratio: 1,
         tons: quantity,
         cif_amount: cif * quantity,
+        cif_eff_per_ton: cif,
       },
     ],
     indicator_check: [],
@@ -102,6 +112,8 @@ afterEach(() => {
 
 beforeEach(() => {
   mocks.quantity.value = 3_700;
+  mocks.coalPrefs.value = {};
+  localStorage.clear();
   mocks.getBackend.mockReset();
   mocks.loadMaster.mockReset();
   mocks.setQuantity.mockReset();
@@ -257,6 +269,90 @@ describe("TodayScreen 求解快照", () => {
     expect(timerSpy).not.toHaveBeenCalled();
     timerSpy.mockRestore();
   });
+
+  it("导出订单文本用实际成本结算, 不是报价 (符号: 修 defect#9 只改了 CostCard 没改导出)", async () => {
+    const result = makeResult(1_000, 3_700);
+    result.cost = {
+      ...result.cost!,
+      penalty_per_ton: 20,
+      net_per_ton: 1_020,
+      total_net: 1_020 * 3_700,
+    };
+    result.orders = [
+      {
+        coal: "测试煤",
+        ratio: 1,
+        tons: 3_700,
+        cif_amount: 1_000 * 3_700,
+        cif_eff_per_ton: 1_020,
+        cif_eff_amount: 1_020 * 3_700,
+      },
+    ];
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    fireEvent.click(screen.getByRole("button", { name: "导出订单" }));
+    await waitFor(() => expect(mocks.writeText).toHaveBeenCalledTimes(1));
+
+    const text = mocks.writeText.mock.calls[0][0] as string;
+    expect(text).toContain("实际成本 1020.00 元/吨");
+    expect(text).toContain(`¥${(1_020 * 3_700).toLocaleString("zh-CN")}`);
+    expect(text).not.toContain(`¥${(1_000 * 3_700).toLocaleString("zh-CN")}`);
+  });
+
+  it("买入修正与卖出扣款刚好互相抵消时, 导出文本仍展示实际成本明细而不是糊弄成单纯到厂价", async () => {
+    // net_per_ton === cif_per_ton (两笔调整数值抵消), 但两笔调整确实各自发生过.
+    // 用共享判定 hasCostAdjustments (而不是 |net-cif|>eps) 才能识别出这种情况.
+    const result = makeResult(1_000, 3_700);
+    result.cost = {
+      ...result.cost!,
+      purchase_adjust_per_ton: -30,
+      penalty_per_ton: 30,
+      net_per_ton: 1_000,
+    };
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    fireEvent.click(screen.getByRole("button", { name: "导出订单" }));
+    await waitFor(() => expect(mocks.writeText).toHaveBeenCalledTimes(1));
+
+    const text = mocks.writeText.mock.calls[0][0] as string;
+    expect(text).toContain("实际成本 1000.00 元/吨 (到厂价 1000.00)");
+  });
+
+  it("状态卡的总额徽章也用净总成本, 不是报价合计", async () => {
+    const result = makeResult(1_000, 3_700);
+    result.cost = {
+      ...result.cost!,
+      penalty_per_ton: 20,
+      net_per_ton: 1_020,
+      total_net: 1_020 * 3_700,
+    };
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    const netTotal = (1_020 * 3_700).toLocaleString("zh-CN");
+    const quotedTotal = (1_000 * 3_700).toLocaleString("zh-CN");
+    expect(screen.getByText(`总额 ${netTotal} 元`)).toBeTruthy();
+    expect(screen.queryByText(`总额 ${quotedTotal} 元`)).toBeNull();
+  });
 });
 
 describe("TodayScreen 报价时效提示", () => {
@@ -306,5 +402,156 @@ describe("TodayScreen 报价时效提示", () => {
     await screen.findByText(/报价停留在 2026-07-17/);
 
     expect(screen.queryByText(/随焦煤现货指数/)).toBeNull();
+  });
+});
+
+describe("TodayScreen 指标体检行", () => {
+  it("计价指标显示扣款额而不是通过/未通过徽章", async () => {
+    const result = makeResult(1_000, 3_700);
+    result.indicator_check = [
+      {
+        indicator: "S",
+        label_zh: "硫",
+        value: 0.6,
+        max: 0.5,
+        binding: true,
+        status: "Fail",
+        penalty_per_ton: 12.5,
+      },
+    ];
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    expect(screen.getByText("扣 12.50 元/吨")).toBeTruthy();
+    expect(screen.queryByText("未通过")).toBeNull();
+  });
+
+  it("非计价指标 (penalty_per_ton 为 null) 仍显示既有的通过/未通过徽章", async () => {
+    const result = makeResult(1_000, 3_700);
+    result.indicator_check = [
+      {
+        indicator: "S",
+        label_zh: "硫",
+        value: 0.6,
+        max: 0.5,
+        binding: true,
+        status: "Fail",
+        penalty_per_ton: null,
+      },
+    ];
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    expect(screen.getByText("未通过")).toBeTruthy();
+    expect(screen.queryByText(/^扣 /)).toBeNull();
+  });
+});
+
+describe("TodayScreen 采购扣款模板缺失告警 (Step 8)", () => {
+  it("启用煤有采购保证值但本机没有扣款模板时, 端到端显示告警", async () => {
+    // localStorage 里没有 doudou_blend.penalty_template.v1 (beforeEach 已清空),
+    // 模拟"模板没同步到这台设备"; 该煤的保证值走 coal_prefs mock 注入.
+    mocks.coalPrefs.value = {
+      测试煤: { purchase_guarantees: { S: 0.5 } },
+    };
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    const warning = screen.getByRole("alert");
+    expect(warning.textContent).toContain("没算进成本");
+    expect(warning.textContent).toContain("测试煤");
+  });
+
+  it("没有采购保证值时不显示告警", async () => {
+    mocks.coalPrefs.value = {};
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("TodayScreen 采购条款单次扫描 (BLOCKING 1+2: 一次算, 两处用)", () => {
+  type SentCoal = {
+    name: string;
+    purchase_terms?: {
+      clauses: Array<{ indicator: string; guarantee: number }>;
+    };
+  };
+
+  it("匹配到模板的煤, 求解请求里的 purchase_terms 带着正确条款 (LP 靠它算出非零买入修正)", async () => {
+    mocks.coalPrefs.value = {
+      测试煤: { purchase_guarantees: { S: 0.5 } },
+    };
+    setPenaltyTemplate({
+      clauses: [
+        {
+          indicator: "S",
+          direction: "Upper",
+          penalty: { tiers: [{ rate: 80 }], reject: 1.5 },
+        },
+      ],
+    });
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    const request = JSON.parse(
+      backend.solveJson.mock.calls[0][0] as string,
+    ) as { coals: SentCoal[] };
+    const coal = request.coals.find((c) => c.name === "测试煤");
+
+    // 这里只能验证"字段正确送到了请求里" —— purchase_adjust_per_ton 是不是
+    // 真的非零是 Rust 求解器(blend_kit)算出来的, 不在前端测试覆盖范围内.
+    expect(coal?.purchase_terms?.clauses).toEqual([
+      { indicator: "S", direction: "Upper", guarantee: 0.5, penalty: expect.anything() },
+    ]);
+  });
+
+  it("孤儿保证值的煤, 求解请求里没有它的 purchase_terms —— 告警说的\"没算进成本\"是真的", async () => {
+    mocks.coalPrefs.value = {
+      测试煤: { purchase_guarantees: { S: 0.5 } },
+    };
+    // 不设置本机模板 → 孤儿.
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    const request = JSON.parse(
+      backend.solveJson.mock.calls[0][0] as string,
+    ) as { coals: SentCoal[] };
+    const coal = request.coals.find((c) => c.name === "测试煤");
+
+    expect(coal?.purchase_terms).toBeUndefined();
   });
 });

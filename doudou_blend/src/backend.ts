@@ -113,7 +113,10 @@ async function makeHttpBackend(): Promise<Backend> {
           id: row.id,
           occurred_at: row.occurred_at,
           contract_name: row.contract_name,
-          cost_cif: row.cost_cif,
+          // 计价条款落地后 cif_per_ton 只是报价, net_per_ton 才是真实吨成本;
+          // 老记录的 result blob 里没有 net_per_ton (Task 1 起才可选新增),
+          // 这时回退服务端存的 cost_cif 列 (历史上就是 cif_per_ton).
+          cost_cif: row.result?.cost?.net_per_ton ?? row.cost_cif,
           recipe: row.recipe ?? {},
           mixed,
           csr_measured: row.csr_measured ?? null,

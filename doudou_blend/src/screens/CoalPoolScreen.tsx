@@ -13,6 +13,8 @@ import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalStatus, MasterCoalEntry } from "../types";
 import { CoalEditor } from "../CoalEditor";
 import { NewCoalDialog } from "../NewCoalDialog";
+import { PenaltyTemplateEditor } from "../PenaltyTemplateEditor";
+import { getPenaltyTemplate, PENALTY_TEMPLATE_EVENT } from "../penaltyStorage";
 import {
   enableAllCoals,
   getCoalPrefs,
@@ -45,6 +47,9 @@ export function CoalPoolScreen() {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<ResolvedCoal | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [templateClauseCount, setTemplateClauseCount] = useState(
+    () => getPenaltyTemplate()?.clauses.length ?? 0,
+  );
 
   useEffect(() => {
     loadMaster().then(setMaster).catch(console.error);
@@ -53,11 +58,15 @@ export function CoalPoolScreen() {
 
     const onPrefs = () => setPrefs(getCoalPrefs());
     const onUserCoals = () => setUserCoals(getUserCoals());
+    const onTemplate = () =>
+      setTemplateClauseCount(getPenaltyTemplate()?.clauses.length ?? 0);
     window.addEventListener("doudou:prefs_changed", onPrefs);
     window.addEventListener("doudou:user_coals_changed", onUserCoals);
+    window.addEventListener(PENALTY_TEMPLATE_EVENT, onTemplate);
     return () => {
       window.removeEventListener("doudou:prefs_changed", onPrefs);
       window.removeEventListener("doudou:user_coals_changed", onUserCoals);
+      window.removeEventListener(PENALTY_TEMPLATE_EVENT, onTemplate);
     };
   }, []);
 
@@ -171,6 +180,24 @@ export function CoalPoolScreen() {
           </button>
         </div>
       </div>
+
+      <details
+        className="card"
+        style={{ padding: "10px 12px", marginBottom: 10 }}
+      >
+        <summary
+          style={{
+            cursor: "pointer",
+            fontSize: 12,
+            fontWeight: 600,
+            color: "var(--c-text-2)",
+          }}
+        >
+          采购扣款模板 ·{" "}
+          {templateClauseCount > 0 ? `${templateClauseCount} 条条款` : "未设置"}
+        </summary>
+        <PenaltyTemplateEditor />
+      </details>
 
       <div style={{ position: "relative", marginBottom: 10 }}>
         <input

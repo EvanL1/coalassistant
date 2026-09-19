@@ -20,6 +20,12 @@ import {
   summarizePriceStatus,
   toBlendCoal,
 } from "../domain/resolvedCoal";
+import {
+  extractOrphanedGuarantees,
+  purchaseTermsByCoalName,
+  resolvePurchaseTerms,
+} from "../domain/purchaseTerms";
+import { hasCostAdjustments } from "../domain/costBreakdown";
 import { buildPriceAnchor } from "../domain/priceDrift";
 import { fetchCoalIndexRatioSince } from "../coal_index";
 import {
@@ -28,6 +34,7 @@ import {
   type SolveSnapshot,
 } from "../domain/solveSession";
 import { loadMaster } from "../master_loader";
+import { getPenaltyTemplate, PENALTY_TEMPLATE_EVENT } from "../penaltyStorage";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
 import type {
   BlendRequest,
@@ -46,6 +53,7 @@ import {
   getUserCoals,
   setQuantity,
 } from "../storage";
+import { CostCard } from "./CostCard";
 
 const RECIPE_COLORS = ["#0a5fff", "#7c3aed", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#8b5cf6"];
 
@@ -65,11 +73,6 @@ function daysSince(date: string): number | null {
   const t = Date.parse(`${date}T00:00:00`);
   if (!Number.isFinite(t)) return null;
   return Math.max(0, Math.round((Date.now() - t) / 86_400_000));
-}
-
-function formatPrice(n: number): { int: string; dec: string } {
-  const [intPart, decPart] = n.toFixed(2).split(".");
-  return { int: intPart, dec: decPart };
 }
 
 const QUALITY_STATUS_LABEL: Record<QualityStatus, string> = {
@@ -136,19 +139,28 @@ function buildOrderText(
   lines.push(`合同: ${contractName || "默认合同"} | 总量 ${quantity} 吨`);
   if (cost) {
     const quality = QUALITY_STATUS_LABEL[result.quality_status ?? "Estimated"];
-    lines.push(
-      `到厂价 ${cost.cif_per_ton.toFixed(2)} 元/吨 | 数值界内 ${passing}/${total} | 质量 ${quality}`,
-    );
+    const netPerTon = cost.net_per_ton ?? cost.cif_per_ton;
+    // 实际成本才是真结算价; 跟到厂价没差别时不重复报两遍. 用共享判定
+    // hasCostAdjustments, 不要自己拼 |net-cif|>eps —— 见 CostCard.tsx 同款注释:
+    // 买入折扣与卖出扣款刚好抵消时 net===cif, 但两笔调整确实各自发生过.
+    const priceLine = hasCostAdjustments(cost)
+      ? `实际成本 ${netPerTon.toFixed(2)} 元/吨 (到厂价 ${cost.cif_per_ton.toFixed(2)})`
+      : `到厂价 ${cost.cif_per_ton.toFixed(2)} 元/吨`;
+    lines.push(`${priceLine} | 数值界内 ${passing}/${total} | 质量 ${quality}`);
   }
   lines.push("──────────────────");
   for (const o of [...result.orders].sort((a, b) => b.ratio - a.ratio)) {
     const pct = `${(o.ratio * 100).toFixed(1)}%`;
     const tons = o.tons != null ? `${Math.round(o.tons)}吨` : "-";
-    const amt = o.cif_amount != null ? `  ${yuan(o.cif_amount)}` : "";
+    // 结算按 cif_eff_amount (含买入侧修正); 老记录没有这字段才退回报价金额.
+    const settled = o.cif_eff_amount ?? o.cif_amount;
+    const amt = settled != null ? `  ${yuan(settled)}` : "";
     lines.push(`${o.coal}  ${pct}  ${tons}${amt}`);
   }
-  if (cost?.total_cif != null) {
-    lines.push(`总额 ${yuan(cost.total_cif)}`);
+  // 总额同理优先 total_net (真实应付), 不能拿 total_cif (报价合计) 顶替.
+  const total_amount = cost?.total_net ?? cost?.total_cif;
+  if (total_amount != null) {
+    lines.push(`总额 ${yuan(total_amount)}`);
   }
   return lines.join("\n");
 }
@@ -206,16 +218,18 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   useEffect(() => {
     mountedRef.current = true;
     void runSolve(true);
-    // 监听 prefs/contract/user_coals 变化, 自动重算 (inline, 不整页 loading)
+    // 监听 prefs/contract/user_coals/扣款模板 变化, 自动重算 (inline, 不整页 loading)
     const refresh = () => void runSolve(false);
     window.addEventListener("doudou:prefs_changed", refresh);
     window.addEventListener("doudou:contract_changed", refresh);
     window.addEventListener("doudou:user_coals_changed", refresh);
+    window.addEventListener(PENALTY_TEMPLATE_EVENT, refresh);
     return () => {
       mountedRef.current = false;
       window.removeEventListener("doudou:prefs_changed", refresh);
       window.removeEventListener("doudou:contract_changed", refresh);
       window.removeEventListener("doudou:user_coals_changed", refresh);
+      window.removeEventListener(PENALTY_TEMPLATE_EVENT, refresh);
       requestTrackerRef.current.invalidate();
       if (recomputeTimerRef.current != null) {
         window.clearTimeout(recomputeTimerRef.current);
@@ -290,8 +304,21 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         masterUpdatedAt: master.updated_at,
       });
       const priceStatus = summarizePriceStatus(pool, anchor.coals);
+      // 采购扣款模板只存本机 localStorage, 不跨设备同步 (见 penaltyStorage.ts);
+      // 换设备后煤的保证值同步了但模板没有, 会悄悄漏算扣款, 必须提示用户.
+      //
+      // 只跑一次 resolvePurchaseTerms: 求解请求要挂的 purchase_terms 和
+      // 孤儿保证值告警都从这一次扫描派生, 不要分两处各自调 mergePurchaseTerms
+      // —— 两处各自算同一件事, 数据一变就可能悄悄分叉 (这个项目撞过很多次)。
+      const purchaseTermsEntries = resolvePurchaseTerms(
+        pool,
+        prefs,
+        getPenaltyTemplate(),
+      );
+      const termsByCoal = purchaseTermsByCoalName(purchaseTermsEntries);
+      const orphanedGuarantees = extractOrphanedGuarantees(purchaseTermsEntries);
       const coals = pool
-        .map(toBlendCoal)
+        .map((resolved) => toBlendCoal(resolved, termsByCoal.get(resolved.name)))
         .filter((coal) => coal != null);
 
       if (coals.length === 0) {
@@ -328,6 +355,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             contractName,
             enabledCount: coals.length,
             price: priceStatus,
+            orphanedGuarantees,
           },
         });
       });
@@ -578,7 +606,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   }
 
   const cost = result.cost!;
-  const { int: costInt, dec: costDec } = formatPrice(cost.cif_per_ton);
+  // 总额展示优先 total_net (真实应付合计); 没算扣款条款前两者相等.
+  const totalCost = cost.total_net ?? cost.total_cif;
   const contractChecks = result.indicator_check.filter(isContractIndicator);
   const totalIndicators = contractChecks.length;
   const passing = contractChecks.filter(isIndicatorPassing).length;
@@ -666,62 +695,59 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       )}
 
       <div className="today-dashboard">
-      <div className="cost-card today-cost">
-        <div className="cost-label">最低到厂价</div>
-        <div className="cost-amount">
-          <span className="cost-int">{costInt}</span>
-          <span className="cost-dec">.{costDec}</span>
-          <span className="cost-unit">元/吨</span>
-        </div>
-        <div className="cost-meta">
-          <span className="badge">
-            {passing}/{totalIndicators} 项数值界内
-          </span>
-          <span className="badge">
-            质量：{QUALITY_STATUS_LABEL[qualityStatus]}
-          </span>
-          <span style={{ opacity: 0.85 }}>
-            {enabledCount} 种煤可选
-          </span>
-          {cost.total_cif != null && (
-            <span style={{ opacity: 0.85 }}>
-              总额 {Math.round(cost.total_cif).toLocaleString("zh-CN")} 元
+      <div className="today-cost">
+        <CostCard cost={cost} orphanedGuarantees={snapshot.orphanedGuarantees ?? []} />
+        <div className="cost-card cost-status-card">
+          <div className="cost-meta">
+            <span className="badge">
+              {passing}/{totalIndicators} 项数值界内
             </span>
-          )}
-        </div>
-        {price?.oldestQuotedAt && (
-          <div className="cost-drift">
-            {price.driftedCount > 0 && price.avgRatio != null ? (
-              <>
-                按锚点推算 {price.avgRatio >= 1 ? "+" : "−"}
-                {(Math.abs(price.avgRatio - 1) * 100).toFixed(1)}%
-                {" · "}
-                {price.driftedCount} 种煤用旧报价推算
-                {` · 最旧报价 ${price.oldestQuotedAt}`}
-                {price.anchors.length > 0 &&
-                  ` · 锚点 ${price.anchors.join("、")}`}
-              </>
-            ) : (
-              <>
-                <div className={quoteStale ? "cost-warn" : undefined}>
-                  {quoteStale && "⚠ "}
-                  报价停留在 {price.oldestQuotedAt}
-                  {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
-                  {" · 未按市场校正"}
-                </div>
-                {indexEstimate != null && indexRatio != null && (
-                  <div style={{ marginTop: 4 }}>
-                    参考 · 随焦煤现货指数 {indexRatio >= 1 ? "+" : "−"}
-                    {(Math.abs(indexRatio - 1) * 100).toFixed(1)}% · 到厂价约{" "}
-                    <b>{indexEstimate.toFixed(0)}</b> 元/吨
-                    {indexTotal != null &&
-                      ` · 总额约 ${Math.round(indexTotal).toLocaleString("zh-CN")} 元`}
-                  </div>
-                )}
-              </>
+            <span className="badge">
+              质量：{QUALITY_STATUS_LABEL[qualityStatus]}
+            </span>
+            <span style={{ opacity: 0.85 }}>
+              {enabledCount} 种煤可选
+            </span>
+            {totalCost != null && (
+              <span style={{ opacity: 0.85 }}>
+                总额 {Math.round(totalCost).toLocaleString("zh-CN")} 元
+              </span>
             )}
           </div>
-        )}
+          {price?.oldestQuotedAt && (
+            <div className="cost-drift">
+              {price.driftedCount > 0 && price.avgRatio != null ? (
+                <>
+                  按锚点推算 {price.avgRatio >= 1 ? "+" : "−"}
+                  {(Math.abs(price.avgRatio - 1) * 100).toFixed(1)}%
+                  {" · "}
+                  {price.driftedCount} 种煤用旧报价推算
+                  {` · 最旧报价 ${price.oldestQuotedAt}`}
+                  {price.anchors.length > 0 &&
+                    ` · 锚点 ${price.anchors.join("、")}`}
+                </>
+              ) : (
+                <>
+                  <div className={quoteStale ? "cost-warn" : undefined}>
+                    {quoteStale && "⚠ "}
+                    报价停留在 {price.oldestQuotedAt}
+                    {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
+                    {" · 未按市场校正"}
+                  </div>
+                  {indexEstimate != null && indexRatio != null && (
+                    <div style={{ marginTop: 4 }}>
+                      参考 · 随焦煤现货指数 {indexRatio >= 1 ? "+" : "−"}
+                      {(Math.abs(indexRatio - 1) * 100).toFixed(1)}% · 到厂价约{" "}
+                      <b>{indexEstimate.toFixed(0)}</b> 元/吨
+                      {indexTotal != null &&
+                        ` · 总额约 ${Math.round(indexTotal).toLocaleString("zh-CN")} 元`}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="card today-recipe">
@@ -834,11 +860,17 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
                   <div className="indicator-value">
                     {unavailable ? "—" : formatIndicatorValue(judgedValue)}
                   </div>
-                  <span
-                    className={`evaluation-pill evaluation-${status.toLowerCase()}`}
-                  >
-                    {EVALUATION_STATUS_LABEL[status]}
-                  </span>
+                  {ic.penalty_per_ton != null && ic.penalty_per_ton > 1e-6 ? (
+                    <span className="indicator-penalty">
+                      扣 {ic.penalty_per_ton.toFixed(2)} 元/吨
+                    </span>
+                  ) : (
+                    <span
+                      className={`evaluation-pill evaluation-${status.toLowerCase()}`}
+                    >
+                      {EVALUATION_STATUS_LABEL[status]}
+                    </span>
+                  )}
                 </div>
                 <div className="indicator-meta">
                   {unavailable

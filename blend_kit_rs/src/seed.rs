@@ -137,6 +137,7 @@ impl CoalMasterEntry {
             fob,
             frt,
             petrography: None, // master 数据尚无煤岩直方图字段
+            purchase_terms: None,
         })
     }
 
