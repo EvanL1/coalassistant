@@ -2673,7 +2673,7 @@ cd ../blend_kit_rs && cargo test --release && cargo clippy --release --all-targe
 
 ### Task 9: 全量验证与端到端自检
 
-- [ ] **Step 1: 核心算法全量**
+- [x] **Step 1: 核心算法全量**
 
 ```bash
 cd blend_kit_rs && cargo test --release && cargo clippy --release -- -D warnings && cargo fmt --check
@@ -2682,14 +2682,30 @@ cargo run --release --example demo
 ```
 预期：测试全绿，两个 example 正常输出。
 
-- [ ] **Step 2: 服务端未受影响**
+实测 2026-09-19：release 与 debug 两轮都是 124 + 10 passed / 0 failed；
+`cargo clippy --release --all-targets -- -D warnings` 与 `cargo fmt --check` 无输出；
+两个 example 正常出表。另外 `blend_kit_wasm` 也重新 `wasm-pack build --release`
+过一遍（它按路径依赖 `blend_kit`），成功。
+
+- [x] **Step 2: 服务端未受影响**
 
 ```bash
 cd blend_kit_server && cargo test --locked && cargo clippy --release -- -D warnings
 ```
 预期：全绿（本计划未改服务端；此步是确认 `blend_kit` 的类型变更没有连累它）。
 
-- [ ] **Step 3: 前端全量与一致性**
+实测 2026-09-19：`cargo test --locked` 32 passed / 0 failed；`cargo fmt --check` 通过；
+CI 口径的 `cargo clippy --all-targets --locked -- -D warnings` 通过。
+本分支未改动 `blend_kit_server/` 任何文件（`git diff main...HEAD -- blend_kit_server/` 为空）。
+
+> 本机环境注记（与本分支无关，不必修）：在这台 macOS 上单跑 `cargo clippy --release`
+> 会失败，报 `libsqlx_macros-*.dylib ... mis-aligned LINKEDIT string pool` 而 dlopen 不了。
+> 根因是 `[profile.release]` 的 `strip = true` 同样作用到了 proc-macro dylib，
+> 而本机 Apple ld（ld-27037.1）strip 出来的 dylib 对不齐。
+> `CARGO_PROFILE_RELEASE_STRIP=false cargo clippy --release -- -D warnings` 即通过，
+> 证实根因。CI 跑的是 `--all-targets --locked`（dev profile），碰不到这条路径。
+
+- [x] **Step 3: 前端全量与一致性**
 
 ```bash
 cd doudou_blend && npm test && npm run build && npm run check:consistency && npm run check:data
@@ -2697,7 +2713,13 @@ cd doudou_blend && npm test && npm run build && npm run check:consistency && npm
 预期：全绿。`check:consistency` 特别要确认 `Enforcement` 枚举含 4 个变体、
 `Coal`/`Spec`/`CostBreakdown`/`OrderItem`/`IndicatorCheck` 字段两边一致。
 
-- [ ] **Step 4: 用合同真实数字做一次端到端手验**
+实测 2026-09-19：`npm test` 21 files / 270 tests passed；`npx tsc --noEmit` 干净；
+`npm run build` 成功（285.46 kB，gzip 88.87 kB）；
+`check:consistency` 通过（112 条 Master 记录，版本 0.1.1，含新增的
+`PenaltyTier`/`Penalty`/`PurchaseClause`/`PurchaseTerms` 四个共享结构体）；
+`check:data` 通过（112 条，v2.2）。
+
+- [x] **Step 4: 用合同真实数字做一次端到端手验**
 
 启动本地服务与前端，在合同屏按本合同录入：灰 ≤10% 计价 80 元/吨·%、拒收 11.5；
 粘结 ≥85 计价 5 元/吨·点、拒收 80。求解后确认：
@@ -2714,18 +2736,64 @@ cd doudou_blend && npm test && npm run build && npm run check:consistency && npm
   真的把 `purchase_terms` 送进请求, 买入折扣才会体现在 `purchase_adjust_per_ton`
   里, 不然告警说的"已按无扣款计入成本"对所有煤都成立, 不只是孤儿
 
-- [ ] **Step 5: 完整变更审查**
+**实测 2026-09-19 —— 改走 `solve_json` 而非浏览器手验。** 拿到的是用户给的真实合同
+（BMY-XGX-ZJM-20260911）与真实竞品配方，所以把这一步做成了针对核心的三个对照 case，
+走 `blend_kit::solve_json(&str) -> String` ——即服务端 `POST /api/solve` 与 WASM 共用的
+同一条字符串进 / 字符串出的路径，从而连带验到了 `Priced` / `penalty` / `purchase_terms`
+三处新 JSON 形状的 serde 反序列化。驱动程序写在 scratchpad 的独立 crate 里（按路径依赖
+`blend_kit`），**未向仓库添加任何文件**。
+
+煤池四种（S/A/V/G/Y/M，无 petro/CSR 化验，frt 全 0，总量 5000 吨）：
+兴无 2.1/8.5/18/70/18/12 @2400、第三 0.73/12.14/34/85/15/12 @1550、
+第二 0.78/11.5/23/86/15/12 @2125、第一 1.0/13.85/21/85/15/12 @2465。
+
+| Case | 结果 |
+|---|---|
+| 1. 对标竞品质量的全硬约束（灰≤11.327 硫≤1.051 挥发≤25.1 粘结≥82.4 胶质≥15.6） | `ok=true`；兴无 20.0000% / 第三 28.1818% / 第二 51.8182% / 第一 0%（不进配方）；`cif_per_ton` 2017.9545；`penalty` 与 `purchase_adjust` 均为 0；`net == cif` |
+| 2. 同一合同按计价（灰≤10 硫≤1 挥发≤28 粘结≥85 胶质≥15，五项全 `Priced`） | `ok=true`；第三 63.2095% / 兴无 19.0610% / 第二 17.7295%；`cif` 1813.9629 + `penalty` 135.0262 = `net` 1948.9891；分项扣款 灰 106.6170 / 挥发 15.0000 / 粘结 13.4093 / 硫 0 / 胶质 0；越界的灰·挥发·粘结均判 `TolerancePass` 而非 `Fail`，`quality_status` 为 `Estimated` 而非 `NeedsReview` |
+| 3. 同一合同按全硬约束 | `ok=false`，`reason = "约束冲突, LP 不可行"` |
+
+Case 3 正是这个功能的商业立论：**这份合同用这个煤池根本满足不了**——粘结≥85 逼着多配
+第三/第二，而这两者灰分 12.14 / 11.5，可达的最低灰约 11.31，永远够不到合同的灰≤10。
+硬约束下只能回一句"不可行"，计价之后变成一句"可行，代价是每吨 135.03 元扣款"。
+
+Case 2 的两处值得留意（不是 bug，是模型照做）：挥发正好停在 29.000 = 假定的拒收线上，
+硫正好停在 1.000 = 合同上限上——LP 解贴边是必然，但这意味着化验波动没有任何余量。
+真要下这个单，应当用 `Spec.margin` 往回收一点。另外三个 case 的拒收线（灰 12 / 硫 1.2 /
+挥发 29 / 粘结 80 / 胶质 14）**合同原文并未约定，是本次验证假定的**。
+
+**买入侧自拟 case（Step 4 最后一条的核心验证）：** 给兴无挂上 `purchase_terms`
+（frt 改 100 以便分辨口径；硫保证值 1.8 而实测 2.1、每单位扣 100 元、拒收 2.5；
+合同水分 8% 而实测 12%），沿用 Case 1 的约束求解，得：
+
+- `purchase_adjust_per_ton = -27.8345`，**负值 = 折扣**，方向正确
+- 兴无 `cif_eff_per_ton = 2365.652174` < 报价 `cif` 2500
+- 水分折算只打在 fob 上、不打运费：`2400 × (1-0.12)/(1-0.08) + 100 − 30 = 2365.652174`
+  与实测逐位相符；若运费也被折算则应为 `2500 × 0.9565 − 30 = 2361.304348`，实测不等于它
+- `Σ ratio·(cif_eff − cif) = 0.207182 × (2365.652174 − 2500) = −27.834494`，
+  与 `purchase_adjust_per_ton` 一致
+
+- [x] **Step 5: 完整变更审查**
 
 ```bash
 cd /Users/lyf/dev/coalassistant && git diff main...HEAD --stat
 ```
 逐文件核对无遗留调试代码、无 `TODO`。
 
-- [ ] **Step 6: 提交收尾**
+实测 2026-09-19：38 个文件、+10051 / −101。新增行里没有 `console.log` / `debugger` /
+`dbg!` / `println!` / `todo!` / `FIXME` / `@ts-ignore`，也没有遗留 `TODO`
+（唯一命中的 `TODO` 是本文件这句话本身）。无多余测试夹具、无不该提交的文件。
+`types.ts` 与 Rust schema 无漂移：新增四个结构体已进 `check_repository_consistency.mjs`
+的 `sharedStructs`，`Enforcement` 两端都是 4 个变体。
+
+- [ ] **Step 6: 提交收尾**（留给用户决定）
 
 ```bash
 git add -A && git commit -m "test: 合同扣款建模全量验证" || echo "无待提交改动"
 ```
+
+Task 9 执行时未自行提交：工作树里只有本文件这一处改动待提交，是否提交、以及后续
+是否合并 `main`、是否部署，都留给用户拍板。
 
 **遗留清理候选（Task 7 执行时顺带发现，不在本计划范围内，留给后续单独的清理改动）：**
 `doudou_blend/src/storage.ts` 里的 `HistoryEntry` / `getHistory` / `appendHistory`
@@ -2734,6 +2802,14 @@ git add -A && git commit -m "test: 合同扣款建模全量验证" || echo "无�
 / `MeScreen.tsx` 只调用 `backend.clearHistory` / `backend.setMeasuredQuality`，
 没有任何屏幕调用这三个 `storage.ts` 导出。删除前建议单独确认没有遗留用户数据
 依赖这个 key，且这类删除应该单独一次改动、单独审查，不要夹在功能改动里。
+
+（Task 9 复核：该死代码仍在，本次未动——按上面这条自己的约定，它不该夹在本分支里。）
+
+**本计划的勾选状态与实际交付不一致（记录，不修）：** Task 9 复核时发现，Task 1~7 的
+step 复选框从头到尾没人勾过，只有 Task 8 勾了自己的 8 步。但这些任务确实都交付了 ——
+分支上 36 个提交、`penalty.rs` / `penalty.ts` / `CostCard.tsx` 等文件俱在、全量测试
+（Rust 134 + 前端 270）全绿。也就是说**这纯粹是勾选动作的遗漏，不是范围的遗漏**。
+补勾要逐条回溯每一步到底做没做，成本远高于收益，故留原样；真源以代码与测试为准。
 
 ---
 
