@@ -370,6 +370,13 @@ fn test_infeasible_diagnosis_crosses_the_json_boundary() {
     assert_eq!(bounds[0]["label_zh"], "灰");
     assert_eq!(bounds[0]["direction"], "Upper");
     assert_eq!(bounds[0]["required"], 10.0);
+    // 执行界与合同界是两条线: 一位小数截断判定把 ≤10 放宽成按 ≤10.0999 执行
+    // (实测 10.09 判定后是 10.0, 合同认可). 前端按执行界算"差多少", 故必须穿过边界.
+    let enforced = bounds[0]["enforced"].as_f64().expect("enforced 应为数值");
+    assert!(
+        (enforced - 10.0999).abs() < 0.001,
+        "截断判定下执行界应约为 10.0999, 实得 {enforced}"
+    );
     let achievable = bounds[0]["achievable"]
         .as_f64()
         .expect("achievable 应为数值");

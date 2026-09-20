@@ -195,25 +195,17 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
             petro_proxy_upper,
             warnings.clone(),
         ) else {
-            // 诊断只跑在"LP 无解"这一条路上 —— 成功路径一行都不多算.
-            let diagnose = || {
-                diagnose_infeasible(
-                    &kept,
-                    &active_specs,
-                    request,
-                    &formulas,
-                    evaluators,
-                    petro_proxy_lower,
-                    petro_proxy_upper,
-                )
-            };
             return if let Some(previous) = fallback {
                 if petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard) {
                     let mut failure_warnings = previous.warnings;
                     failure_warnings
                         .push("岩相精确校验修复后 LP 不可行；请调整煤池或合同级别".into());
+                    // 这里不带诊断: fallback 有值就说明按合同界建的 LP 本来有解 (previous
+                    // 就是那个解), 无解的是岩相修复把上限收紧之后的 LP. 诊断的前提是
+                    // "按合同界建的 LP 无解", 在这条路上不成立 —— 硬跑会拿收紧后的代理界
+                    // 判越界、却按合同界展示, 报出"岩相 ≤0.1 达不到, 最好只能到 0.05"
+                    // 这种自相矛盾的行. 真凶已由 reason 与 warnings 指名为岩相.
                     BlendResult::infeasible("岩相精确 Hard 复核未找到可行配方", failure_warnings)
-                        .with_infeasible_bounds(diagnose())
                 } else {
                     let mut previous = previous;
                     previous
@@ -223,8 +215,24 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
                     previous
                 }
             } else {
+                // 只有这条路满足诊断的前提: fallback 为 None ⇒ 一次成功迭代都没有过
+                // ⇒ petro_proxy_* 必然还是 None (它们与 fallback 在同一处赋值),
+                // 失败的就是按合同界建的那个 LP 本身.
+                debug_assert!(
+                    petro_proxy_lower.is_none() && petro_proxy_upper.is_none(),
+                    "未经岩相修复就走到这里, 代理界不该已被收紧"
+                );
+                let bounds = diagnose_infeasible(
+                    &kept,
+                    &active_specs,
+                    request,
+                    &formulas,
+                    evaluators,
+                    petro_proxy_lower,
+                    petro_proxy_upper,
+                );
                 BlendResult::infeasible("约束冲突, LP 不可行", warnings)
-                    .with_infeasible_bounds(diagnose())
+                    .with_infeasible_bounds(bounds)
             };
         };
         result.evaluation_iterations = iteration;
@@ -678,8 +686,14 @@ fn enforced_bounds(
 
 /// 组装 LP: Hard 行 + 已验证模型训练域 + 计价档位块.
 ///
-/// 不可行诊断复用它 —— 传入剔掉某一条后的 specs, 得到的就是"少了这条约束"的同一个
-/// 问题, 不必另写一套建模代码.
+/// 不可行诊断复用它: `relaxed` 指定那条被松开的 spec 在 `specs` 里的下标, 得到的就是
+/// "少了这条界"的同一个问题, 不必另写一套建模代码.
+///
+/// **`relaxed` 只松开这条 spec 的界行 (Hard 的上下界行 / Priced 的整个档位块),
+/// 模型训练域行照旧保留.** 训练域是"已验证模型可以用于 Hard 约束"的前提, 不属于这条
+/// 界本身: 一并删掉等于一次放宽了两层, achievable 会偏乐观, "单独放宽这一项就能可行"
+/// 随之变成空话. 今天 solve_json 走默认评估器看不出来, CSR 回归一上线就会现形.
+#[allow(clippy::too_many_arguments)]
 fn build_lp(
     coals: &[&Coal],
     specs: &[&Spec],
@@ -688,6 +702,7 @@ fn build_lp(
     models: &EvaluatorSet,
     petro_proxy_lower: Option<f64>,
     petro_proxy_upper: Option<f64>,
+    relaxed: Option<usize>,
 ) -> Option<(LpProblem, Vec<PricedBlock>)> {
     let count = coals.len();
     // 买入侧扣款与水分折算已折进成本系数; 越拒收线的煤在候选筛选阶段已剔除, 此处兜底用报价.
@@ -695,7 +710,14 @@ fn build_lp(
     let mut inequalities = Vec::new();
     let mut bounds = Vec::new();
 
-    for spec in specs
+    let bounded: Vec<&Spec> = specs
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != relaxed)
+        .map(|(_, spec)| *spec)
+        .collect();
+
+    for spec in bounded
         .iter()
         .filter(|spec| spec.enforcement == Enforcement::Hard)
     {
@@ -706,17 +728,23 @@ fn build_lp(
             let (row, bound) = match direction {
                 Direction::Upper => formula.upper_constraint(limit),
                 Direction::Lower => formula.lower_constraint(limit),
-                // enforced_bounds 只产出 Upper/Lower 两向.
-                Direction::Range => return None,
+                Direction::Range => {
+                    // enforced_bounds 只产出 Upper/Lower 两向, Range 在那里就拆开了.
+                    // 不 panic: 两个 crate 的 release profile 都是 panic = "abort",
+                    // 求解线程一炸整个服务端进程跟着没, CatchPanicLayer 也接不住.
+                    debug_assert!(false, "enforced_bounds 不该产出 Range");
+                    return None;
+                }
             };
             inequalities.push(row);
             bounds.push(bound);
         }
     }
+    // 训练域行用未过滤的 specs —— 见上面函数级注释.
     append_hard_model_domains(coals, specs, models, &mut inequalities, &mut bounds)?;
 
     let blocks = append_priced_blocks(
-        specs,
+        &bounded,
         formulas,
         request,
         count,
@@ -771,33 +799,30 @@ fn diagnose_infeasible(
         let Some(formula) = formulas.get(&spec.indicator) else {
             continue;
         };
-        let others: Vec<&Spec> = specs
-            .iter()
-            .enumerate()
-            .filter(|(other, _)| *other != index)
-            .map(|(_, spec)| *spec)
-            .collect();
         let Some((problem, _)) = build_lp(
             coals,
-            &others,
+            specs,
             request,
             formulas,
             models,
             petro_proxy_lower,
             petro_proxy_upper,
+            Some(index),
         ) else {
             continue;
         };
-        for (direction, required, limit) in limits {
+        for (direction, required, enforced) in limits {
             let Some(achievable) = problem.optimize_indicator(formula, direction) else {
                 continue;
             };
-            // 判据用 LP 实际执行的界 (含 margin 与判定规则), 展示给用户的是合同界:
-            // 越界与否是 LP 说了算, 而用户要对照的是合同上那个数.
-            let slack = FEASIBILITY_TOLERANCE * (1.0 + limit.abs());
+            // 判据用 LP 实际执行的界: 越界与否是 LP 说了算.
+            // 两条界都要带出去 —— 合同界是用户在合同上认得的那个数, 执行界才是真正
+            // 卡住这一单的线. 有 margin 时两者能差出一整个安全余量, 只报合同界的话,
+            // 界面会出现"要求 ≤9, 最好能做到 9"这种看着已经达标、却被说成是元凶的行.
+            let slack = FEASIBILITY_TOLERANCE * (1.0 + enforced.abs());
             let violated = match direction {
-                Direction::Upper => achievable > limit + slack,
-                Direction::Lower => achievable + slack < limit,
+                Direction::Upper => achievable > enforced + slack,
+                Direction::Lower => achievable + slack < enforced,
                 Direction::Range => false,
             };
             if violated {
@@ -806,6 +831,7 @@ fn diagnose_infeasible(
                     label_zh: label_zh(&spec.indicator).into(),
                     direction,
                     required,
+                    enforced,
                     achievable,
                 });
             }
@@ -834,6 +860,7 @@ fn solve_once(
         models,
         petro_proxy_lower,
         petro_proxy_upper,
+        None,
     )?;
     let (solution, _) = problem.solve()?;
     let ratios = solution[..count].to_vec();
@@ -1683,6 +1710,108 @@ mod tests {
             result.infeasible_bounds.is_empty(),
             "没有哪一项单独放宽能可行, 不该指认任何一项: {:?}",
             result.infeasible_bounds
+        );
+    }
+
+    /// 子问题只松开被诊断那一条界, 模型训练域行必须留着.
+    ///
+    /// G 已验证模型: 评估值 = 5 + 0.9·原始G, 训练域 [60,100] 外扩 10% 后是 [56,104].
+    /// 合同要粘结 ≥100 ⇒ 原始G 需 ≥105.6, 越过训练域上限 104 ⇒ 不可行.
+    /// 诊断删掉粘结那条界后, 原始G 仍被训练域封在 104, 故最多做到 5+0.9×104 = 98.6.
+    ///
+    /// 若把训练域行跟着一起删掉 (append_hard_model_domains 是按 spec 挂的, 很容易
+    /// 顺手删掉), 原始G 就能顶到煤本身的 110 ⇒ 评估值 104 ≥ 100 ⇒ 复核认为没越界 ⇒
+    /// 这一项根本不会被报出来, 断言随之失败. 今天 solve_json 走默认评估器看不到这条路,
+    /// CSR/G 回归一上线就是生产路径.
+    #[test]
+    fn test_diagnosis_keeps_model_domain_rows() {
+        let request = request_of(
+            vec![
+                assay_coal("高粘结", (0.8, 9.0, 24.0, 110.0, 16.0, 10.0), 1200.0),
+                assay_coal("普通", (0.8, 9.0, 24.0, 90.0, 16.0, 10.0), 1000.0),
+            ],
+            vec![Spec::lower("G", 100.0)],
+        );
+        let request = BlendRequest {
+            truncate_decimal: false,
+            ..request
+        };
+        let result = solve_with_evaluators(&request, &trained_evaluators());
+
+        assert!(!result.ok, "原始G 被训练域封在 104, 评估值到不了 100");
+        assert_eq!(result.infeasible_bounds.len(), 1, "应指认粘结一项");
+        let bound = &result.infeasible_bounds[0];
+        assert_eq!(bound.indicator, "G");
+        assert_eq!(bound.direction, Direction::Lower);
+        assert_eq!(bound.required, 100.0);
+        assert!(
+            (bound.achievable - 98.6).abs() < 0.01,
+            "训练域上限 104 ⇒ 最多 98.6, 实得 {} (104 说明训练域行被一起删了)",
+            bound.achievable
+        );
+    }
+
+    /// 诊断前提的兜底: LP 可行、卡在解后 Hard 复核时, 一项都不许指认.
+    ///
+    /// 这里 G 模型输出 50+0.9×90 = 131, 超出 0~100 物理范围被判 Fail, solve_once
+    /// 因此返回 None —— 但 LP 本身有解. "整体不可行 ⇒ 子问题最优值必然越界"的推理
+    /// 在这种 None 上不成立, 全靠最后那道"确实越界"的复核兜住: 粘结最多能到 131,
+    /// 远在下限 85 之上, 复核落空, 于是交白卷.
+    #[test]
+    fn test_feasible_lp_failing_post_check_names_nobody() {
+        let mut models = trained_evaluators();
+        models
+            .g
+            .as_mut()
+            .expect("测试评估器应带 G 模型")
+            .predictor
+            .intercept = 50.0;
+        let request = request_of(
+            vec![
+                assay_coal("甲", (0.8, 9.0, 24.0, 90.0, 16.0, 10.0), 1000.0),
+                assay_coal("乙", (0.9, 9.5, 25.0, 88.0, 16.0, 10.0), 1100.0),
+            ],
+            vec![Spec::lower("G", 85.0)],
+        );
+        let result = solve_with_evaluators(&request, &models);
+
+        assert!(!result.ok, "模型输出越出物理范围, 不该给配方");
+        assert!(
+            result.infeasible_bounds.is_empty(),
+            "LP 可行, 没有哪条约束够不到, 不许指认: {:?}",
+            result.infeasible_bounds
+        );
+    }
+
+    /// 有安全余量时, 合同界与真正卡住这一单的执行界不是同一条线, 两条都要报.
+    ///
+    /// 合同 灰 ≤9、余量 1.0 ⇒ LP 按 ≤8 执行; 煤池最低只能做到 9.0.
+    /// 只报合同界的话界面会是"要求 ≤9, 最好能做到 9" —— 看着已经达标却被指认为元凶,
+    /// 而且"把合同放宽到 9 就能可行"是假的: 真正要让开的是 8 那条线.
+    #[test]
+    fn test_margin_reports_both_contract_and_enforced_bound() {
+        let mut ash = Spec::upper("A", 9.0);
+        ash.margin = Some(1.0);
+        let request = BlendRequest {
+            coals: vec![
+                assay_coal("低灰", (0.8, 9.0, 24.0, 88.0, 16.0, 10.0), 1000.0),
+                assay_coal("高灰", (0.8, 12.0, 24.0, 88.0, 16.0, 10.0), 900.0),
+            ],
+            specs: vec![ash],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+
+        assert!(!result.ok, "煤池最低 9.0, 够不到收紧后的 8.0");
+        assert_eq!(result.infeasible_bounds.len(), 1);
+        let bound = &result.infeasible_bounds[0];
+        assert_eq!(bound.required, 9.0, "合同界是用户在合同上认得的那个数");
+        assert_eq!(bound.enforced, 8.0, "执行界 = 合同界 9 扣掉安全余量 1");
+        assert!(
+            (bound.achievable - 9.0).abs() < 0.01,
+            "最低只能到 9.0, 实得 {}",
+            bound.achievable
         );
     }
 

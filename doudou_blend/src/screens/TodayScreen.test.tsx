@@ -587,6 +587,7 @@ describe("TodayScreen 不可行", () => {
               label_zh: "灰",
               direction: "Upper",
               required: 10,
+              enforced: 10,
               achievable: 11.3125,
             },
           ]),

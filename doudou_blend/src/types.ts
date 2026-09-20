@@ -229,6 +229,13 @@ export interface InfeasibleBound {
   direction: Direction;
   /** 合同要求的界 (Hard 用合同界, Priced 用拒收线). */
   required: number;
+  /**
+   * LP 实际执行的界: 合同界经判定规则折算, 再按方向扣掉安全余量 margin.
+   * margin 会让它比合同界更严 (合同 ≤10 / 余量 0.5 ⇒ 按 ≤9.5 执行), 截断判定
+   * 会让它更松 (合同 ≤10 / 一位小数截断 ⇒ 按 ≤10.0999 执行).
+   * 「差多少」按两条界里更紧的那条算 —— 那才是真正卡住这一单的线.
+   */
+  enforced: number;
   /** 其余约束成立时该指标能达到的最优值. */
   achievable: number;
 }

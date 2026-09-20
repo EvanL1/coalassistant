@@ -13,11 +13,30 @@ import type { BlendResult, InfeasibleBound } from "../types";
  * 说明, 不硬凑一个指标让用户白跑一趟.
  */
 
-/** 差多少: 上限超出多少, 下限还差多少. */
-function shortfall(bound: InfeasibleBound): number {
+/** 合同界与执行界里更紧的那条 —— 真正卡住这一单的线. */
+function operativeBound(bound: InfeasibleBound): number {
   return bound.direction === "Upper"
-    ? bound.achievable - bound.required
-    : bound.required - bound.achievable;
+    ? Math.min(bound.required, bound.enforced)
+    : Math.max(bound.required, bound.enforced);
+}
+
+/**
+ * 差多少: 按 operativeBound 算, 不按合同界.
+ *
+ * 有安全余量时合同界够得到、执行界够不到, 按合同界算会得到 0 或负数, 界面就成了
+ * "这一项看着达标, 却被说成是元凶". 按执行界算出来的才是真正要让开的量, 而且
+ * 合同界放宽同样的量即可 (执行界随合同界平移).
+ */
+function shortfall(bound: InfeasibleBound): number {
+  const operative = operativeBound(bound);
+  return bound.direction === "Upper"
+    ? bound.achievable - operative
+    : operative - bound.achievable;
+}
+
+/** 执行界比合同界更紧时才需要解释; 判定规则放宽的那一侧不必打扰用户. */
+function tighterThanContract(bound: InfeasibleBound): boolean {
+  return Math.abs(operativeBound(bound) - bound.required) > 0.005;
 }
 
 /** 化验单分辨率是 0.01, 诊断表按这个精度读就够 (与混合指标的 4 位展示无关). */
@@ -33,17 +52,25 @@ const cellStyle = {
 
 export function InfeasiblePanel({ result }: { result: BlendResult }) {
   const bounds = result.infeasible_bounds ?? [];
+  // ok 却没有成本结构 = 结果不完整 (畸形或存量记录), 不是合同不可行 —— 标题和
+  // 说明都得跟着变, 否则界面会对着一个成功的求解喊"不可行".
+  const incomplete = result.ok;
+  const reason =
+    result.reason ??
+    (incomplete ? "求解成功但没有返回成本结构, 无法展示方案." : "求解未给出原因.");
+
   return (
     <div className="card" style={{ borderLeft: "4px solid var(--c-danger)" }}>
       <div className="card-title" style={{ color: "var(--c-danger)" }}>
-        ✗ 不可行
+        {incomplete ? "✗ 结果不完整" : "✗ 不可行"}
       </div>
-      <p style={{ margin: "0 0 10px", fontSize: 13 }}>{result.reason}</p>
+      <p style={{ margin: "0 0 10px", fontSize: 13 }}>{reason}</p>
 
-      {bounds.length > 0 ? (
+      {bounds.length > 0 && (
         <>
           <p style={{ margin: "0 0 8px", fontSize: 12, color: "var(--c-text-3)" }}>
-            其余约束都成立时, 下面这些项达不到合同要求. 单独放宽其中任意一项就能求出配方.
+            其余约束都成立时, 下面这些项达不到执行中的界. 把其中任意一项按「差多少」
+            放宽, 就能求出配方.
           </p>
           <table
             className="infeasible-table"
@@ -61,29 +88,39 @@ export function InfeasiblePanel({ result }: { result: BlendResult }) {
             </thead>
             <tbody>
               {bounds.map((bound) => {
-                const gap = shortfall(bound);
+                const sign = bound.direction === "Upper" ? "≤" : "≥";
                 return (
                   <tr key={`${bound.indicator}-${bound.direction}`}>
                     <td style={{ ...cellStyle, textAlign: "left" }}>
                       {INDICATOR_LABEL[bound.indicator] ?? bound.label_zh}
                     </td>
                     <td style={cellStyle}>
-                      {bound.direction === "Upper" ? "≤" : "≥"}
-                      {formatBound(bound.required)}
+                      <div>
+                        {sign}
+                        {formatBound(bound.required)}
+                      </div>
+                      {/* 余量收紧时必须说破: 否则这一行看着已经达标, 用户会以为
+                          工具在胡说, 也不知道真正要让开的是哪条线. */}
+                      {tighterThanContract(bound) && (
+                        <div style={{ color: "var(--c-text-3)" }}>
+                          含安全余量, 按 {sign}
+                          {formatBound(bound.enforced)} 执行
+                        </div>
+                      )}
                     </td>
                     <td style={{ ...cellStyle, color: "var(--c-danger)" }}>
                       {formatBound(bound.achievable)}
                     </td>
-                    {/* 合同界本身够得到、只是被安全余量或判定规则收紧时, 差值会 ≤0,
-                        此时写死一个数字反而误导, 留空更老实. */}
-                    <td style={cellStyle}>{gap > 0 ? formatBound(gap) : "—"}</td>
+                    <td style={cellStyle}>{formatBound(shortfall(bound))}</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </>
-      ) : (
+      )}
+
+      {bounds.length === 0 && !incomplete && (
         <p style={{ margin: 0, fontSize: 12, color: "var(--c-text-3)" }}>
           没有单独一项约束能解释这次不可行: 冲突牵涉两项以上, 或者煤池本身就不够.
           需要同时放宽多项, 或去「煤池」启用更多煤源.

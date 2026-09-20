@@ -881,6 +881,54 @@ mod tests {
         assert!(check.sigma <= 0.25 + 1e-6, "σ={} 应 ≤ 0.25", check.sigma);
     }
 
+    /// 岩相修复失败这条路**不带**逐项诊断.
+    ///
+    /// 走到这里说明按合同界建的 LP 本来有解, 无解的是修复时收紧代理上限之后的 LP ——
+    /// 诊断"整体不可行 ⇒ 子问题最优值必然越界"的前提在这条路上不成立. 硬跑的话,
+    /// 越界判定拿的是收紧后的代理界 (这里约 0.04), 展示的却是合同界 0.1, 于是报出
+    /// "岩相 ≤0.1 达不到, 最好只能到 0.05" —— 0.05 明明比 0.1 好, 用户读到的是
+    /// 工具自相矛盾. 真凶已由 reason 与 warnings 指名为岩相.
+    #[test]
+    fn test_petro_repair_failure_carries_no_diagnosis() {
+        let coals = vec![
+            coal_with_petro(
+                "纯煤贵",
+                (2.0, 8.0, 22.0, 90.0, 15.0, 0.05, 65.0, 8.0, 1100.0, 30.0),
+                vec![[1.15, 1.0], [1.25, 1.0]], // σ=0.05
+            ),
+            coal_with_petro(
+                "混煤便宜",
+                (2.0, 8.5, 23.0, 92.0, 16.0, 0.4, 66.0, 7.5, 1000.0, 30.0),
+                vec![[0.8, 1.0], [1.6, 1.0]], // σ=0.4
+            ),
+        ];
+        let result = solve(&BlendRequest {
+            coals,
+            specs: vec![Spec::upper("petro", 0.1)],
+            total_quantity: None,
+            truncate_decimal: false,
+        });
+
+        assert!(!result.ok, "代理达标但精确 σ 超标, 收紧后应无解");
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("岩相精确 Hard 复核未找到可行配方")
+        );
+        assert!(
+            result.infeasible_bounds.is_empty(),
+            "这条路不满足诊断前提, 不该指认任何一项: {:?}",
+            result.infeasible_bounds
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("岩相")),
+            "真凶应由 warnings 指名: {:?}",
+            result.warnings
+        );
+    }
+
     /// 线性代理高估低价煤的 σ 时，下界初解可能通过代理却未通过精确复核。
     /// A 的录入代理为 0.30、直方图 σ=0.28；B 的代理与直方图 σ 均为 0.40。
     /// 初解全选 A，精确 σ=0.28 不达下界 0.30；抬高代理下界后应引入 B 并收敛。
