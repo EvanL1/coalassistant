@@ -557,6 +557,13 @@ button {
   margin-bottom: 6px;
 }
 
+/* 不可行诊断表: 指标 / 合同要求 / 最好能做到 / 差多少 */
+.infeasible-table th {
+  font-weight: 600;
+  color: var(--c-text-3);
+  white-space: nowrap;
+}
+
 /* ========== Modal / Bottom Sheet ========== */
 .modal-backdrop {
   position: fixed;

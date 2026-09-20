@@ -555,3 +555,112 @@ describe("TodayScreen 采购条款单次扫描 (BLOCKING 1+2: 一次算, 两处�
     expect(coal?.purchase_terms).toBeUndefined();
   });
 });
+
+describe("TodayScreen 不可行", () => {
+  function makeInfeasible(
+    bounds: BlendResult["infeasible_bounds"],
+  ): BlendResult {
+    return {
+      ok: false,
+      reason: "约束冲突, LP 不可行",
+      infeasible_bounds: bounds,
+      recipe: {},
+      cost: null,
+      orders: [],
+      indicator_check: [],
+      warnings: ["剔除 高硫煤: 缺指标 胶质"],
+      quality_status: "NeedsReview",
+    };
+  }
+
+  /**
+   * 回归: 不可行时整屏提前 return, 只剩一句"约束冲突"和一个重试按钮 ——
+   * 煤池、合同、吨数这些排查不可行唯一的抓手全被藏了起来.
+   */
+  it("不可行时保留输入摘要, 并逐项指出哪条约束够不到", async () => {
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(
+        JSON.stringify(
+          makeInfeasible([
+            {
+              indicator: "A",
+              label_zh: "灰",
+              direction: "Upper",
+              required: 10,
+              enforced: 10,
+              margin: 0,
+              achievable: 11.3125,
+              relax_to: 11.4,
+            },
+          ]),
+        ),
+      ),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("✗ 不可行");
+
+    // 输入摘要: 合同、参与求解的煤数、采购吨数都还在屏上
+    expect(
+      (screen.getByLabelText("采购总吨数") as HTMLInputElement).value,
+    ).toBe("3700");
+    expect(screen.getByRole("button", { name: /默认测试合同/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /参与求解 1 种煤/ })).toBeTruthy();
+
+    // 诊断表: 指名真凶并给出数字
+    expect(screen.getByText("灰")).toBeTruthy();
+    expect(screen.getByText("≤10.00")).toBeTruthy();
+    expect(screen.getByText("11.31")).toBeTruthy();
+    expect(screen.getByText("≤11.40")).toBeTruthy();
+
+    // 求解侧的警告照常提示
+    expect(screen.getByText("剔除 高硫煤: 缺指标 胶质")).toBeTruthy();
+
+    // 吨数是同步的, 只是没算出配方 —— 不能因为"不可行也算不可操作"就倒打一耙
+    expect(screen.queryByText(/采购量尚未与当前结果同步/)).toBeNull();
+
+    // 没有配方就没有可导出、可保存的东西, 但重试必须在
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "导出订单" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "保存方案" })).toBeNull();
+  });
+
+  // ok=true 却没有成本结构: 这不是合同不可行, "去合同放宽某项约束"是错的指路.
+  it("结果不完整时不给放宽合同的建议", async () => {
+    const incomplete = makeInfeasible([]);
+    incomplete.ok = true;
+    incomplete.reason = null;
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(incomplete)),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("✗ 结果不完整");
+
+    expect(screen.queryByText(/建议: 去「合同」放宽某项约束/)).toBeNull();
+    expect(
+      (screen.getByLabelText("采购总吨数") as HTMLInputElement).value,
+    ).toBe("3700");
+  });
+
+  it("定位不到单项约束时如实说明, 不退回一句笼统的约束冲突", async () => {
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi
+        .fn()
+        .mockResolvedValue(JSON.stringify(makeInfeasible([]))),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("✗ 不可行");
+
+    expect(
+      screen.getByText(/没有单独一项约束能解释这次不可行/),
+    ).toBeTruthy();
+    expect(
+      (screen.getByLabelText("采购总吨数") as HTMLInputElement).value,
+    ).toBe("3700");
+  });
+});

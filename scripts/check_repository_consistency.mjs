@@ -129,6 +129,7 @@ const sharedStructs = [
   [rustModelSource, "ModelSummary", "ModelSummary"],
   [rustModelSource, "IndicatorCheck", "IndicatorCheck"],
   [rustModelSource, "PetrographyCheck", "PetrographyCheck"],
+  [rustModelSource, "InfeasibleBound", "InfeasibleBound"],
   [rustModelSource, "BlendResult", "BlendResult"],
   [rustModelSource, "PenaltyTier", "PenaltyTier"],
   [rustModelSource, "Penalty", "Penalty"],

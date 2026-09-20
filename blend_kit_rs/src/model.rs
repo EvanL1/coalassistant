@@ -464,11 +464,67 @@ pub struct PetrographyCheck {
     pub refine_iterations: usize,
 }
 
+/// 不可行时的逐项诊断: 其余约束都成立的前提下, 该指标最好能做到多少.
+/// 仅在 ok == false 且能定位到单项约束时填充.
+///
+/// 刻意不复用 [`IndicatorCheck`]: 那里的 `value` 是"混合后的实际值", 而不可行时
+/// 根本没有配方. 同一字段背两种含义正是这个项目反复踩过的坑.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InfeasibleBound {
+    pub indicator: String,
+    pub label_zh: String,
+    pub direction: Direction,
+    /// 合同要求的界 (Hard 用合同界, Priced 用拒收线).
+    pub required: f64,
+    /// LP 实际执行的界: 合同界经合同判定规则折算, 再按方向扣掉 `Spec::margin`.
+    ///
+    /// 与 `required` 分开报是必须的 —— 判定是拿它做的, 而不是拿合同界.
+    /// margin 会让它比合同界更严 (合同 ≤10 / 余量 0.5 ⇒ 按 ≤9.5 执行), 截断判定
+    /// 则会让它更松 (合同 ≤10 / 一位小数截断 ⇒ 按 ≤10.0999 执行). 只报合同界的话,
+    /// 前者会出现"要求 ≤10, 最好能做到 9.8"这种看着达标却被指认为元凶的行,
+    /// 且"放宽合同到 9.8 就能可行"是假的 —— 真正要让开的是 9.5 那条线.
+    pub enforced: f64,
+    /// 本项的安全余量 (`Spec::margin`), 没配就是 0.
+    ///
+    /// 给界面区分"执行界为什么比合同界紧": 余量是用户自己设的, 判定规则不是.
+    /// 光看 `required`/`enforced` 两个数分不出成因 —— 截断判定在下限一侧同样会收紧
+    /// (合同 ≥14.95 一位小数截断后按 ≥15.0 执行), 把它说成"含安全余量"是硬编一个
+    /// 不存在的原因.
+    pub margin: f64,
+    /// 其余约束成立时该指标能达到的最优值.
+    pub achievable: f64,
+    /// 合同上这个数改成多少就能求出配方 (Priced 指的是拒收线).
+    ///
+    /// **不是差值, 也不只是算出来的.** 两层原因:
+    ///
+    /// 一, 判定规则把合同界折成执行界是阶梯函数, 按 1/10^decimals 跳档, 合同界在档内
+    /// 挪动执行界纹丝不动. 一位小数截断要够到 11.3125, 放宽到 11.2126 后执行界仍是
+    /// 11.29999; 一位小数四舍五入要够到 10.06, 放宽到 10.06 后执行界仍是 10.04999.
+    /// 两个方向都有反例, 所以只能反解到档位上.
+    ///
+    /// 二, 算对档位也不够. 放宽之后最低成本解会把这项顶到新界上, 最优点正好落在界上,
+    /// 认不认就取决于 LP 相对容限与解后复核绝对容限谁松谁紧 —— 实测同一单 11.3 不认、
+    /// 11.4 认. 所以 core 逐档真解一遍, 这里给的是**真解得出配方**的那一档.
+    ///
+    /// 换言之它回答的是"我该往合同里填几", 不是"数学下限是几"; 两者可能差一档.
+    ///
+    /// `None` = 逐档试下来没有一个档位真能解出配方 (放宽这一项是必要的, 但不够 ——
+    /// 譬如 LP 通了却卡在岩相精确复核). **宁可给 None, 也不给一个没试过的数**:
+    /// 界面照着它承诺"改成这个数就能解出来", 给不出就得说给不出.
+    #[serde(default)]
+    pub relax_to: Option<f64>,
+}
+
 /// 完整求解结果.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlendResult {
     pub ok: bool,
     pub reason: Option<String>,
+    /// 不可行时的逐项诊断. 每项都是"单独放宽它就能可行"的真凶; 空表示没有单独
+    /// 一项能解释 (冲突牵涉两项以上, 或煤池本身不够).
+    /// `#[serde(default)]`: 兼容诊断上线前的存量记录 (无此字段).
+    #[serde(default)]
+    pub infeasible_bounds: Vec<InfeasibleBound>,
     /// 配方: 煤名 → 配比. 仅含 > 1e-5 的煤.
     pub recipe: HashMap<String, f64>,
     /// 视图 A.
@@ -495,6 +551,7 @@ impl BlendResult {
         Self {
             ok: false,
             reason: Some(reason.into()),
+            infeasible_bounds: Vec::new(),
             recipe: HashMap::new(),
             cost: None,
             orders: Vec::new(),
@@ -504,5 +561,11 @@ impl BlendResult {
             quality_status: QualityStatus::NeedsReview,
             evaluation_iterations: 0,
         }
+    }
+
+    /// 附加不可行诊断. 只有"LP 本身无解"那条路径该调用 —— 诊断的推理以此为前提.
+    pub fn with_infeasible_bounds(mut self, bounds: Vec<InfeasibleBound>) -> Self {
+        self.infeasible_bounds = bounds;
+        self
     }
 }

@@ -54,6 +54,7 @@ import {
   setQuantity,
 } from "../storage";
 import { CostCard } from "./CostCard";
+import { InfeasiblePanel } from "./InfeasiblePanel";
 
 const RECIPE_COLORS = ["#0a5fff", "#7c3aed", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#8b5cf6"];
 
@@ -564,50 +565,11 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
     requestTrackerRef.current.currentRequestId,
     qtyInput,
   );
-  if (!result.ok) {
-    return (
-      <>
-        <div className="page-header">
-          <div>
-            <h1 className="page-title">今日配煤</h1>
-            <div className="page-subtitle">{contractName}</div>
-          </div>
-        </div>
-        <div
-          className="card"
-          style={{ borderLeft: "4px solid var(--c-danger)" }}
-        >
-          <div className="card-title" style={{ color: "var(--c-danger)" }}>
-            ✗ 不可行
-          </div>
-          <p style={{ margin: 0, fontSize: 13 }}>{result.reason}</p>
-          {result.warnings.length > 0 && (
-            <ul style={{ fontSize: 12, color: "var(--c-text-3)", paddingLeft: 18 }}>
-              {result.warnings.map((w, i) => (
-                <li key={i}>{w}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <p style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}>
-          建议: 去「合同」放宽某项约束, 或去「煤池」启用更多煤源.
-        </p>
-        <div className="action-row">
-          <button
-            className="btn btn-secondary"
-            onClick={() => runSolve(false)}
-            disabled={recompute === "running"}
-          >
-            {recompute === "running" ? "重算中..." : recompute === "done" ? "✓ 已重算" : "重试"}
-          </button>
-        </div>
-      </>
-    );
-  }
-
-  const cost = result.cost!;
+  // 不可行不再提前 return: 页头、输入摘要、报价时效这些上下文与求解成败无关,
+  // 而恰恰是用户排查不可行时唯一的抓手 —— 只把结果区换成诊断面板.
+  const cost = result.ok ? result.cost ?? null : null;
   // 总额展示优先 total_net (真实应付合计); 没算扣款条款前两者相等.
-  const totalCost = cost.total_net ?? cost.total_cif;
+  const totalCost = cost ? cost.total_net ?? cost.total_cif : null;
   const contractChecks = result.indicator_check.filter(isContractIndicator);
   const totalIndicators = contractChecks.length;
   const passing = contractChecks.filter(isIndicatorPassing).length;
@@ -676,7 +638,10 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         <span>吨</span>
       </div>
 
-      {(refreshing || !actionsEnabled) && (
+      {/* 吨数未同步的提示只在有配方时有意义: isSnapshotActionable 对不可行结果一律
+          返回 false, 不加 result.ok 这一半, 每次不可行都会多出一条"采购量尚未同步"
+          的假提示 —— 吨数明明是同步的, 只是没算出配方. 重算中的提示则两种情况都要. */}
+      {(refreshing || (result.ok && !actionsEnabled)) && (
         <div
           role="status"
           style={{
@@ -694,6 +659,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </div>
       )}
 
+      {cost ? (
       <div className="today-dashboard">
       <div className="today-cost">
         <CostCard cost={cost} orphanedGuarantees={snapshot.orphanedGuarantees ?? []} />
@@ -899,6 +865,29 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </div>
       </div>
       </div>
+      ) : (
+        <>
+          <InfeasiblePanel result={result} />
+          {/* 报价时效与成败无关, 照常提示; 指数推算要 cost 才算得出, 这里没有. */}
+          {price?.oldestQuotedAt && (
+            <p
+              className={quoteStale ? "cost-warn" : undefined}
+              style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}
+            >
+              {quoteStale && "⚠ "}
+              报价停留在 {price.oldestQuotedAt}
+              {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
+            </p>
+          )}
+          {/* 只在真·不可行时给这条建议: ok 却没有成本结构是结果不完整, 放宽合同
+              解决不了, 那时这句是错的指路. */}
+          {!result.ok && (
+            <p style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}>
+              建议: 去「合同」放宽某项约束, 或去「煤池」启用更多煤源.
+            </p>
+          )}
+        </>
+      )}
 
       {result.warnings.length > 0 && (
         <div
@@ -926,22 +915,29 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             ? "重算中..."
             : recompute === "done"
             ? "✓ 已重算"
-            : "重新计算"}
+            : result.ok
+            ? "重新计算"
+            : "重试"}
         </button>
-        <button
-          className="btn btn-secondary"
-          onClick={exportOrder}
-          disabled={!actionsEnabled}
-        >
-          {exportMsg ?? "导出订单"}
-        </button>
-        <button
-          className="btn btn-primary today-save"
-          onClick={() => void saveToHistory()}
-          disabled={!actionsEnabled || saving}
-        >
-          {saving ? "保存中..." : saveMsg ?? "保存方案"}
-        </button>
+        {/* 没有配方就没有可导出、可保存的东西, 这两个按钮只在成功时出现. */}
+        {result.ok && (
+          <>
+            <button
+              className="btn btn-secondary"
+              onClick={exportOrder}
+              disabled={!actionsEnabled}
+            >
+              {exportMsg ?? "导出订单"}
+            </button>
+            <button
+              className="btn btn-primary today-save"
+              onClick={() => void saveToHistory()}
+              disabled={!actionsEnabled || saving}
+            >
+              {saving ? "保存中..." : saveMsg ?? "保存方案"}
+            </button>
+          </>
+        )}
       </div>
     </>
   );

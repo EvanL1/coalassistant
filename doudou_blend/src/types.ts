@@ -219,9 +219,50 @@ export interface PetrographyCheck {
   refine_iterations: number;
 }
 
+/**
+ * 不可行时的逐项诊断: 其余约束都成立的前提下, 该指标最好能做到多少.
+ * 刻意不复用 IndicatorCheck —— 那里的 value 是"混合后的实际值", 不可行时没有配方.
+ */
+export interface InfeasibleBound {
+  indicator: string;
+  label_zh: string;
+  direction: Direction;
+  /** 合同要求的界 (Hard 用合同界, Priced 用拒收线). */
+  required: number;
+  /**
+   * LP 实际执行的界: 合同界经判定规则折算, 再按方向扣掉安全余量 margin.
+   * margin 会让它比合同界更严 (合同 ≤10 / 余量 0.5 ⇒ 按 ≤9.5 执行), 截断判定
+   * 会让它更松 (合同 ≤10 / 一位小数截断 ⇒ 按 ≤10.0999 执行).
+   * 「差多少」按两条界里更紧的那条算 —— 那才是真正卡住这一单的线.
+   */
+  enforced: number;
+  /**
+   * 本项的安全余量 (Spec.margin), 没配就是 0.
+   * 用来区分执行界为什么比合同界紧: 余量是用户自己设的, 判定规则不是 —— 截断判定在
+   * 下限一侧同样收紧 (合同 ≥14.95 按 ≥15.0 执行), 说成"含安全余量"就是编原因.
+   */
+  margin: number;
+  /** 其余约束成立时该指标能达到的最优值. */
+  achievable: number;
+  /**
+   * 合同上这个数改成多少就能求出配方 (Priced 指的是拒收线).
+   * core 逐档真解验证过, 不是 achievable 与某条界的差值 —— 判定规则是阶梯函数,
+   * 差值推出来的数往往落在同一档内, 改了等于没改.
+   *
+   * null = 逐档试下来没有一个数真能解出配方 (放宽这一项必要但不充分).
+   * 这时界面只能说"非放宽它不可", 不能承诺某个数管用.
+   */
+  relax_to?: number | null;
+}
+
 export interface BlendResult {
   ok: boolean;
   reason?: string | null;
+  /**
+   * 不可行诊断: 每项都是"单独放宽它就能可行"的真凶.
+   * 空 = 没有单独一项能解释 (冲突牵涉两项以上, 或煤池本身不够); 旧历史结果亦无此字段.
+   */
+  infeasible_bounds?: InfeasibleBound[];
   recipe: Record<string, number>;
   cost?: CostBreakdown | null;
   orders: OrderItem[];
