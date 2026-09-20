@@ -879,9 +879,13 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
               {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
             </p>
           )}
-          <p style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}>
-            建议: 去「合同」放宽某项约束, 或去「煤池」启用更多煤源.
-          </p>
+          {/* 只在真·不可行时给这条建议: ok 却没有成本结构是结果不完整, 放宽合同
+              解决不了, 那时这句是错的指路. */}
+          {!result.ok && (
+            <p style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}>
+              建议: 去「合同」放宽某项约束, 或去「煤池」启用更多煤源.
+            </p>
+          )}
         </>
       )}
 

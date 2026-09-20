@@ -236,8 +236,20 @@ export interface InfeasibleBound {
    * 「差多少」按两条界里更紧的那条算 —— 那才是真正卡住这一单的线.
    */
   enforced: number;
+  /**
+   * 本项的安全余量 (Spec.margin), 没配就是 0.
+   * 用来区分执行界为什么比合同界紧: 余量是用户自己设的, 判定规则不是 —— 截断判定在
+   * 下限一侧同样收紧 (合同 ≥14.95 按 ≥15.0 执行), 说成"含安全余量"就是编原因.
+   */
+  margin: number;
   /** 其余约束成立时该指标能达到的最优值. */
   achievable: number;
+  /**
+   * 合同上这个数改成多少就能求出配方 (Priced 指的是拒收线).
+   * core 逐档真解验证过, 不是 achievable 与某条界的差值 —— 判定规则是阶梯函数,
+   * 差值推出来的数往往落在同一档内, 改了等于没改.
+   */
+  relax_to: number;
 }
 
 export interface BlendResult {

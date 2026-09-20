@@ -45,6 +45,17 @@ pub fn solve(request: &BlendRequest) -> BlendResult {
 ///
 /// `ok` 只表示是否得到配方；可信度由 `quality_status` 表示。
 pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) -> BlendResult {
+    solve_internal(request, evaluators, true)
+}
+
+/// `diagnose = false` 的那一路是给 [`relax_target`] 的试解用的: 它要拿真流程验证
+/// "合同改成这个数到底解不解得出来", 但自己不能再触发诊断 —— 否则诊断里试解、
+/// 试解里又诊断, 一层套一层.
+fn solve_internal(
+    request: &BlendRequest,
+    evaluators: &EvaluatorSet,
+    diagnose: bool,
+) -> BlendResult {
     if let Err(reason) = validate_request(request) {
         return BlendResult::infeasible(&reason, Vec::new());
     }
@@ -222,15 +233,11 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
                     petro_proxy_lower.is_none() && petro_proxy_upper.is_none(),
                     "未经岩相修复就走到这里, 代理界不该已被收紧"
                 );
-                let bounds = diagnose_infeasible(
-                    &kept,
-                    &active_specs,
-                    request,
-                    &formulas,
-                    evaluators,
-                    petro_proxy_lower,
-                    petro_proxy_upper,
-                );
+                let bounds = if diagnose {
+                    diagnose_infeasible(&kept, &active_specs, request, &formulas, evaluators)
+                } else {
+                    Vec::new()
+                };
                 BlendResult::infeasible("约束冲突, LP 不可行", warnings)
                     .with_infeasible_bounds(bounds)
             };
@@ -684,6 +691,117 @@ fn enforced_bounds(
     limits
 }
 
+/// 反解"合同上那个数要改成多少才真能解出配方", 并**逐档真解一遍**确认.
+///
+/// 两件事都不能省:
+///
+/// 一, 不能用差值推. `effective_upper`/`effective_lower` 把合同界折成执行界是阶梯
+/// 函数, 按 1/10^decimals 跳档, 合同界在同一档内挪动执行界一动不动. 拿"差多少"去
+/// 放宽, 两个方向都会落回原档 —— 截断向要够到 11.3125 却只放宽到 11.2126, 四舍五入
+/// 向要够到 10.06 却只放宽到 10.06, 执行界都没挪窝.
+///
+/// 二, 光算对判定规则这一层还不够, 必须真解. 放宽某项之后, 最低成本解会把这项顶到
+/// 新界上 (便宜煤总是更差), 于是最优点正好落在界上; 这时 LP 的相对容限
+/// (`FEASIBILITY_TOLERANCE·(1+量级)`) 与解后复核的绝对容限 (`CHECK_TOLERANCE`) 谁松谁紧
+/// 就决定了这一单认不认 —— 实测过 A≤11.3 时解落在界外 1.05e-8, LP 认、复核不认,
+/// 整单被判不可行. 差一档 (11.4) 又恰好认了. 这个差别算不出来, 只能解出来.
+///
+/// 所以这里逐档往外试, 每档都跑一遍真流程 (`diagnose = false`, 防止试解里再诊断),
+/// 第一个真解得出配方的档位才是答案. 全都试不通时退回判定规则层面的最小值.
+fn relax_target(
+    spec: &Spec,
+    request: &BlendRequest,
+    models: &EvaluatorSet,
+    direction: Direction,
+    achievable: f64,
+) -> f64 {
+    let rule = acceptance_rule(spec, request.truncate_decimal);
+    let margin = spec.margin.unwrap_or(0.0);
+    let tolerance = rule.tolerance.max(0.0);
+    let fits = |bound: f64| match direction {
+        Direction::Upper => effective_upper(bound, &rule) - margin >= achievable,
+        Direction::Lower => effective_lower(bound, &rule) + margin <= achievable,
+        Direction::Range => false,
+    };
+    let (target, sign) = match direction {
+        Direction::Upper => (achievable + margin, 1.0),
+        _ => (achievable - margin, -1.0),
+    };
+
+    let (start, step) = match rule.decimals.filter(|_| rule.mode != AcceptanceMode::Raw) {
+        Some(decimals) => {
+            let scale = 10_f64.powi(i32::from(decimals.min(6)));
+            let aligned = match direction {
+                Direction::Upper => (target * scale).floor() / scale,
+                _ => (target * scale).ceil() / scale,
+            };
+            (aligned, 1.0 / scale)
+        }
+        // Raw: 执行界 = 合同界 ± tolerance, 连续可逆; 步长只用来兜浮点边界.
+        None => (
+            target - sign * tolerance,
+            4.0 * f64::EPSILON * target.abs().max(1.0),
+        ),
+    };
+
+    let mut arithmetic_minimum = None;
+    for offset in 0..=RELAX_SEARCH_STEPS {
+        let candidate = start + sign * step * f64::from(offset);
+        // 先过判定规则这一关: 连执行界都容不下 achievable 的档位, 不必浪费一次求解.
+        if !fits(candidate) {
+            continue;
+        }
+        if arithmetic_minimum.is_none() {
+            arithmetic_minimum = Some(candidate);
+        }
+        if solve_internal(
+            &request_with_bound(request, spec, direction, candidate),
+            models,
+            false,
+        )
+        .ok
+        {
+            return candidate;
+        }
+    }
+    // 兜底: 判定规则层面的最小值. 走到这里说明连试 RELAX_SEARCH_STEPS 档都没解出来,
+    // 与其编一个数, 不如给出数学上的下限.
+    arithmetic_minimum.unwrap_or(start + sign * step * f64::from(RELAX_SEARCH_STEPS))
+}
+
+/// 放宽档位最多往外试几档. 判定规则本身最多差两档 (Round 最坏情况
+/// `effective_upper(b) >= b − 量子/2 − eps`), 余下的留给"落在界上、解后复核不认"
+/// 那种需要再让一档的情况.
+const RELAX_SEARCH_STEPS: u8 = 6;
+
+/// 把某条 spec 的界改成 `bound` 之后的请求副本, 供试解用.
+///
+/// 与展示口径一致: Priced 改的是拒收线 (它才是硬的), 其余改合同上下界.
+fn request_with_bound(
+    request: &BlendRequest,
+    target: &Spec,
+    direction: Direction,
+    bound: f64,
+) -> BlendRequest {
+    let mut relaxed = request.clone();
+    for spec in relaxed
+        .specs
+        .iter_mut()
+        .filter(|spec| spec.enabled && spec.indicator == target.indicator)
+    {
+        if let (Enforcement::Priced, Some(penalty)) = (spec.enforcement, spec.penalty.as_mut()) {
+            penalty.reject = bound;
+            continue;
+        }
+        match direction {
+            Direction::Upper => spec.max = Some(bound),
+            Direction::Lower => spec.min = Some(bound),
+            Direction::Range => {}
+        }
+    }
+    relaxed
+}
+
 /// 组装 LP: Hard 行 + 已验证模型训练域 + 计价档位块.
 ///
 /// 不可行诊断复用它: `relaxed` 指定那条被松开的 spec 在 `specs` 里的下标, 得到的就是
@@ -787,9 +905,10 @@ fn diagnose_infeasible(
     request: &BlendRequest,
     formulas: &HashMap<String, MetricFormula>,
     models: &EvaluatorSet,
-    petro_proxy_lower: Option<f64>,
-    petro_proxy_upper: Option<f64>,
 ) -> Vec<InfeasibleBound> {
+    // 岩相启发式代理只在修复迭代里存在, 而那条路不跑诊断 (见调用处), 故这里恒为 None:
+    // 诊断面对的永远是"按合同界建的那个 LP".
+    let (petro_proxy_lower, petro_proxy_upper) = (None, None);
     let mut culprits = Vec::new();
     for (index, spec) in specs.iter().enumerate() {
         let limits = enforced_bounds(spec, request, petro_proxy_lower, petro_proxy_upper);
@@ -832,7 +951,9 @@ fn diagnose_infeasible(
                     direction,
                     required,
                     enforced,
+                    margin: spec.margin.unwrap_or(0.0),
                     achievable,
+                    relax_to: relax_target(spec, request, models, direction, achievable),
                 });
             }
         }
@@ -1813,6 +1934,165 @@ mod tests {
             "最低只能到 9.0, 实得 {}",
             bound.achievable
         );
+    }
+
+    /// 按诊断给的"放宽到"改合同, 再解一次.
+    ///
+    /// relax_to 宣称的是"合同上这个数改成它就能求出配方" —— 唯一说得过去的验收就是
+    /// 真改真解. 前两版分别用"差 achievable−合同界"和"差 achievable−执行界"推,
+    /// 都没有真解一遍, 于是两种推法各自的反例都溜了过去.
+    fn resolve_after_relaxing(request: &BlendRequest, bound: &InfeasibleBound) -> BlendResult {
+        let mut relaxed = request.clone();
+        for spec in relaxed
+            .specs
+            .iter_mut()
+            .filter(|spec| spec.indicator == bound.indicator)
+        {
+            // Priced 的硬界是拒收线, 放宽的也该是它.
+            if let (Enforcement::Priced, Some(penalty)) = (spec.enforcement, spec.penalty.as_mut())
+            {
+                penalty.reject = bound.relax_to;
+                continue;
+            }
+            match bound.direction {
+                Direction::Upper => spec.max = Some(bound.relax_to),
+                Direction::Lower => spec.min = Some(bound.relax_to),
+                Direction::Range => {}
+            }
+        }
+        solve(&relaxed)
+    }
+
+    /// 用户线上那一单: 合同灰分改到多少才真解得出配方.
+    ///
+    /// 判定规则层面的最小值是 **11.3** —— 一位小数截断下执行界 = (floor(b×10)+1)/10 − eps,
+    /// 要容下 11.3125 就需要 floor(b×10) ≥ 113 ⇒ b ≥ 11.3 (11.2 落回 11.29999 那一档).
+    ///
+    /// 但 relax_to 给的是 **11.4**, 因为 11.3 真解一遍解不出来: 放宽之后最低成本解会把
+    /// 灰分顶到新界上, 这一单的最优点落在界外 1.05e-8 —— LP 的相对容限认, 解后复核的
+    /// 绝对容限 CHECK_TOLERANCE 不认, 于是整单仍判不可行. 下面第二条断言把这件事钉住:
+    /// 哪天那个容限口径对齐了, 这条会先红, 那时 relax_to 就该回到 11.3.
+    ///
+    /// 用户问的是"我该往合同里填几", 不是"数学下限是几", 所以这里必须给真解得出的那个数.
+    #[test]
+    fn test_relax_to_is_the_bound_that_actually_solves() {
+        let request = request_of(
+            real_case_coals(),
+            vec![
+                Spec::upper("A", 10.0),
+                Spec::upper("S", 1.0),
+                Spec::upper("V", 28.0),
+                Spec::lower("Y", 15.0),
+                Spec::lower("G", 85.0),
+            ],
+        );
+        let result = solve(&request);
+        let ash = &result.infeasible_bounds[0];
+
+        assert!(
+            resolve_after_relaxing(&request, ash).ok,
+            "改成 relax_to={} 之后必须真的解得出配方",
+            ash.relax_to
+        );
+        assert!(
+            (ash.relax_to - 11.4).abs() < 1e-9,
+            "应给真解得出的 11.4, 实得 {}",
+            ash.relax_to
+        );
+
+        // 判定规则层面的下限 11.3 解不出来 —— 这正是 relax_to 不能只算不解的原因.
+        let mut arithmetic_minimum = ash.clone();
+        arithmetic_minimum.relax_to = 11.3;
+        assert!(
+            !resolve_after_relaxing(&request, &arithmetic_minimum).ok,
+            "11.3 若已能解出, 说明解后复核的容限口径变了, relax_to 应回到 11.3"
+        );
+
+        // 反例钉死: 差值法给出的 11.2126 连执行界那一档都没挪动.
+        let mut gap_based = ash.clone();
+        gap_based.relax_to = ash.achievable - (ash.enforced - ash.required);
+        assert!(
+            !resolve_after_relaxing(&request, &gap_based).ok,
+            "差值推出来的 {} 落在同一档内, 本就解不出来",
+            gap_based.relax_to
+        );
+    }
+
+    /// 四舍五入判定下的反例: 放宽到 achievable 本身不够, 得跳到下一档.
+    /// 合同 ≤10 在 Round(1) 下执行界是 10.04999; 煤池最低 10.06, 放宽到 10.06 后
+    /// 执行界还是 10.04999 —— 档位没挪. 正解是 10.1.
+    #[test]
+    fn test_round_acceptance_relax_to_jumps_a_whole_step() {
+        let mut ash = Spec::upper("A", 10.0);
+        ash.acceptance = Some(AcceptanceRule {
+            mode: AcceptanceMode::Round,
+            decimals: Some(1),
+            tolerance: 0.0,
+        });
+        let request = BlendRequest {
+            coals: vec![
+                assay_coal("略高灰", (0.8, 10.06, 24.0, 88.0, 16.0, 10.0), 1000.0),
+                assay_coal("高灰", (0.8, 12.0, 24.0, 88.0, 16.0, 10.0), 900.0),
+            ],
+            specs: vec![ash],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+
+        assert!(!result.ok, "10.06 越过四舍五入执行界 10.04999");
+        let bound = &result.infeasible_bounds[0];
+        assert!(
+            (bound.relax_to - 10.1).abs() < 1e-9,
+            "应跳到下一档 10.1, 实得 {}",
+            bound.relax_to
+        );
+        assert!(
+            resolve_after_relaxing(&request, bound).ok,
+            "10.1 必须真能解"
+        );
+
+        let mut naive = bound.clone();
+        naive.relax_to = bound.achievable;
+        assert!(
+            !resolve_after_relaxing(&request, &naive).ok,
+            "放宽到 achievable 本身仍在同一档, 解不出来"
+        );
+    }
+
+    /// 截断判定在**下限**一侧是收紧的, 且与安全余量无关.
+    /// 合同 ≥14.95 一位小数截断后按 ≥15.0 执行 (ceil): 没有任何 margin, 执行界却比
+    /// 合同界严. 所以"执行界为什么更紧"不能按方向猜, 只能看 margin 这个成因字段.
+    #[test]
+    fn test_truncate_tightens_lower_bound_without_any_margin() {
+        let mut cohesion = Spec::lower("Y", 14.95);
+        cohesion.acceptance = Some(AcceptanceRule {
+            mode: AcceptanceMode::Truncate,
+            decimals: Some(1),
+            tolerance: 0.0,
+        });
+        let request = BlendRequest {
+            coals: vec![
+                assay_coal("略低胶质", (0.8, 9.0, 24.0, 88.0, 14.98, 10.0), 1000.0),
+                assay_coal("更低胶质", (0.8, 9.0, 24.0, 88.0, 14.0, 10.0), 900.0),
+            ],
+            specs: vec![cohesion],
+            total_quantity: None,
+            truncate_decimal: false,
+        };
+        let result = solve(&request);
+
+        assert!(!result.ok, "最高 14.98 够不到截断后的 15.0");
+        let bound = &result.infeasible_bounds[0];
+        assert_eq!(bound.required, 14.95);
+        assert_eq!(bound.enforced, 15.0, "截断把下限抬到了 15.0");
+        assert_eq!(bound.margin, 0.0, "这里一点安全余量都没设");
+        assert!(
+            (bound.relax_to - 14.9).abs() < 1e-9,
+            "要 ceil(b×10) ≤ 149, 即 b ≤ 14.9, 实得 {}",
+            bound.relax_to
+        );
+        assert!(resolve_after_relaxing(&request, bound).ok);
     }
 
     /// 可行的一单不带诊断: 诊断只跑在不可行这条路上.

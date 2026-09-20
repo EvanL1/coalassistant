@@ -588,7 +588,9 @@ describe("TodayScreen 不可行", () => {
               direction: "Upper",
               required: 10,
               enforced: 10,
+              margin: 0,
               achievable: 11.3125,
+              relax_to: 11.4,
             },
           ]),
         ),
@@ -610,6 +612,7 @@ describe("TodayScreen 不可行", () => {
     expect(screen.getByText("灰")).toBeTruthy();
     expect(screen.getByText("≤10.00")).toBeTruthy();
     expect(screen.getByText("11.31")).toBeTruthy();
+    expect(screen.getByText("≤11.40")).toBeTruthy();
 
     // 求解侧的警告照常提示
     expect(screen.getByText("剔除 高硫煤: 缺指标 胶质")).toBeTruthy();
@@ -621,6 +624,25 @@ describe("TodayScreen 不可行", () => {
     expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "导出订单" })).toBeNull();
     expect(screen.queryByRole("button", { name: "保存方案" })).toBeNull();
+  });
+
+  // ok=true 却没有成本结构: 这不是合同不可行, "去合同放宽某项约束"是错的指路.
+  it("结果不完整时不给放宽合同的建议", async () => {
+    const incomplete = makeInfeasible([]);
+    incomplete.ok = true;
+    incomplete.reason = null;
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(incomplete)),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("✗ 结果不完整");
+
+    expect(screen.queryByText(/建议: 去「合同」放宽某项约束/)).toBeNull();
+    expect(
+      (screen.getByLabelText("采购总吨数") as HTMLInputElement).value,
+    ).toBe("3700");
   });
 
   it("定位不到单项约束时如实说明, 不退回一句笼统的约束冲突", async () => {

@@ -13,30 +13,26 @@ import type { BlendResult, InfeasibleBound } from "../types";
  * 说明, 不硬凑一个指标让用户白跑一趟.
  */
 
-/** 合同界与执行界里更紧的那条 —— 真正卡住这一单的线. */
-function operativeBound(bound: InfeasibleBound): number {
-  return bound.direction === "Upper"
-    ? Math.min(bound.required, bound.enforced)
-    : Math.max(bound.required, bound.enforced);
+/**
+ * 执行界比合同界更紧时才需要解释 —— 那时这一行看着已经达标, 不说破就是工具在自相矛盾.
+ * 判定规则放宽的那一侧 (截断把 ≤10 放成按 ≤10.0999 执行) 不必打扰用户.
+ */
+function tighterThanContract(bound: InfeasibleBound): boolean {
+  const gap =
+    bound.direction === "Upper"
+      ? bound.required - bound.enforced
+      : bound.enforced - bound.required;
+  return gap > 0.005;
 }
 
 /**
- * 差多少: 按 operativeBound 算, 不按合同界.
- *
- * 有安全余量时合同界够得到、执行界够不到, 按合同界算会得到 0 或负数, 界面就成了
- * "这一项看着达标, 却被说成是元凶". 按执行界算出来的才是真正要让开的量, 而且
- * 合同界放宽同样的量即可 (执行界随合同界平移).
+ * 为什么比合同界紧, 只能看 margin, 不能看方向.
+ * 截断判定在下限一侧同样会收紧 (合同 ≥14.95 按 ≥15.0 执行) 且一点余量都没设,
+ * 那时印"含安全余量"就是给用户编了一个不存在的原因 —— 与"到厂价/实际成本"那次
+ * 标签印错是同一类错.
  */
-function shortfall(bound: InfeasibleBound): number {
-  const operative = operativeBound(bound);
-  return bound.direction === "Upper"
-    ? bound.achievable - operative
-    : operative - bound.achievable;
-}
-
-/** 执行界比合同界更紧时才需要解释; 判定规则放宽的那一侧不必打扰用户. */
-function tighterThanContract(bound: InfeasibleBound): boolean {
-  return Math.abs(operativeBound(bound) - bound.required) > 0.005;
+function tighteningCause(bound: InfeasibleBound): string {
+  return bound.margin > 0 ? `含 ${bound.margin} 安全余量` : "按合同判定规则";
 }
 
 /** 化验单分辨率是 0.01, 诊断表按这个精度读就够 (与混合指标的 4 位展示无关). */
@@ -69,8 +65,8 @@ export function InfeasiblePanel({ result }: { result: BlendResult }) {
       {bounds.length > 0 && (
         <>
           <p style={{ margin: "0 0 8px", fontSize: 12, color: "var(--c-text-3)" }}>
-            其余约束都成立时, 下面这些项达不到执行中的界. 把其中任意一项按「差多少」
-            放宽, 就能求出配方.
+            其余约束都成立时, 下面这些项达不到要求. 把其中任意一项改成「放宽到」那一列
+            的数, 就能求出配方.
           </p>
           <table
             className="infeasible-table"
@@ -83,7 +79,7 @@ export function InfeasiblePanel({ result }: { result: BlendResult }) {
                 </th>
                 <th style={{ ...cellStyle, borderTop: "none" }}>合同要求</th>
                 <th style={{ ...cellStyle, borderTop: "none" }}>最好能做到</th>
-                <th style={{ ...cellStyle, borderTop: "none" }}>差多少</th>
+                <th style={{ ...cellStyle, borderTop: "none" }}>放宽到</th>
               </tr>
             </thead>
             <tbody>
@@ -99,11 +95,11 @@ export function InfeasiblePanel({ result }: { result: BlendResult }) {
                         {sign}
                         {formatBound(bound.required)}
                       </div>
-                      {/* 余量收紧时必须说破: 否则这一行看着已经达标, 用户会以为
+                      {/* 收紧时必须说破: 否则这一行看着已经达标, 用户会以为
                           工具在胡说, 也不知道真正要让开的是哪条线. */}
                       {tighterThanContract(bound) && (
                         <div style={{ color: "var(--c-text-3)" }}>
-                          含安全余量, 按 {sign}
+                          {tighteningCause(bound)}, 按 {sign}
                           {formatBound(bound.enforced)} 执行
                         </div>
                       )}
@@ -111,7 +107,10 @@ export function InfeasiblePanel({ result }: { result: BlendResult }) {
                     <td style={{ ...cellStyle, color: "var(--c-danger)" }}>
                       {formatBound(bound.achievable)}
                     </td>
-                    <td style={cellStyle}>{formatBound(shortfall(bound))}</td>
+                    <td style={cellStyle}>
+                      {sign}
+                      {formatBound(bound.relax_to)}
+                    </td>
                   </tr>
                 );
               })}

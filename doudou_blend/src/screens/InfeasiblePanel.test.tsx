@@ -45,7 +45,9 @@ describe("InfeasiblePanel", () => {
             direction: "Upper",
             required: 10,
             enforced: 10,
+            margin: 0,
             achievable: 11.3125,
+            relax_to: 11.4,
           },
           {
             indicator: "G",
@@ -53,14 +55,16 @@ describe("InfeasiblePanel", () => {
             direction: "Lower",
             required: 85,
             enforced: 85,
+            margin: 0,
             achievable: 78,
+            relax_to: 77.9,
           },
         ])}
       />,
     );
 
-    expect(rowCells("灰")).toEqual(["灰", "≤10.00", "11.31", "1.31"]);
-    expect(rowCells("粘结")).toEqual(["粘结", "≥85.00", "78.00", "7.00"]);
+    expect(rowCells("灰")).toEqual(["灰", "≤10.00", "11.31", "≤11.40"]);
+    expect(rowCells("粘结")).toEqual(["粘结", "≥85.00", "78.00", "≥77.90"]);
   });
 
   /**
@@ -68,7 +72,7 @@ describe("InfeasiblePanel", () => {
    * 真正卡住的是 ≤8 那条线. 不说破的话, 这一行读起来就是工具在自相矛盾;
    * 差值也必须按执行界算, 否则是 0.00, 用户不知道该放宽多少.
    */
-  it("安全余量收紧执行界时说破那条线, 差值按执行界算", () => {
+  it("安全余量收紧执行界时说破那条线, 并给出该填的数", () => {
     render(
       <InfeasiblePanel
         result={infeasible([
@@ -78,7 +82,9 @@ describe("InfeasiblePanel", () => {
             direction: "Upper",
             required: 9,
             enforced: 8,
+            margin: 1,
             achievable: 9,
+            relax_to: 10,
           },
         ])}
       />,
@@ -86,9 +92,9 @@ describe("InfeasiblePanel", () => {
 
     expect(rowCells("灰")).toEqual([
       "灰",
-      "≤9.00含安全余量, 按 ≤8.00 执行",
+      "≤9.00含 1 安全余量, 按 ≤8.00 执行",
       "9.00",
-      "1.00",
+      "≤10.00",
     ]);
   });
 
@@ -104,14 +110,47 @@ describe("InfeasiblePanel", () => {
             direction: "Upper",
             required: 10,
             enforced: 10.0999,
+            margin: 0,
             achievable: 11.3125,
+            relax_to: 11.4,
           },
         ])}
       />,
     );
 
-    expect(rowCells("灰")).toEqual(["灰", "≤10.00", "11.31", "1.31"]);
+    expect(rowCells("灰")).toEqual(["灰", "≤10.00", "11.31", "≤11.40"]);
     expect(screen.queryByText(/按 ≤10.10 执行/)).toBeNull();
+  });
+
+  /**
+   * 截断判定在下限一侧会把 ≥14.95 抬成按 ≥15.0 执行 —— 收紧了, 但一点安全余量都没设.
+   * 这时印"含安全余量"是给用户编一个不存在的原因, 成因只能看 margin, 不能按方向猜.
+   */
+  it("判定规则收紧执行界时按成因说话, 不冒充安全余量", () => {
+    render(
+      <InfeasiblePanel
+        result={infeasible([
+          {
+            indicator: "Y",
+            label_zh: "胶质",
+            direction: "Lower",
+            required: 14.95,
+            enforced: 15,
+            margin: 0,
+            achievable: 14.98,
+            relax_to: 14.9,
+          },
+        ])}
+      />,
+    );
+
+    expect(rowCells("胶质")).toEqual([
+      "胶质",
+      "≥14.95按合同判定规则, 按 ≥15.00 执行",
+      "14.98",
+      "≥14.90",
+    ]);
+    expect(screen.queryByText(/安全余量/)).toBeNull();
   });
 
   it("定位不到单项约束时直说, 不硬凑真凶", () => {
