@@ -464,11 +464,32 @@ pub struct PetrographyCheck {
     pub refine_iterations: usize,
 }
 
+/// 不可行时的逐项诊断: 其余约束都成立的前提下, 该指标最好能做到多少.
+/// 仅在 ok == false 且能定位到单项约束时填充.
+///
+/// 刻意不复用 [`IndicatorCheck`]: 那里的 `value` 是"混合后的实际值", 而不可行时
+/// 根本没有配方. 同一字段背两种含义正是这个项目反复踩过的坑.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InfeasibleBound {
+    pub indicator: String,
+    pub label_zh: String,
+    pub direction: Direction,
+    /// 合同要求的界 (Hard 用合同界, Priced 用拒收线).
+    pub required: f64,
+    /// 其余约束成立时该指标能达到的最优值.
+    pub achievable: f64,
+}
+
 /// 完整求解结果.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlendResult {
     pub ok: bool,
     pub reason: Option<String>,
+    /// 不可行时的逐项诊断. 每项都是"单独放宽它就能可行"的真凶; 空表示没有单独
+    /// 一项能解释 (冲突牵涉两项以上, 或煤池本身不够).
+    /// `#[serde(default)]`: 兼容诊断上线前的存量记录 (无此字段).
+    #[serde(default)]
+    pub infeasible_bounds: Vec<InfeasibleBound>,
     /// 配方: 煤名 → 配比. 仅含 > 1e-5 的煤.
     pub recipe: HashMap<String, f64>,
     /// 视图 A.
@@ -495,6 +516,7 @@ impl BlendResult {
         Self {
             ok: false,
             reason: Some(reason.into()),
+            infeasible_bounds: Vec::new(),
             recipe: HashMap::new(),
             cost: None,
             orders: Vec::new(),
@@ -504,5 +526,11 @@ impl BlendResult {
             quality_status: QualityStatus::NeedsReview,
             evaluation_iterations: 0,
         }
+    }
+
+    /// 附加不可行诊断. 只有"LP 本身无解"那条路径该调用 —— 诊断的推理以此为前提.
+    pub fn with_infeasible_bounds(mut self, bounds: Vec<InfeasibleBound>) -> Self {
+        self.infeasible_bounds = bounds;
+        self
     }
 }

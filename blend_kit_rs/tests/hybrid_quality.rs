@@ -328,3 +328,70 @@ fn test_advisory_only_result_is_estimated_not_verified() {
     assert_eq!(result["ok"], true);
     assert_eq!(result["quality_status"], "Estimated");
 }
+
+/// 化验单六项齐全、不含 petro/CSR 的煤, 与前端实际发来的请求一致.
+fn assay_coal(name: &str, assay: [f64; 6], fob: f64) -> Value {
+    let [s, a, v, g, y, m] = assay;
+    json!({
+        "name": name,
+        "props": {"S": s, "A": a, "V": v, "G": g, "Y": y, "M": m},
+        "fob": fob,
+        "frt": 0.0
+    })
+}
+
+/// 用户线上那一单: 不可行诊断必须原样穿过 JSON 边界 —— 前端读的就是这几个字段名.
+#[test]
+fn test_infeasible_diagnosis_crosses_the_json_boundary() {
+    let result = solve(json!({
+        "coals": [
+            assay_coal("兴无", [2.1, 8.5, 18.0, 70.0, 18.0, 12.0], 2400.0),
+            assay_coal("第三", [0.73, 12.14, 34.0, 85.0, 15.0, 12.0], 1550.0),
+            assay_coal("第二", [0.78, 11.5, 23.0, 86.0, 15.0, 12.0], 2125.0),
+            assay_coal("第一", [1.0, 13.85, 21.0, 85.0, 15.0, 12.0], 2465.0)
+        ],
+        "specs": [
+            {"indicator": "A", "direction": "Upper", "max": 10.0},
+            {"indicator": "S", "direction": "Upper", "max": 1.0},
+            {"indicator": "V", "direction": "Upper", "max": 28.0},
+            {"indicator": "Y", "direction": "Lower", "min": 15.0},
+            {"indicator": "G", "direction": "Lower", "min": 85.0}
+        ],
+        "total_quantity": 3700.0,
+        "truncate_decimal": true
+    }));
+
+    assert_eq!(result["ok"], false);
+    let bounds = result["infeasible_bounds"]
+        .as_array()
+        .expect("不可行结果必须带 infeasible_bounds 数组");
+    assert_eq!(bounds.len(), 1, "只有灰分单独放宽能救活: {bounds:?}");
+    assert_eq!(bounds[0]["indicator"], "A");
+    assert_eq!(bounds[0]["label_zh"], "灰");
+    assert_eq!(bounds[0]["direction"], "Upper");
+    assert_eq!(bounds[0]["required"], 10.0);
+    let achievable = bounds[0]["achievable"]
+        .as_f64()
+        .expect("achievable 应为数值");
+    assert!(
+        (achievable - 11.3125).abs() < 0.01,
+        "灰分最好只能到 11.31, 实得 {achievable}"
+    );
+}
+
+/// 诊断字段上线前存下来的历史结果 (无 infeasible_bounds) 仍要能读回来.
+#[test]
+fn test_stored_result_without_diagnosis_still_deserializes() {
+    let stored = json!({
+        "ok": false,
+        "reason": "约束冲突, LP 不可行",
+        "recipe": {},
+        "cost": null,
+        "orders": [],
+        "indicator_check": [],
+        "warnings": []
+    });
+    let result: blend_kit::BlendResult =
+        serde_json::from_str(&stored.to_string()).expect("存量记录必须仍能反序列化");
+    assert!(result.infeasible_bounds.is_empty());
+}

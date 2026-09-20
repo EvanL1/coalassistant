@@ -219,9 +219,28 @@ export interface PetrographyCheck {
   refine_iterations: number;
 }
 
+/**
+ * 不可行时的逐项诊断: 其余约束都成立的前提下, 该指标最好能做到多少.
+ * 刻意不复用 IndicatorCheck —— 那里的 value 是"混合后的实际值", 不可行时没有配方.
+ */
+export interface InfeasibleBound {
+  indicator: string;
+  label_zh: string;
+  direction: Direction;
+  /** 合同要求的界 (Hard 用合同界, Priced 用拒收线). */
+  required: number;
+  /** 其余约束成立时该指标能达到的最优值. */
+  achievable: number;
+}
+
 export interface BlendResult {
   ok: boolean;
   reason?: string | null;
+  /**
+   * 不可行诊断: 每项都是"单独放宽它就能可行"的真凶.
+   * 空 = 没有单独一项能解释 (冲突牵涉两项以上, 或煤池本身不够); 旧历史结果亦无此字段.
+   */
+  infeasible_bounds?: InfeasibleBound[];
   recipe: Record<string, number>;
   cost?: CostBreakdown | null;
   orders: OrderItem[];
