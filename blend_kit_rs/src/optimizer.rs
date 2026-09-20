@@ -707,14 +707,18 @@ fn enforced_bounds(
 /// 整单被判不可行. 差一档 (11.4) 又恰好认了. 这个差别算不出来, 只能解出来.
 ///
 /// 所以这里逐档往外试, 每档都跑一遍真流程 (`diagnose = false`, 防止试解里再诊断),
-/// 第一个真解得出配方的档位才是答案. 全都试不通时退回判定规则层面的最小值.
+/// 第一个真解得出配方的档位才是答案.
+///
+/// 全都试不通就返回 `None` —— **不拿没试过的数充数**. 放宽这一项可能只是必要而不
+/// 充分: LP 通了却卡在岩相精确复核, 就是每一档都解不出来. 界面照着这个数承诺
+/// "改成它就能解出配方", 给不出就得让界面说给不出.
 fn relax_target(
     spec: &Spec,
     request: &BlendRequest,
     models: &EvaluatorSet,
     direction: Direction,
     achievable: f64,
-) -> f64 {
+) -> Option<f64> {
     let rule = acceptance_rule(spec, request.truncate_decimal);
     let margin = spec.margin.unwrap_or(0.0);
     let tolerance = rule.tolerance.max(0.0);
@@ -738,21 +742,19 @@ fn relax_target(
             (aligned, 1.0 / scale)
         }
         // Raw: 执行界 = 合同界 ± tolerance, 连续可逆; 步长只用来兜浮点边界.
+        // "非 Raw 却没有 decimals"也落到这里, 但 validate_request 会先把那种规则挡掉;
+        // 万一漏进来, 每档都 fits 不过, 结果是 None —— 退化成"说不出该填几", 不会编数.
         None => (
             target - sign * tolerance,
             4.0 * f64::EPSILON * target.abs().max(1.0),
         ),
     };
 
-    let mut arithmetic_minimum = None;
     for offset in 0..=RELAX_SEARCH_STEPS {
         let candidate = start + sign * step * f64::from(offset);
         // 先过判定规则这一关: 连执行界都容不下 achievable 的档位, 不必浪费一次求解.
         if !fits(candidate) {
             continue;
-        }
-        if arithmetic_minimum.is_none() {
-            arithmetic_minimum = Some(candidate);
         }
         if solve_internal(
             &request_with_bound(request, spec, direction, candidate),
@@ -761,12 +763,10 @@ fn relax_target(
         )
         .ok
         {
-            return candidate;
+            return Some(candidate);
         }
     }
-    // 兜底: 判定规则层面的最小值. 走到这里说明连试 RELAX_SEARCH_STEPS 档都没解出来,
-    // 与其编一个数, 不如给出数学上的下限.
-    arithmetic_minimum.unwrap_or(start + sign * step * f64::from(RELAX_SEARCH_STEPS))
+    None
 }
 
 /// 放宽档位最多往外试几档. 判定规则本身最多差两档 (Round 最坏情况
@@ -777,6 +777,9 @@ const RELAX_SEARCH_STEPS: u8 = 6;
 /// 把某条 spec 的界改成 `bound` 之后的请求副本, 供试解用.
 ///
 /// 与展示口径一致: Priced 改的是拒收线 (它才是硬的), 其余改合同上下界.
+///
+/// 按 indicator 认人: 之所以不会误伤第二条同指标的约束, 是因为 `validate_request`
+/// 已拒绝"同一指标出现两条启用的 spec". 那条校验松掉的话, 这里会一次改多条.
 fn request_with_bound(
     request: &BlendRequest,
     target: &Spec,
@@ -1941,26 +1944,30 @@ mod tests {
     /// relax_to 宣称的是"合同上这个数改成它就能求出配方" —— 唯一说得过去的验收就是
     /// 真改真解. 前两版分别用"差 achievable−合同界"和"差 achievable−执行界"推,
     /// 都没有真解一遍, 于是两种推法各自的反例都溜了过去.
-    fn resolve_after_relaxing(request: &BlendRequest, bound: &InfeasibleBound) -> BlendResult {
-        let mut relaxed = request.clone();
-        for spec in relaxed
+    /// 复用生产代码的 request_with_bound: 测试改合同的方式必须和实现改的是同一处,
+    /// 否则验的就不是同一件事.
+    fn resolve_after_relaxing(
+        request: &BlendRequest,
+        bound: &InfeasibleBound,
+        relax_to: f64,
+    ) -> BlendResult {
+        let spec = request
             .specs
-            .iter_mut()
-            .filter(|spec| spec.indicator == bound.indicator)
-        {
-            // Priced 的硬界是拒收线, 放宽的也该是它.
-            if let (Enforcement::Priced, Some(penalty)) = (spec.enforcement, spec.penalty.as_mut())
-            {
-                penalty.reject = bound.relax_to;
-                continue;
-            }
-            match bound.direction {
-                Direction::Upper => spec.max = Some(bound.relax_to),
-                Direction::Lower => spec.min = Some(bound.relax_to),
-                Direction::Range => {}
-            }
-        }
-        solve(&relaxed)
+            .iter()
+            .find(|spec| spec.indicator == bound.indicator)
+            .expect("诊断指认的指标应能在请求里找到")
+            .clone();
+        solve(&request_with_bound(
+            request,
+            &spec,
+            bound.direction,
+            relax_to,
+        ))
+    }
+
+    /// 诊断给了可填的数时取出来; 给不出 (None) 的用例不该走到这里.
+    fn expect_relax_to(bound: &InfeasibleBound) -> f64 {
+        bound.relax_to.expect("这一档应能试出可填的数")
     }
 
     /// 用户线上那一单: 合同灰分改到多少才真解得出配方.
@@ -1989,32 +1996,27 @@ mod tests {
         let result = solve(&request);
         let ash = &result.infeasible_bounds[0];
 
+        let relax_to = expect_relax_to(ash);
         assert!(
-            resolve_after_relaxing(&request, ash).ok,
-            "改成 relax_to={} 之后必须真的解得出配方",
-            ash.relax_to
+            resolve_after_relaxing(&request, ash, relax_to).ok,
+            "改成 relax_to={relax_to} 之后必须真的解得出配方"
         );
         assert!(
-            (ash.relax_to - 11.4).abs() < 1e-9,
-            "应给真解得出的 11.4, 实得 {}",
-            ash.relax_to
+            (relax_to - 11.4).abs() < 1e-9,
+            "应给真解得出的 11.4, 实得 {relax_to}"
         );
 
         // 判定规则层面的下限 11.3 解不出来 —— 这正是 relax_to 不能只算不解的原因.
-        let mut arithmetic_minimum = ash.clone();
-        arithmetic_minimum.relax_to = 11.3;
         assert!(
-            !resolve_after_relaxing(&request, &arithmetic_minimum).ok,
+            !resolve_after_relaxing(&request, ash, 11.3).ok,
             "11.3 若已能解出, 说明解后复核的容限口径变了, relax_to 应回到 11.3"
         );
 
         // 反例钉死: 差值法给出的 11.2126 连执行界那一档都没挪动.
-        let mut gap_based = ash.clone();
-        gap_based.relax_to = ash.achievable - (ash.enforced - ash.required);
+        let gap_based = ash.achievable - (ash.enforced - ash.required);
         assert!(
-            !resolve_after_relaxing(&request, &gap_based).ok,
-            "差值推出来的 {} 落在同一档内, 本就解不出来",
-            gap_based.relax_to
+            !resolve_after_relaxing(&request, ash, gap_based).ok,
+            "差值推出来的 {gap_based} 落在同一档内, 本就解不出来"
         );
     }
 
@@ -2042,20 +2044,17 @@ mod tests {
 
         assert!(!result.ok, "10.06 越过四舍五入执行界 10.04999");
         let bound = &result.infeasible_bounds[0];
+        let relax_to = expect_relax_to(bound);
         assert!(
-            (bound.relax_to - 10.1).abs() < 1e-9,
-            "应跳到下一档 10.1, 实得 {}",
-            bound.relax_to
+            (relax_to - 10.1).abs() < 1e-9,
+            "应跳到下一档 10.1, 实得 {relax_to}"
         );
         assert!(
-            resolve_after_relaxing(&request, bound).ok,
+            resolve_after_relaxing(&request, bound, relax_to).ok,
             "10.1 必须真能解"
         );
-
-        let mut naive = bound.clone();
-        naive.relax_to = bound.achievable;
         assert!(
-            !resolve_after_relaxing(&request, &naive).ok,
+            !resolve_after_relaxing(&request, bound, bound.achievable).ok,
             "放宽到 achievable 本身仍在同一档, 解不出来"
         );
     }
@@ -2087,12 +2086,12 @@ mod tests {
         assert_eq!(bound.required, 14.95);
         assert_eq!(bound.enforced, 15.0, "截断把下限抬到了 15.0");
         assert_eq!(bound.margin, 0.0, "这里一点安全余量都没设");
+        let relax_to = expect_relax_to(bound);
         assert!(
-            (bound.relax_to - 14.9).abs() < 1e-9,
-            "要 ceil(b×10) ≤ 149, 即 b ≤ 14.9, 实得 {}",
-            bound.relax_to
+            (relax_to - 14.9).abs() < 1e-9,
+            "要 ceil(b×10) ≤ 149, 即 b ≤ 14.9, 实得 {relax_to}"
         );
-        assert!(resolve_after_relaxing(&request, bound).ok);
+        assert!(resolve_after_relaxing(&request, bound, relax_to).ok);
     }
 
     /// 可行的一单不带诊断: 诊断只跑在不可行这条路上.

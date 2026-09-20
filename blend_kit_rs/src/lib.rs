@@ -929,6 +929,48 @@ mod tests {
         );
     }
 
+    /// 放宽这一项是必要的、却不足以解出配方时, relax_to 必须交白卷.
+    ///
+    /// 这一单里灰分够不到合同 (整单 LP 无解, 所以诊断指认灰分是对的), 但把灰分逐档
+    /// 放宽之后, LP 虽然通了, 岩相精确复核每一档都过不去 —— 没有哪个灰分值真能解出
+    /// 配方. 这时宁可给 None, 也不能拿一个没试过的数去兑现界面上那句"改成这个数就能
+    /// 求出配方".
+    #[test]
+    fn test_relax_to_is_none_when_no_bound_actually_solves() {
+        let coals = vec![
+            coal_with_petro(
+                "纯煤贵",
+                (2.0, 12.0, 22.0, 90.0, 15.0, 0.05, 65.0, 8.0, 1100.0, 30.0),
+                vec![[1.15, 1.0], [1.25, 1.0]], // σ=0.05
+            ),
+            coal_with_petro(
+                "混煤便宜",
+                (2.0, 12.5, 23.0, 92.0, 16.0, 0.4, 66.0, 7.5, 1000.0, 30.0),
+                vec![[0.8, 1.0], [1.6, 1.0]], // σ=0.4
+            ),
+        ];
+        let result = solve(&BlendRequest {
+            coals,
+            specs: vec![Spec::upper("A", 10.0), Spec::upper("petro", 0.1)],
+            total_quantity: None,
+            truncate_decimal: true,
+        });
+
+        assert!(!result.ok, "煤池最低灰 12.0, 够不到合同 10");
+        let ash = result
+            .infeasible_bounds
+            .iter()
+            .find(|bound| bound.indicator == "A")
+            .expect("灰分是 LP 无解的真凶, 应被指认");
+        assert_eq!(
+            ash.relax_to, None,
+            "每一档都解不出配方时不许给数, 实得 {:?}",
+            ash.relax_to
+        );
+        // 指认本身仍然成立: 灰分确实够不到.
+        assert!(ash.achievable > ash.enforced);
+    }
+
     /// 线性代理高估低价煤的 σ 时，下界初解可能通过代理却未通过精确复核。
     /// A 的录入代理为 0.30、直方图 σ=0.28；B 的代理与直方图 σ 均为 0.40。
     /// 初解全选 A，精确 σ=0.28 不达下界 0.30；抬高代理下界后应引入 B 并收敛。

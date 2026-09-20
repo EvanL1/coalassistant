@@ -153,6 +153,68 @@ describe("InfeasiblePanel", () => {
     expect(screen.queryByText(/安全余量/)).toBeNull();
   });
 
+  /**
+   * 放宽这一项必要但不充分时 core 给 null (譬如 LP 通了却卡在岩相精确复核).
+   * 这一格只能留白, 那句"改成这个数就能求出配方"也不能对它说 —— 没有那个数.
+   */
+  it("试不出可填的数时留白, 不承诺某个数管用", () => {
+    render(
+      <InfeasiblePanel
+        result={infeasible([
+          {
+            indicator: "A",
+            label_zh: "灰",
+            direction: "Upper",
+            required: 10,
+            enforced: 10.0999,
+            margin: 0,
+            achievable: 12,
+            relax_to: null,
+          },
+        ])}
+      />,
+    );
+
+    expect(rowCells("灰")).toEqual(["灰", "≤10.00", "12.00", "—"]);
+    expect(screen.queryByText(/就能求出配方/)).toBeNull();
+    expect(screen.getByText(/只能确定非放宽它不可/)).toBeTruthy();
+  });
+
+  // 混着来: 有数的那几项照旧承诺, 没数的那几项不跟着被承诺.
+  it("一部分试得出一部分试不出时, 两句话各管各的", () => {
+    render(
+      <InfeasiblePanel
+        result={infeasible([
+          {
+            indicator: "A",
+            label_zh: "灰",
+            direction: "Upper",
+            required: 10,
+            enforced: 10,
+            margin: 0,
+            achievable: 11.3125,
+            relax_to: 11.4,
+          },
+          {
+            indicator: "S",
+            label_zh: "硫",
+            direction: "Upper",
+            required: 1,
+            enforced: 1,
+            margin: 0,
+            achievable: 1.4,
+            relax_to: null,
+          },
+        ])}
+      />,
+    );
+
+    expect(rowCells("灰")).toEqual(["灰", "≤10.00", "11.31", "≤11.40"]);
+    expect(rowCells("硫")).toEqual(["硫", "≤1.00", "1.40", "—"]);
+    expect(screen.getByText(/就能求出配方/)).toBeTruthy();
+    expect(screen.getByText(/只能确定非放宽它不可/)).toBeTruthy();
+  });
+
   it("定位不到单项约束时直说, 不硬凑真凶", () => {
     render(<InfeasiblePanel result={infeasible([])} />);
 

@@ -65,8 +65,13 @@ export function InfeasiblePanel({ result }: { result: BlendResult }) {
       {bounds.length > 0 && (
         <>
           <p style={{ margin: "0 0 8px", fontSize: 12, color: "var(--c-text-3)" }}>
-            其余约束都成立时, 下面这些项达不到要求. 把其中任意一项改成「放宽到」那一列
-            的数, 就能求出配方.
+            其余约束都成立时, 下面这些项达不到要求.
+            {/* 承诺只对 core 真解验证过的那几项成立. 剩下的只知道非放宽不可,
+                放到多少管用没试出来 —— 这里就不能替它把话说满. */}
+            {bounds.some((bound) => bound.relax_to != null) &&
+              "「放宽到」有数的, 把合同改成那个数就能求出配方."}
+            {bounds.some((bound) => bound.relax_to == null) &&
+              "标「—」的没能试出可行的数, 只能确定非放宽它不可."}
           </p>
           <table
             className="infeasible-table"
@@ -108,8 +113,9 @@ export function InfeasiblePanel({ result }: { result: BlendResult }) {
                       {formatBound(bound.achievable)}
                     </td>
                     <td style={cellStyle}>
-                      {sign}
-                      {formatBound(bound.relax_to)}
+                      {bound.relax_to == null
+                        ? "—"
+                        : `${sign}${formatBound(bound.relax_to)}`}
                     </td>
                   </tr>
                 );

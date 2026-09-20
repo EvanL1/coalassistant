@@ -248,8 +248,11 @@ export interface InfeasibleBound {
    * 合同上这个数改成多少就能求出配方 (Priced 指的是拒收线).
    * core 逐档真解验证过, 不是 achievable 与某条界的差值 —— 判定规则是阶梯函数,
    * 差值推出来的数往往落在同一档内, 改了等于没改.
+   *
+   * null = 逐档试下来没有一个数真能解出配方 (放宽这一项必要但不充分).
+   * 这时界面只能说"非放宽它不可", 不能承诺某个数管用.
    */
-  relax_to: number;
+  relax_to?: number | null;
 }
 
 export interface BlendResult {
