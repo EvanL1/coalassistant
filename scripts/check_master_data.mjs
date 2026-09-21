@@ -35,7 +35,7 @@ const INDICATORS = Object.keys(INDICATOR_RANGE);
 // 期望的 status 取值. 真源是 master.schema.status, 这里只作交叉校验:
 // 两边不一致说明有人只改了一边.
 const STATUSES = ["verified", "active", "draft", "incomplete", "archived"];
-const CONFIDENCES = ["high", "medium", "low"];
+const CONFIDENCES = ["high", "medium", "low", "spec"];
 
 // ---------- 顶层元数据 ----------
 if (!/^\d+\.\d+$/.test(master.version ?? "")) {

@@ -319,7 +319,7 @@ export interface HistoryRecord {
 // ===== Master schema =====
 
 export type CoalStatus = "verified" | "active" | "draft" | "incomplete" | "archived";
-export type Confidence = "high" | "medium" | "low";
+export type Confidence = "high" | "medium" | "low" | "spec";
 
 export interface MasterCoalEntry {
   name: string;
