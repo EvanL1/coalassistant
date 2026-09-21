@@ -44,6 +44,10 @@ pub struct CoalMasterEntry {
     pub region: Option<String>,
     #[serde(default)]
     pub coal_type: Option<String>,
+    /// 产品形态 (原煤/精煤/浮选精煤/中煤/煤泥). 与 coal_type 正交:
+    /// 同一煤层洗出的精煤与煤泥煤种相同, 差的是灰分/粒度/价格.
+    #[serde(default)]
+    pub form: Option<String>,
     pub status: MasterStatus,
     /// 8 项化验指标, 缺失项不放
     #[serde(default)]
@@ -74,6 +78,11 @@ pub struct CoalMaster {
     pub version: String,
     pub updated_at: String,
     pub description: String,
+    /// 字段与受控词表的声明 (coal_type / form / status / confidence 的取值及含义).
+    /// 求解器不读它; 词表真源在数据文件, 由 check_master_data.mjs 校验、前端读取渲染.
+    /// 这里按不透明值保存: Rust 侧无需理解其结构, 也就不会成为第二份词表定义.
+    #[serde(default)]
+    pub schema: Option<serde_json::Value>,
     pub default_contract: DefaultContract,
     pub coals: Vec<CoalMasterEntry>,
 }

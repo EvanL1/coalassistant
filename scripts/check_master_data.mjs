@@ -32,6 +32,8 @@ const INDICATOR_RANGE = {
   M: [0, 30],
 };
 const INDICATORS = Object.keys(INDICATOR_RANGE);
+// 期望的 status 取值. 真源是 master.schema.status, 这里只作交叉校验:
+// 两边不一致说明有人只改了一边.
 const STATUSES = ["verified", "active", "draft", "incomplete", "archived"];
 const CONFIDENCES = ["high", "medium", "low"];
 
@@ -52,6 +54,17 @@ if (master.coals.length < MIN_COALS) {
   fail(`煤源仅 ${master.coals.length} 条, 低于下限 ${MIN_COALS} —— 疑似误删`);
 }
 
+// ---------- 受控词表 (真源在 schema, 加一个煤种只改数据文件) ----------
+const schema = master.schema ?? {};
+const schemaStatuses = Object.keys(schema.status ?? {});
+if (schemaStatuses.join("|") !== STATUSES.join("|")) {
+  fail(`schema.status 与校验脚本不一致: schema=${schemaStatuses.join("/")} 脚本=${STATUSES.join("/")}`);
+}
+const COAL_TYPES = Object.keys(schema.coal_type ?? {});
+const FORMS = Object.keys(schema.form ?? {});
+if (COAL_TYPES.length === 0) fail("schema.coal_type 未声明煤种词表");
+if (FORMS.length === 0) fail("schema.form 未声明产品形态词表");
+
 // ---------- 逐条记录 ----------
 const seen = new Set();
 for (const coal of master.coals) {
@@ -63,6 +76,15 @@ for (const coal of master.coals) {
 
   if (!STATUSES.includes(coal.status)) {
     fail(`${label}: status ${JSON.stringify(coal.status)} 不在 ${STATUSES.join("/")} 内`);
+  }
+
+  // coal_type / form 必须落在 schema 声明的词表里 —— 这两列曾混入
+  // 「主焦煤」(贸易口语) 与「煤泥」(产品形态), 没有校验就会再漂回去.
+  if (coal.coal_type != null && !COAL_TYPES.includes(coal.coal_type)) {
+    fail(`${label}: coal_type ${JSON.stringify(coal.coal_type)} 不在 schema.coal_type 词表内`);
+  }
+  if (coal.form != null && !FORMS.includes(coal.form)) {
+    fail(`${label}: form ${JSON.stringify(coal.form)} 不在 schema.form 词表内`);
   }
 
   const props = coal.props ?? {};

@@ -325,6 +325,8 @@ export interface MasterCoalEntry {
   name: string;
   region?: string | null;
   coal_type?: string | null;
+  /** 产品形态 (原煤/精煤/浮选精煤/中煤/煤泥), 与 coal_type 正交. */
+  form?: string | null;
   status: CoalStatus;
   props: Partial<Record<string, number>>;
   fob?: number | null;
@@ -338,10 +340,22 @@ export interface DefaultContract {
   specs: Spec[];
 }
 
+/** master 的受控词表声明. 键即允许取值, 值是该取值的含义. */
+export interface MasterSchema {
+  fields: Record<string, string>;
+  coal_type: Record<string, string>;
+  coal_type_basis?: string;
+  form: Record<string, string>;
+  status: Record<string, string>;
+  confidence_per_field: Record<string, string>;
+}
+
 export interface CoalMaster {
   version: string;
   updated_at: string;
   description: string;
+  /** 词表声明; 录入界面从这里取煤种/形态选项, 不在前端另写一份. */
+  schema?: MasterSchema | null;
   default_contract: DefaultContract;
   coals: MasterCoalEntry[];
 }

@@ -2,12 +2,15 @@
  * 新增煤种对话框.
  *
  * 入口: 煤池界面右上 + 按钮
- * 字段: 煤名 (必填) / 产地 / 煤类
+ * 字段: 煤名 (必填) / 产地 / 煤种 / 产品形态
+ * 煤种与形态是受控词表, 选项从 master.schema 读 —— 不在前端另写一份,
+ * 否则它会和 check_master_data.mjs 校验的那份漂开 (自建煤不过那道校验).
  * 校验: 实时查重 (Master + 用户已新增), trim + 全角空格 + 大小写无关
  * 新煤 status 默认 = "draft", 化验值留空, 后续在 CoalEditor 里补.
  */
 import { useEffect, useMemo, useState } from "react";
-import type { MasterCoalEntry } from "./types";
+import type { MasterCoalEntry, MasterSchema } from "./types";
+import { loadMaster } from "./master_loader";
 import {
   addUserCoal,
   findDuplicateCoalName,
@@ -24,6 +27,21 @@ export function NewCoalDialog({ existing, onClose }: Props) {
   const [name, setName] = useState("");
   const [region, setRegion] = useState("");
   const [coalType, setCoalType] = useState("");
+  const [form, setForm] = useState("");
+  const [schema, setSchema] = useState<MasterSchema | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    loadMaster()
+      .then((m) => alive && setSchema(m.schema ?? null))
+      .catch(() => alive && setSchema(null));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const coalTypes = Object.keys(schema?.coal_type ?? {});
+  const forms = Object.keys(schema?.form ?? {});
 
   useEffect(() => {
     const orig = document.body.style.overflow;
@@ -46,7 +64,8 @@ export function NewCoalDialog({ existing, onClose }: Props) {
     const entry: MasterCoalEntry = {
       name: name.trim(),
       region: region.trim() || null,
-      coal_type: coalType.trim() || null,
+      coal_type: coalType || null,
+      form: form || null,
       status: "draft",
       props: {},
       fob: null,
@@ -113,14 +132,37 @@ export function NewCoalDialog({ existing, onClose }: Props) {
             </div>
 
             <div className="edit-row">
-              <div className="edit-row-label">煤类</div>
-              <input
-                type="text"
+              <div className="edit-row-label">煤种</div>
+              <select
                 className="edit-input"
                 value={coalType}
                 onChange={(e) => setCoalType(e.target.value)}
-                placeholder="可选, 如: 主焦煤"
-              />
+                disabled={coalTypes.length === 0}
+              >
+                <option value="">未定</option>
+                {coalTypes.map((t) => (
+                  <option key={t} value={t} title={schema?.coal_type[t]}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="edit-row">
+              <div className="edit-row-label">形态</div>
+              <select
+                className="edit-input"
+                value={form}
+                onChange={(e) => setForm(e.target.value)}
+                disabled={forms.length === 0}
+              >
+                <option value="">未定</option>
+                {forms.map((f) => (
+                  <option key={f} value={f} title={schema?.form[f]}>
+                    {f}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 
