@@ -31,13 +31,40 @@ const BINDING_TOL: f64 = 0.05;
 /// 档), 共 45.0 万条"LP 认下的解 × 带界指标行"。其中 16.4 万条落在执行界外侧,
 /// 最大 residual/(1+量级) = 1.73e-8 (灰分, 宽煤池), 本值留出约 5.8 倍余量。
 ///
-/// 同一批样本里, 解后复核的量级 `1+max(|实测|,|执行界|)` **45.0 万条无一** 小于
-/// LP 那一行自己的量级 `1+Σ|aᵢxᵢ|`(最差比值 1.0000)。所以同一个常量下, 复核的放行
-/// 量恒不小于 LP 的放行量 —— "复核不得比 LP 严"是结构性成立, 不只是余量够。
+/// 两边共用一个常量, 但**量级口径不同**, 所以"复核不会比 LP 严"要分行型看,
+/// 别当成恒等式:
+///
+/// - **线性行** (`formula_for` 出来的加权平均, 今天产品路径上的全部 Hard 行):
+///   `aᵢ = propᵢ − 执行界`, 而最优解处 `Σ(propᵢ−界)xᵢ ≈ 0`, 正负偏差等量, 又因
+///   化验值非负, 负向偏差 ≤ 界 ⇒ `Σ|aᵢxᵢ| ≤ 2×界`。复核量级约等于界, 于是复核
+///   **最多比 LP 严 2 倍** —— 这被 5.8 倍余量盖得住, 但那是**余量, 不是恒等式**。
+///   实测 20.2 万条 Hard 行, 复核量级从未低于 LP 行量级, 最接近的一条比值只有
+///   **1.0225** (petro 界 3.75, 4.750 vs 4.646) —— 余量薄到 2.2%, 别再压。
+/// - **仿射 / 回归行** (`build_formulas` 里 G 的 `AffineCalibration`、CSR 的
+///   `Regression`): `numerators` 是回归系数而非化验值, `intercept ≠ 0` 使
+///   `shifted = 界 − intercept`。行量级由**各煤分子系数的离散度**决定, 与合同界
+///   无关, 上面那个 2 倍上界**不存在**。而且这两条公式只在调用方传入训练评估器时
+///   才出现 (`solve_with_evaluators`), 今天产品路径是空评估器, 所以上面的实测
+///   **根本没覆盖到它们**。`predict.rs` 那套回归接上线的那天必须重测这一条。
 ///
 /// 安全边界: 放行量随界的量级变化 —— 灰分 (界~12) 约 1.3e-6, 粘结 (界~85) 约
 /// 8.6e-6, 都比化验 0.01 的分辨率细 3~4 个数量级, 合同界仍是硬墙。
 /// 这份实测记录是本值的唯一依据, 勿在没有重测的情况下改动。
+///
+/// ## 必需不变量: `strict_bound_epsilon(rule) > 本值 × (1 + 量级)`
+///
+/// `effective_upper` 把执行界放在"下一个量化格 − `strict_bound_epsilon`"上。放行量
+/// 一旦超过这个 eps, 被放行的解就可能落到量化格边界之外 ⇒ `judged_value` 的贴边
+/// 阈值(只有 `CHECK_TOLERANCE × scale`)够不着 ⇒ 判定值被推过整整一格 ⇒
+/// `judged_pass` 挂 ⇒ `Fail` ⇒ **又一个假不可行**, 正是本次在修的那个症状换了入口。
+///
+/// **这条不变量现在是倒挂的**: `strict_bound_epsilon = 量子×1e-4`, 两位小数时
+/// = 1e-6; 而放行量在量级 > 9 时就反超 (灰分 1.2e-6, 粘结 8.6e-6)。
+/// 它没发作, 只是因为实测最差绝对残差 1.254e-7 比 1e-6 还小 8 倍 —— 靠的是余量,
+/// 不是设计。`test_accept_tolerance_can_outrun_strict_bound_epsilon` 把这个已知
+/// 缺陷钉成存档用例。真修法在 `judged_value` 的贴边阈值那一侧 (它对求解器残差同样
+/// 太紧), 与 `strict_bound_epsilon` 同属判定档位的构造, 排在下一个任务, **不要**
+/// 用调小本值来回避: 那会把第一个假不可行原样请回来。
 ///
 /// **别"为了保险"把它调紧。** 线性 Hard 指标真正拦人的是 LP 那一行: 它的界就是
 /// `effective_upper`/`effective_lower`, 与这里比的是同一条线, 所以越界的解根本
@@ -257,6 +284,10 @@ pub(crate) fn check_value(
 
     // 上下界都在场时取最紧的那一侧, 连同它自己的放行量一起带走 —— 放行量随量级变化,
     // 只留 slack 会让下面拿另一侧的量级去判这一侧.
+    //
+    // 挑"最紧"用的是原始距离而非距离/放行量之比: 只有当下界的执行界高过上界的执行界
+    // 时两者才会挑出不同的一侧, 而 `validate_request` 已经挡掉"下限大于上限", 所以
+    // 这两种挑法在能走到这里的输入上等价.
     let tightest = accepted_slacks
         .into_iter()
         .reduce(|left, right| if right.0 < left.0 { right } else { left });
@@ -552,6 +583,59 @@ fn validate_penalty(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **存档用例, 不是期望行为**: 放行量反超 `strict_bound_epsilon` 时会怎样.
+    ///
+    /// 见 [`ACCEPT_TOLERANCE`] 的"必需不变量"一节. 两位小数判定下
+    /// `strict_bound_epsilon` = 量子×1e-4 = 1e-6, 而放行量 = 1e-7×(1+量级), 量级
+    /// 超过 9 就反超它. 这里把界放在 10.00、残差取在两者之间, 复现那条后果链:
+    /// slack 这一关认了, 判定值却已经被推过整整一个量化格, `judged_pass` 挂,
+    /// 整条判 Fail —— Hard 指标上这就是一个假不可行.
+    ///
+    /// **断言的是"今天会这样", 不是"应该这样"。** 真修法在 `judged_value` 的贴边
+    /// 阈值那一侧, 属于判定档位的构造, 排在下一个任务. 那一版落地后这条会红,
+    /// 那时请把它改成断言 `Fail` 之外的状态, 而不是删掉.
+    ///
+    /// 今天它不发作: 实测最差绝对残差 1.254e-7, 比 1e-6 小 8 倍, 求解器根本走不到
+    /// 这个残差. 所以这里直接喂 `check_value` 一个构造值, 不经求解器.
+    #[test]
+    fn test_accept_tolerance_can_outrun_strict_bound_epsilon() {
+        let mut spec = Spec::upper("A", 10.00);
+        spec.acceptance = Some(AcceptanceRule {
+            mode: AcceptanceMode::Truncate,
+            decimals: Some(2),
+            tolerance: 0.0,
+        });
+        let rule = acceptance_rule(&spec, false);
+
+        let epsilon = strict_bound_epsilon(&rule);
+        let executed = effective_upper(10.00, &rule);
+        let allowance = accept_slack(executed, executed);
+        assert!(
+            allowance > epsilon,
+            "本用例的前提就是放行量反超了 eps: 放行量 {allowance:e} vs eps {epsilon:e}"
+        );
+
+        // 残差取在 eps 与放行量之间 —— 这正是不变量倒挂让出来的那段缝.
+        let residual = (epsilon + allowance) / 2.0;
+        let value = executed + residual;
+        let outcome = check_value(value, Some(&spec), false, true);
+
+        assert_eq!(
+            outcome.judged, 10.01,
+            "判定值被推过整整一个量化格 (合同界 10.00), 实得 {}",
+            outcome.judged
+        );
+        assert_eq!(
+            outcome.status,
+            EvaluationStatus::Fail,
+            "已知缺陷: slack 认了, judged_pass 不认, 整条判 Fail"
+        );
+        assert!(
+            outcome.slack.is_some_and(|slack| slack >= -allowance),
+            "slack 这一关本身是认的 —— 否掉它的是 judged_pass"
+        );
+    }
 
     /// 计价条款校验的共享用例 (`data/penalty_cases.json`).
     ///
