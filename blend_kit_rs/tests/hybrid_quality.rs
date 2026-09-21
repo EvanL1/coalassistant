@@ -378,10 +378,12 @@ fn test_infeasible_diagnosis_crosses_the_json_boundary() {
         "截断判定下执行界应约为 10.0999, 实得 {enforced}"
     );
     // relax_to 是给用户照着改合同的数, 必须穿过边界 (前端整列就靠它).
+    // 这个数曾经是 11.4: 11.3 的最优解顶在执行界上、落在界外 1.05e-8, LP 认而解后
+    // 复核的绝对容限不认, 于是只好再让一档. 容限口径对齐后 11.3 真解得出来了.
     let relax_to = bounds[0]["relax_to"].as_f64().expect("relax_to 应为数值");
     assert!(
-        (relax_to - 11.4).abs() < 1e-9,
-        "合同灰分应改到 11.4, 实得 {relax_to}"
+        (relax_to - 11.3).abs() < 1e-9,
+        "合同灰分应改到 11.3, 实得 {relax_to}"
     );
     assert_eq!(bounds[0]["margin"], 0.0, "这一单没设安全余量");
     let achievable = bounds[0]["achievable"]

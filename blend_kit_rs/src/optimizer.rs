@@ -22,18 +22,41 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 /// 残差保持在 Clarabel 的原始收敛量级 (~1e-8..1e-7).
 ///
 /// 判据是 `activity <= bound + 本值 * (1 + magnitude)`, 其中
-/// `magnitude = Σ|aᵢxᵢ|` 再与 `|bound|` 取大. 它**对所有行生效**, 不止计价行:
-/// 纯 Hard 配方没有档位列, 残差本就在 1e-13 量级, 远用不满这点容限, 故不受影响
-/// (master_demo 输出逐字节不变可证).
+/// `magnitude = Σ|aᵢxᵢ|` 再与 `|bound|` 取大. 它**对所有行生效**, 不止计价行.
 ///
-/// 取值依据: 92 组良态计价输入 (合同上限 10.0, 单档 rate 10, ash 10.0~13.0 ×
-/// reject 11.0~15.0) 实测 156 行, 最大 residual/(1+magnitude) = 6.36e-9,
-/// 本值留出约 16 倍余量. 这份实测记录是常量的唯一依据, 勿在没有重测的情况下调紧.
+/// 曾经写着"纯 Hard 配方残差本就在 1e-13 量级, 用不满这点容限" —— 这句是错的,
+/// 只对 Σx=1 那一行成立 (配比列经归一化重投影, 残差才塌到 1e-13). 指标约束行不
+/// 重投影, 残差就是 Clarabel 的原始收敛量级, Hard 行同样吃满这点容限.
 ///
-/// 安全边界: 放行量是 `本值 × (1 + magnitude)`, 随行量级变化 —— 灰分行约 3e-7,
-/// 宽煤池上的 CSR/G 行可达约 2.6e-6 (指标单位). 即便按后者算, 仍比化验 0.01%
-/// 的分辨率细 4 个数量级, 拒收线仍是硬墙.
-const FEASIBILITY_TOLERANCE: f64 = 1e-7;
+/// 取值依据 (**已被实测表取代, 保留是为了说明那个 16 倍是怎么来的**): 92 组良态
+/// 计价输入 (合同上限 10.0, 单档 rate 10, ash 10.0~13.0 × reject 11.0~15.0) 实测
+/// 156 行, 最大 residual/(1+magnitude) = 6.36e-9, 号称留出约 16 倍余量.
+/// 那只是一张**窄网格**: 只有计价行、只有一个煤种、界只动了 ash 一项.
+///
+/// ⚠ **真实余量只剩 1.01 倍** —— 宽网格实测已经贴着本值的 98.8%.
+/// 具体数字见 `quality::ACCEPT_TOLERANCE` 那张实测表 (本 crate 唯一真源), 本处不
+/// 复述: 抄一份就多一处会各自变旧的地方, 这事已经发生过.
+///
+/// 越过这条线的解由 LP 自己判不可行. 也就是说, 解后复核对齐之后,"可行合同报不可行"
+/// 的风险整体**转移到了本常量上**: 残差再漂 1.2% 就复发, 只是发作点从体检挪到了 LP
+/// 自己. 煤池变宽、合同变紧、Clarabel 升级, 任何一样都可能吃掉这点余量.
+///
+/// 想调本值: 先重跑
+/// `cargo test --release -- --ignored measure_tolerance_headroom --nocapture`,
+/// 别拿上面那 156 行说事. 而且**顺序是硬的** —— 本值与 `ACCEPT_TOLERANCE` 是同一个
+/// 数, 抬它会加深 `strict_bound_epsilon` 的倒挂, 必须先修 `quality::judged_value`
+/// 的贴边阈值, 理由见 `quality::ACCEPT_TOLERANCE` 的"改动顺序"一节.
+///
+/// 安全边界: 放行量是 `本值 × (1 + magnitude)`, 随行量级变化. 实测的最大 LP 侧
+/// 放行量见 `quality::ACCEPT_TOLERANCE` 那张表 (本 crate 唯一真源) —— 约 3.7e-6
+/// 指标单位, 比化验 0.01 的分辨率细约 3.4 个数量级, 拒收线仍是硬墙.
+///
+/// 注意**别拿那张表里"复核侧放行量"那一行来读本常量**: 两者量级口径不同, 复核侧取
+/// 界本身, 本常量取 `Σ|aᵢxᵢ|`(行系数相对绑定值的平均绝对偏差), 数值差着四五倍.
+///
+/// 解后复核 (`quality::ACCEPT_TOLERANCE`) 共用本值, 这是刻意的: 两边判的是同一件
+/// 事, 各写一个数就会重演"LP 认、复核不认"那个缺陷.
+pub(crate) const FEASIBILITY_TOLERANCE: f64 = 1e-7;
 const OUTPUT_RATIO_TOLERANCE: f64 = 1e-5;
 
 /// 基础求解入口，不读取训练样本，也不在求解期间拟合模型.
@@ -701,10 +724,13 @@ fn enforced_bounds(
 /// 向要够到 10.06 却只放宽到 10.06, 执行界都没挪窝.
 ///
 /// 二, 光算对判定规则这一层还不够, 必须真解. 放宽某项之后, 最低成本解会把这项顶到
-/// 新界上 (便宜煤总是更差), 于是最优点正好落在界上; 这时 LP 的相对容限
-/// (`FEASIBILITY_TOLERANCE·(1+量级)`) 与解后复核的绝对容限 (`CHECK_TOLERANCE`) 谁松谁紧
-/// 就决定了这一单认不认 —— 实测过 A≤11.3 时解落在界外 1.05e-8, LP 认、复核不认,
-/// 整单被判不可行. 差一档 (11.4) 又恰好认了. 这个差别算不出来, 只能解出来.
+/// 新界上 (便宜煤总是更差), 于是最优点正好落在界上, 只差浮点收敛那一丝 —— 认不认
+/// 由容限说了算. 两边的容限曾经不是一回事: LP 用相对判据, 解后复核用绝对 1e-8,
+/// 实测过 A≤11.3 时解落在界外 1.05e-8, LP 认、复核不认, 整单被判不可行, relax_to
+/// 只好再让一档给到 11.4. 现在两边共用 `FEASIBILITY_TOLERANCE`, 那一档不再白丢.
+///
+/// 口径统一了也仍要真解: 放宽这一项**未必**就够 (还有岩相精确复核那一关), 而
+/// "够不够"只有解出来才知道.
 ///
 /// 所以这里逐档往外试, 每档都跑一遍真流程 (`diagnose = false`, 防止试解里再诊断),
 /// 第一个真解得出配方的档位才是答案.
@@ -1661,7 +1687,7 @@ mod tests {
     }
 
     /// 用户线上撞到不可行的那个煤池.
-    fn real_case_coals() -> Vec<Coal> {
+    pub(super) fn real_case_coals() -> Vec<Coal> {
         vec![
             assay_coal("兴无", (2.1, 8.5, 18.0, 70.0, 18.0, 12.0), 2400.0),
             assay_coal("第三", (0.73, 12.14, 34.0, 85.0, 15.0, 12.0), 1550.0),
@@ -1970,15 +1996,197 @@ mod tests {
         bound.relax_to.expect("这一档应能试出可填的数")
     }
 
+    /// 下限方向要顶界, 得让"高粘结煤贵、低粘结煤便宜": 最低成本解才会把 G 压到界上.
+    fn cohesion_pool() -> Vec<Coal> {
+        vec![
+            assay_coal("高粘结贵", (0.5, 9.0, 24.0, 92.0, 18.0, 9.0), 2300.0),
+            assay_coal("低粘结廉", (0.5, 9.0, 24.0, 71.0, 13.0, 9.0), 1400.0),
+            assay_coal("中间", (0.5, 9.0, 24.0, 83.0, 15.0, 9.0), 1800.0),
+        ]
+    }
+
+    /// 回归: Hard 界顶格时, 解后复核的容限必须与 LP 可行性复核同口径.
+    ///
+    /// Hard 界一旦卡住, LP 最优解**按定义**就落在界上, 只差浮点收敛那一丝. LP 用相对
+    /// 判据 `FEASIBILITY_TOLERANCE × (1 + 量级)` 认下它; 解后复核原本用绝对 1e-8,
+    /// 于是同一个解 LP 认、体检不认 —— `solve_once` 返回 None, 可行的合同被报成
+    /// "约束冲突, LP 不可行". 计价侧在扣款那一版已经对齐过, Hard 侧漏了.
+    ///
+    /// 三条用例刻意各不相同, 少一条这测试就说不清覆盖到哪:
+    /// - 上限 × 截断判定: 走的是 `slack` 那条比较 (判定值 11.3 本身是达标的);
+    /// - 上限 × Raw 判定: Raw 下 judged 就是实测值, 卡人的是 `judged_pass` 那条;
+    /// - 下限 × Raw 判定: 上面两条都只走上界分支, 下界是另一行代码.
+    #[test]
+    fn test_hard_check_tolerance_matches_lp_wall() {
+        struct Case {
+            label: &'static str,
+            coals: Vec<Coal>,
+            specs: Vec<Spec>,
+            truncate: bool,
+            indicator: &'static str,
+            bound: f64,
+            /// 顶的是上界还是下界.
+            upper: bool,
+        }
+
+        let cases = vec![
+            Case {
+                label: "上限×截断: 用户线上那一单, 灰分改到 11.3",
+                coals: real_case_coals(),
+                specs: vec![
+                    Spec::upper("A", 11.3),
+                    Spec::upper("S", 1.0),
+                    Spec::upper("V", 28.0),
+                    Spec::lower("Y", 15.0),
+                    Spec::lower("G", 85.0),
+                ],
+                truncate: true,
+                indicator: "A",
+                bound: 11.3,
+                upper: true,
+            },
+            Case {
+                label: "上限×Raw: 灰分 ≤11.46 不折档, 实测值本身就是判定值",
+                coals: real_case_coals(),
+                specs: vec![Spec::upper("A", 11.46)],
+                truncate: false,
+                indicator: "A",
+                bound: 11.46,
+                upper: true,
+            },
+            Case {
+                label: "下限×Raw: 粘结 ≥73 顶在下界上",
+                coals: cohesion_pool(),
+                specs: vec![Spec::lower("G", 73.0)],
+                truncate: false,
+                indicator: "G",
+                bound: 73.0,
+                upper: false,
+            },
+        ];
+
+        for case in cases {
+            let Case {
+                label,
+                coals,
+                specs,
+                truncate,
+                indicator,
+                bound,
+                upper,
+            } = case;
+            let request = BlendRequest {
+                coals,
+                specs,
+                total_quantity: Some(3_700.0),
+                truncate_decimal: truncate,
+            };
+            let result = solve(&request);
+            assert!(
+                result.ok,
+                "{label}: LP 认下的解不该被体检否掉: {:?}",
+                result.reason
+            );
+
+            let check = result
+                .indicator_check
+                .iter()
+                .find(|check| check.indicator == indicator)
+                .unwrap_or_else(|| panic!("{label}: 应有 {indicator} 体检"));
+            let slack = check.slack.expect("带界的指标应有余量");
+
+            // 这三条用例的意义全在"解确实落在执行界外侧一丝". 哪天煤池或求解器变了,
+            // 解不再顶界, 上面的 ok 断言就成了空转 —— 这里先把它拦住.
+            assert!(
+                slack < -1e-8,
+                "{label}: 本用例须让解落在执行界外、且超出旧的绝对 1e-8 才有意义, 实得余量 {slack:e}"
+            );
+            assert_ne!(
+                check.status,
+                EvaluationStatus::Fail,
+                "{label}: LP 已认可的解不应被体检判 Fail (实测 {}, 余量 {slack:e})",
+                check.value
+            );
+            assert!(
+                check.binding,
+                "{label}: 顶在界上的指标必须标成 binding, 界面的谈判方向靠它"
+            );
+
+            // 放行的前提是"报到化验刻度上仍然达标" —— 不是"差得不多就算了".
+            let judged = check.judged_value.expect("带界的指标应有判定值");
+            let reported = (judged * 100.0).round() / 100.0;
+            if upper {
+                assert!(
+                    reported <= bound,
+                    "{label}: 报到 0.01 刻度的 {reported} 仍越过合同界 {bound}"
+                );
+            } else {
+                assert!(
+                    reported >= bound,
+                    "{label}: 报到 0.01 刻度的 {reported} 仍够不到合同界 {bound}"
+                );
+            }
+        }
+    }
+
+    /// Hard 界是硬墙: 超界 0.01 (化验一个刻度) 必须判不可行.
+    ///
+    /// 与上一条成对, 但**把住的不是同一道门**, 这点别记混:
+    /// 上一条管"别把 LP 认下的解否掉" (解后复核那道门); 这一条管"真越界的进不来",
+    /// 而 Hard 线性指标真正拦人的是 **LP 那一行** —— 它的界就是 `effective_*`,
+    /// 与解后复核同一条线, 所以越界的解根本走不到复核跟前 —— 复核对线性 Hard 指标
+    /// 是冗余的安全网, 不是墙. 自己动手验: 把 `ACCEPT_TOLERANCE` 临时放大四个数量级,
+    /// 重跑 `measure_tolerance_headroom`, "最大绝对残差"那一行纹丝不动.
+    ///
+    /// 所以这条测试守的是 LP 那道墙, **不守 `ACCEPT_TOLERANCE` 的上界**: 那个常量
+    /// 调松了这条也不会红. 常量的上界靠"与 LP 共用同一个定义"钉死, 不靠断言.
+    /// (计价侧的同名守卫是 `test_reject_line_still_blocks_one_assay_increment`;
+    /// Hard 侧一直空着, 这里补上.)
+    ///
+    /// 用 Raw 判定: 截断/四舍五入下合同 ≤10 本来就按 ≤10.0999 执行, 超 0.01 是合同
+    /// 认可的, 那时判可行并非放水. 硬墙要在"判定规则不折档"这一口径上验.
+    #[test]
+    fn test_hard_bound_still_blocks_one_assay_increment() {
+        let solves = |assay: (f64, f64, f64, f64, f64, f64), spec: Spec| -> bool {
+            solve(&BlendRequest {
+                coals: vec![assay_coal("独苗", assay, 1000.0)],
+                specs: vec![spec],
+                total_quantity: None,
+                truncate_decimal: false,
+            })
+            .ok
+        };
+
+        // 上界: 灰 ≤10.
+        assert!(
+            solves((0.5, 10.0, 24.0, 88.0, 16.0, 9.0), Spec::upper("A", 10.0)),
+            "正好压合同上限应可行"
+        );
+        assert!(
+            !solves((0.5, 10.01, 24.0, 88.0, 16.0, 9.0), Spec::upper("A", 10.0)),
+            "超合同上限 0.01 (化验一个刻度) 必须判不可行"
+        );
+
+        // 下界: 粘结 ≥80. 只验上界的话, 下界那行代码的墙没人验.
+        assert!(
+            solves((0.5, 9.0, 24.0, 80.0, 16.0, 9.0), Spec::lower("G", 80.0)),
+            "正好压合同下限应可行"
+        );
+        assert!(
+            !solves((0.5, 9.0, 24.0, 79.99, 16.0, 9.0), Spec::lower("G", 80.0)),
+            "差合同下限 0.01 (化验一个刻度) 必须判不可行"
+        );
+    }
+
     /// 用户线上那一单: 合同灰分改到多少才真解得出配方.
     ///
     /// 判定规则层面的最小值是 **11.3** —— 一位小数截断下执行界 = (floor(b×10)+1)/10 − eps,
     /// 要容下 11.3125 就需要 floor(b×10) ≥ 113 ⇒ b ≥ 11.3 (11.2 落回 11.29999 那一档).
     ///
-    /// 但 relax_to 给的是 **11.4**, 因为 11.3 真解一遍解不出来: 放宽之后最低成本解会把
-    /// 灰分顶到新界上, 这一单的最优点落在界外 1.05e-8 —— LP 的相对容限认, 解后复核的
-    /// 绝对容限 CHECK_TOLERANCE 不认, 于是整单仍判不可行. 下面第二条断言把这件事钉住:
-    /// 哪天那个容限口径对齐了, 这条会先红, 那时 relax_to 就该回到 11.3.
+    /// 这个数曾经是 **11.4**: 11.3 放宽之后最低成本解把灰分顶到新界上, 落在界外 1.05e-8,
+    /// LP 的相对容限认、解后复核的绝对容限不认, 整单仍判不可行, 于是 relax_to 只好再让
+    /// 一档. 容限口径对齐 (见 `test_hard_check_tolerance_matches_lp_wall`) 之后 11.3
+    /// 真解得出来了, 期望值随之回到 11.3 —— 期望是跟着缺陷修复走的, 不是被改松的.
     ///
     /// 用户问的是"我该往合同里填几", 不是"数学下限是几", 所以这里必须给真解得出的那个数.
     #[test]
@@ -2002,14 +2210,21 @@ mod tests {
             "改成 relax_to={relax_to} 之后必须真的解得出配方"
         );
         assert!(
-            (relax_to - 11.4).abs() < 1e-9,
-            "应给真解得出的 11.4, 实得 {relax_to}"
+            (relax_to - 11.3).abs() < 1e-9,
+            "应给真解得出的 11.3, 实得 {relax_to}"
         );
 
-        // 判定规则层面的下限 11.3 解不出来 —— 这正是 relax_to 不能只算不解的原因.
+        // 判定规则层面的下限就是 11.3, 现在它真解得出来了.
         assert!(
-            !resolve_after_relaxing(&request, ash, 11.3).ok,
-            "11.3 若已能解出, 说明解后复核的容限口径变了, relax_to 应回到 11.3"
+            resolve_after_relaxing(&request, ash, 11.3).ok,
+            "11.3 是判定规则算得出的下限, 容限口径对齐后必须真能解"
+        );
+
+        // 再紧一档仍然不行 —— 11.2 的执行界落回 11.29999, 容不下 11.3125.
+        // 少了这条, 上面那条断言就只说明"11.3 能解", 说不明"11.3 是最紧的那一档".
+        assert!(
+            !resolve_after_relaxing(&request, ash, 11.2).ok,
+            "11.2 的执行界是 11.29999, 够不到 11.3125, 不该能解"
         );
 
         // 反例钉死: 差值法给出的 11.2126 连执行界那一档都没挪动.
@@ -2103,5 +2318,568 @@ mod tests {
         ));
         assert!(result.ok, "灰 ≤13 / 粘结 ≥85 在这个煤池里可行");
         assert!(result.infeasible_bounds.is_empty());
+    }
+}
+
+// ============================================================================
+// 容限量级测量 (手动触发, 不进 CI)
+// ============================================================================
+
+/// `FEASIBILITY_TOLERANCE` 与 `quality::ACCEPT_TOLERANCE` 注释里记的那些数字,
+/// 由本模块的 `measure_tolerance_headroom` 产出:
+///
+/// ```text
+/// cargo test --release -- --ignored measure_tolerance_headroom --nocapture
+/// ```
+///
+/// 为什么要能复跑, 而不是注释里记个数就算: 两个常量都是安全关键的, 余量却很薄
+/// (`FEASIBILITY_TOLERANCE` 只有 1.01 倍), 煤池变宽、合同变紧、Clarabel 升级,
+/// 任何一样都可能把它吃掉. 一段没法复跑的"实测"在被推翻之前与编造无法区分.
+///
+/// # 这个模块自己栽过三次, 都是同一个形状
+///
+/// 1. min 累加器的 sentinel 初值 (1.0000) 被当成实测结果报了出去;
+/// 2. 出处标签印的是本轮扫到的候选值而非该行自己的界, 于是出现 "G 界=6.00" 这种
+///    一看就不可能、却无从发觉的标注;
+/// 3. Lower 行重建执行界时符号写反 (`value + slack` 两个方向都用), 把一条**线性**
+///    G 行的量级印成 **106** —— 而 master 的 G 上限是 100.
+///
+/// 第三次最贵: 那个不可能的 106 当时就在输出里, 却没有被当成"工具坏了", 反而被编了
+/// 一个听起来很顺的解释 (回归模型输出越出 0~100), 还围着这个解释加了一整套 ≤100
+/// 的拆分代码. 解释越顺, 越不会回头查工具.
+///
+/// **所以规矩是: 测量产出一个不可能的值时, 第一假设永远是测量错了, 不是现实出人意料.**
+///
+/// 落到代码上的三条防线:
+/// - 累加器一律 `Option` + 样本计数, "零样本"与"恰好测出这个数"在输出上不许长得一样
+///   (见 [`Extremum::report`]), 且每条路径的每个口径都有断言兜底;
+/// - 出处标签印该行自己的合同界与实测量级, 让数字能自证;
+/// - 执行界不靠方向字段猜, 而是拿生产代码的 `effective_upper`/`effective_lower`
+///   反过来验, 对不上就 panic (见 [`measure_row`]).
+#[cfg(test)]
+mod measurements {
+    use super::*;
+    use crate::predict::{CsrObservation, EvaluatorSet};
+    use crate::quality::ACCEPT_TOLERANCE;
+
+    /// 极值累加器. **不允许用可能与真实结果混淆的哨兵初始化** —— 这是上一版的教训:
+    /// `f64::INFINITY` 还好认, `1.0` 这种"看着像结果"的初值会直接骗过读的人。
+    struct Extremum {
+        /// 取最大还是最小.
+        maximize: bool,
+        samples: usize,
+        best: Option<f64>,
+        witness: String,
+    }
+
+    impl Extremum {
+        fn new(maximize: bool) -> Self {
+            Self {
+                maximize,
+                samples: 0,
+                best: None,
+                witness: String::new(),
+            }
+        }
+
+        fn record(&mut self, value: f64, witness: impl FnOnce() -> String) {
+            if !value.is_finite() {
+                return;
+            }
+            self.samples += 1;
+            let better = match self.best {
+                None => true,
+                Some(current) => {
+                    if self.maximize {
+                        value > current
+                    } else {
+                        value < current
+                    }
+                }
+            };
+            if better {
+                self.best = Some(value);
+                self.witness = witness();
+            }
+        }
+
+        /// 零样本必须**响亮地**报出来, 不能静默给个初值.
+        fn report(&self, label: &str) {
+            match self.best {
+                Some(value) => println!(
+                    "  {label}: {value:.4e}   (样本 {} 条; 出处 {})",
+                    self.samples, self.witness
+                ),
+                None => println!("  {label}: ⚠ 该路径 0 样本 —— 没有测到, 不是测出来是 0",),
+            }
+        }
+    }
+
+    /// 一次求解在某条带界指标行上留下的量级.
+    ///
+    /// `residual` 是 `Option`: 解落在执行界内侧时**没有残差可言**, 而"量级之比"是
+    /// 这一行自己的性质, 跟残差有没有无关 —— 两者的样本集不同, 分开记, 免得又出现
+    /// "某个统计量其实没测到几条"却看不出来的情况.
+    struct RowMeasurement {
+        residual: Option<f64>,
+        check_magnitude: f64,
+        lp_magnitude: f64,
+        /// 这一行自己的合同界 —— 不是本轮扫到的那个值. 出处要能自证, 否则会出现
+        /// "G 界=6.00" 这种一看就不可能的标注.
+        own_bound: f64,
+    }
+
+    /// 从公开结果里恢复按煤池顺序排列的配比.
+    ///
+    /// `orders` 已按 `OUTPUT_RATIO_TOLERANCE`(1e-5) 滤掉了微量煤, 所以 `Σ|aᵢxᵢ|`
+    /// 会略微偏小; 31 煤池上界约 n×1e-5×max|aᵢ| ≈ 3e-3, 相对量级 ~5 是 0.06%,
+    /// 对我们只取两三位有效数字的比值无影响.
+    fn ratios_of(result: &BlendResult, coals: &[Coal]) -> Vec<f64> {
+        coals
+            .iter()
+            .map(|coal| {
+                result
+                    .orders
+                    .iter()
+                    .find(|order| order.coal == coal.name)
+                    .map_or(0.0, |order| order.ratio)
+            })
+            .collect()
+    }
+
+    /// 用**真正进 LP 的那一行**算量级, 不做手推近似: 线性 / 仿射 / 回归三种公式
+    /// 都经由 `upper_constraint`/`lower_constraint` 编译成同一形式.
+    fn measure_row(
+        result: &BlendResult,
+        coals: &[Coal],
+        models: &EvaluatorSet,
+        spec: &Spec,
+        truncate: bool,
+    ) -> Option<RowMeasurement> {
+        let indicator = spec.indicator.as_str();
+        let check = result
+            .indicator_check
+            .iter()
+            .find(|check| check.indicator == indicator)?;
+        let slack = check.slack?;
+
+        // 执行界要从 slack 反推, 而**两个方向的符号是反的**:
+        // Upper 的 slack = 执行界 − 实测值, Lower 的 slack = 实测值 − 执行界.
+        // 两边都写成 `value + slack` 会让 Lower 行算出 `2·实测值 − 界` —— 这个错
+        // 曾经把一条线性 G 行的量级印成 106 (master 的 G 上限是 100), 而当时没被
+        // 当成工具坏了, 反倒给它编了个"回归输出越界"的解释.
+        //
+        // 所以这里不靠方向字段猜, 而是拿生产代码算出的两条执行界**反过来验**:
+        // 哪一侧重建得上就是哪一侧 (Range 两侧都在场时, slack 报的是最紧那一侧,
+        // 靠这个自然区分开). 两侧都对不上 = 测量工具坏了, 立刻炸, 不要出数.
+        let rule = acceptance_rule(spec, truncate);
+        let upper_bound = spec
+            .max
+            .filter(|_| matches!(spec.direction, Direction::Upper | Direction::Range))
+            .map(|maximum| effective_upper(maximum, &rule));
+        let lower_bound = spec
+            .min
+            .filter(|_| matches!(spec.direction, Direction::Lower | Direction::Range))
+            .map(|minimum| effective_lower(minimum, &rule));
+        let fits =
+            |candidate: f64, bound: f64| (candidate - bound).abs() <= 1e-9 * (1.0 + bound.abs());
+        let (executed, upper) = match (
+            upper_bound.filter(|bound| fits(check.value + slack, *bound)),
+            lower_bound.filter(|bound| fits(check.value - slack, *bound)),
+        ) {
+            (Some(bound), _) => (bound, true),
+            (None, Some(bound)) => (bound, false),
+            (None, None) => panic!(
+                "测量工具重建不出执行界: {indicator} 实测={} slack={slack:e} \
+                 上界候选={upper_bound:?} 下界候选={lower_bound:?} —— 先查工具, 别信数",
+                check.value
+            ),
+        };
+
+        let borrowed: Vec<&Coal> = coals.iter().collect();
+        let formulas = build_formulas(&borrowed, models);
+        let formula = formulas.get(indicator)?;
+        let (row, bound) = if upper {
+            formula.upper_constraint(executed)
+        } else {
+            formula.lower_constraint(executed)
+        };
+        let ratios = ratios_of(result, coals);
+        let lp_magnitude: f64 = row
+            .iter()
+            .zip(&ratios)
+            .map(|(coefficient, ratio)| (coefficient * ratio).abs())
+            .sum::<f64>()
+            .max(bound.abs());
+
+        Some(RowMeasurement {
+            // 只有落在执行界外侧的行才有残差.
+            residual: (slack < 0.0).then(|| -slack),
+            check_magnitude: check.value.abs().max(executed.abs()),
+            lp_magnitude,
+            own_bound: check.max.or(check.min).unwrap_or(f64::NAN),
+        })
+    }
+
+    struct Accumulators {
+        /// residual/(1+复核量级) 的最大值 —— ACCEPT_TOLERANCE 的余量看它.
+        accept_ratio: Extremum,
+        /// 复核量级/LP 行量级 的最小值, 全部带界行.
+        magnitude_ratio: Extremum,
+        /// 同上, 但只算**落在执行界外侧**的行.
+        ///
+        /// 分开报是因为两者结论不同: 顶不到界的行实测值离界很远, LP 行量级
+        /// `Σ|执行界−propᵢ|xᵢ` 随之变大, 比值自然跌到 1 以下 —— 但那种行的余量以
+        /// "档"计, 容限差几倍毫无后果. 真正有后果的只有已经顶在界上、差一丝就被否掉
+        /// 的行, 也就是这一条.
+        magnitude_ratio_binding: Extremum,
+        /// residual/(1+LP 行量级) 的最大值 —— FEASIBILITY_TOLERANCE 的余量看它.
+        lp_ratio: Extremum,
+        /// 复核侧放行量换算到指标单位的最大值 —— 与化验 0.01 分辨率对比看它.
+        ///
+        /// 口径: `ACCEPT_TOLERANCE × (1 + max(|实测值|,|执行界|))`.
+        allowance: Extremum,
+        /// LP 侧放行量换算到指标单位的最大值.
+        ///
+        /// 口径: `FEASIBILITY_TOLERANCE × (1 + Σ|aᵢxᵢ|)` —— 量级取的是**行系数相对
+        /// 绑定值的平均绝对偏差**, 与复核侧那个"界的量级"不是一回事, 数值也差得远
+        /// (灰分行 MAD ≈ 2, 而界 ≈ 11). 两个常量相等不代表两个放行量相等, 所以分开测,
+        /// 各自的注释各自引用, 别互相抄.
+        lp_allowance: Extremum,
+        /// 最差绝对残差 (指标单位) —— 解最多能落在执行界外多远.
+        residual_abs: Extremum,
+    }
+
+    impl Accumulators {
+        fn new() -> Self {
+            Self {
+                accept_ratio: Extremum::new(true),
+                magnitude_ratio: Extremum::new(false),
+                magnitude_ratio_binding: Extremum::new(false),
+                lp_ratio: Extremum::new(true),
+                allowance: Extremum::new(true),
+                lp_allowance: Extremum::new(true),
+                residual_abs: Extremum::new(true),
+            }
+        }
+
+        fn absorb(&mut self, tag: &str, indicator: &str, row: &RowMeasurement) {
+            let witness = || {
+                format!(
+                    "{tag}/{indicator} 该行合同界={:.2} 实测量级={:.1}",
+                    row.own_bound, row.check_magnitude
+                )
+            };
+            // 量级之比与放行量: 每一条带界的行都算, 与有没有残差无关.
+            self.magnitude_ratio.record(
+                (1.0 + row.check_magnitude) / (1.0 + row.lp_magnitude),
+                witness,
+            );
+            self.allowance
+                .record(ACCEPT_TOLERANCE * (1.0 + row.check_magnitude), witness);
+            self.lp_allowance
+                .record(FEASIBILITY_TOLERANCE * (1.0 + row.lp_magnitude), witness);
+            // 残差口径: 只有落在执行界外侧的行才进样本.
+            let Some(residual) = row.residual else { return };
+            self.magnitude_ratio_binding.record(
+                (1.0 + row.check_magnitude) / (1.0 + row.lp_magnitude),
+                witness,
+            );
+            self.accept_ratio
+                .record(residual / (1.0 + row.check_magnitude), witness);
+            self.lp_ratio
+                .record(residual / (1.0 + row.lp_magnitude), witness);
+            self.residual_abs.record(residual, witness);
+        }
+
+        fn report(&self, title: &str) {
+            println!("\n{title}");
+            self.accept_ratio
+                .report("最大 residual/(1+复核量级)  [ACCEPT_TOLERANCE 余量]");
+            self.magnitude_ratio
+                .report("最小 复核量级/LP 行量级     [全部带界行]");
+            self.magnitude_ratio_binding
+                .report("  └ 仅顶界行 (有残差的)     [<1 即复核比 LP 严, 引用这一条]");
+            self.lp_ratio
+                .report("最大 residual/(1+LP 行量级) [FEASIBILITY_TOLERANCE 余量]");
+            self.residual_abs
+                .report("最大 绝对残差 (指标单位)    [解能落在执行界外多远]");
+            self.allowance
+                .report("最大 复核侧放行量 (指标单位)[quality::ACCEPT_TOLERANCE 引用]");
+            self.lp_allowance
+                .report("最大 LP 侧放行量 (指标单位) [FEASIBILITY_TOLERANCE 引用]");
+        }
+    }
+
+    /// 宽煤池: master 里化验齐全的那些, 价格按"好煤贵"合成 —— 用户在煤池页填价即此形状.
+    ///
+    /// 只用作**测量输入**, 不断言任何 master 内容: 数据更新会让下面的数字变化,
+    /// 那正是要重跑本测试、并按新结果更新常量注释的信号.
+    fn wide_pool() -> Vec<Coal> {
+        let Ok(master) = crate::seed::CoalMaster::load_embedded() else {
+            return Vec::new();
+        };
+        master
+            .coals
+            .iter()
+            .filter(|entry| entry.has_full_indicators())
+            .filter_map(|entry| {
+                let props = &entry.props;
+                let fob = 900.0 + props["G"] * 6.0 + props["CSR"] * 5.0 - props["A"] * 25.0
+                    + props["Y"] * 8.0
+                    - props["S"] * 60.0;
+                entry.to_coal(Some(fob.max(400.0)), Some(30.0))
+            })
+            .collect()
+    }
+
+    fn verified_pool() -> Vec<Coal> {
+        crate::seed::CoalMaster::load_embedded().map_or_else(
+            |_| Vec::new(),
+            |master| {
+                master
+                    .verified()
+                    .filter_map(|entry| entry.to_coal(None, None))
+                    .collect()
+            },
+        )
+    }
+
+    fn default_contract() -> Vec<Spec> {
+        crate::seed::CoalMaster::load_embedded()
+            .map_or_else(|_| Vec::new(), |master| master.default_contract.specs)
+    }
+
+    /// 五种合同变体: 裸合同 / 安全余量 / 两位小数四舍五入 / 两位小数截断 / 上下双界.
+    fn variants() -> Vec<(&'static str, Option<f64>, Option<AcceptanceMode>, bool)> {
+        vec![
+            ("裸合同", None, None, false),
+            ("margin", Some(0.3), None, false),
+            ("round2", None, Some(AcceptanceMode::Round), false),
+            ("trunc2", None, Some(AcceptanceMode::Truncate), false),
+            ("双界", None, None, true),
+        ]
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sweep(
+        tag: &'static str,
+        coals: &[Coal],
+        base: &[Spec],
+        models: &EvaluatorSet,
+        step: f64,
+        span: i32,
+        into: &mut Accumulators,
+    ) {
+        if coals.is_empty() || base.is_empty() {
+            return;
+        }
+        for (label, margin, mode, two_sided) in variants() {
+            for (index, spec) in base.iter().enumerate() {
+                if spec.enforcement != Enforcement::Hard {
+                    continue;
+                }
+                let (direction, anchor) = match (spec.direction, spec.max, spec.min) {
+                    (Direction::Upper, Some(maximum), _) => (Direction::Upper, maximum),
+                    (Direction::Lower, _, Some(minimum)) => (Direction::Lower, minimum),
+                    _ => continue,
+                };
+                for offset in -span..=span {
+                    let candidate = anchor + f64::from(offset) * step;
+                    for truncate in [false, true] {
+                        let mut specs = base.to_vec();
+                        match direction {
+                            Direction::Upper => {
+                                specs[index].max = Some(candidate);
+                                if two_sided {
+                                    specs[index].min = Some(candidate - 4.0);
+                                    specs[index].direction = Direction::Range;
+                                }
+                            }
+                            Direction::Lower => {
+                                specs[index].min = Some(candidate);
+                                if two_sided {
+                                    specs[index].max = Some(candidate + 4.0);
+                                    specs[index].direction = Direction::Range;
+                                }
+                            }
+                            Direction::Range => continue,
+                        }
+                        for spec in &mut specs {
+                            spec.margin = margin;
+                            if let Some(mode) = mode {
+                                spec.acceptance = Some(AcceptanceRule {
+                                    mode,
+                                    decimals: Some(2),
+                                    tolerance: 0.0,
+                                });
+                            }
+                        }
+                        let request = BlendRequest {
+                            coals: coals.to_vec(),
+                            specs: specs.clone(),
+                            total_quantity: Some(3_700.0),
+                            truncate_decimal: truncate,
+                        };
+                        let result = solve_with_evaluators(&request, models);
+                        if !result.ok {
+                            continue;
+                        }
+                        for spec in specs
+                            .iter()
+                            .filter(|spec| spec.enabled && spec.enforcement == Enforcement::Hard)
+                        {
+                            if let Some(row) = measure_row(&result, coals, models, spec, truncate) {
+                                into.absorb(&format!("{tag}·{label}"), &spec.indicator, &row);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 训练一组能过门控的 G 仿射 + CSR 回归评估器, 把 `AffineCalibration` /
+    /// `Regression` 那条路也拉进测量 —— 它今天不在产品路径上 (`solve` 用空评估器),
+    /// 但 `solve_with_evaluators` 是公开 API, `predict.rs` 就是为接上它写的.
+    fn trained_evaluators() -> EvaluatorSet {
+        let g_observations: Vec<GObservation> = (0..40)
+            .map(|index| {
+                let g_linear = 60.0 + f64::from(index) * 0.8;
+                GObservation {
+                    g_linear,
+                    g_measured: 0.9 * g_linear + 4.0,
+                }
+            })
+            .collect();
+        let csr_observations: Vec<CsrObservation> = (0..40)
+            .map(|index| {
+                let t = f64::from(index);
+                let s = 0.5 + (t * 0.7).sin().abs() * 3.0;
+                let a = 6.0 + (t * 1.3).cos().abs() * 8.0;
+                let v = 18.0 + (t * 0.5 + 1.0).sin().abs() * 16.0;
+                let g = 65.0 + (t * 0.9).cos().abs() * 28.0;
+                let y = 9.0 + (t * 1.7).sin().abs() * 11.0;
+                let m = 8.0 + (t * 0.3 + 0.5).cos().abs() * 16.0;
+                CsrObservation {
+                    s,
+                    a,
+                    v,
+                    g,
+                    y,
+                    m,
+                    csr_measured: 30.0 + s + 0.5 * a + 0.8 * v + 0.3 * g + 0.6 * y + 0.4 * m,
+                }
+            })
+            .collect();
+        let policy = ModelPolicy {
+            min_g_samples: 8,
+            min_csr_samples: 8,
+            max_g_cv_mae: 5.0,
+            max_csr_cv_mae: 5.0,
+            extrapolation_ratio: 1.0,
+            ..ModelPolicy::default()
+        };
+        EvaluatorSet::train(&g_observations, &csr_observations, &policy)
+            .expect("测量用评估器应能训练")
+    }
+
+    #[test]
+    #[ignore = "量级测量, 手动触发: cargo test --release -- --ignored --nocapture"]
+    fn measure_tolerance_headroom() {
+        println!(
+            "\n常量现值: FEASIBILITY_TOLERANCE = {FEASIBILITY_TOLERANCE:e}, \
+             ACCEPT_TOLERANCE = {ACCEPT_TOLERANCE:e}"
+        );
+        println!("化验分辨率按 0.01 计.");
+
+        let verified = verified_pool();
+        let wide = wide_pool();
+        let real = super::tests::real_case_coals();
+        let contract = default_contract();
+        let real_contract = vec![
+            Spec::upper("A", 10.0),
+            Spec::upper("S", 1.0),
+            Spec::upper("V", 28.0),
+            Spec::lower("Y", 15.0),
+            Spec::lower("G", 85.0),
+        ];
+
+        // —— 线性行: 今天产品路径上的全部 Hard 行 (空评估器).
+        let plain = EvaluatorSet::default();
+        let mut linear = Accumulators::new();
+        sweep(
+            "verified4",
+            &verified,
+            &contract,
+            &plain,
+            0.01,
+            200,
+            &mut linear,
+        );
+        sweep(
+            "real4",
+            &real,
+            &real_contract,
+            &plain,
+            0.01,
+            200,
+            &mut linear,
+        );
+        sweep("wide", &wide, &contract, &plain, 0.03, 120, &mut linear);
+        linear.report("【线性行】formula_for 的加权平均 —— 今天 solve() 走的就是这条");
+
+        // —— 仿射 / 回归行: G 的 AffineCalibration 与 CSR 的 Regression.
+        let models = trained_evaluators();
+        println!(
+            "\n评估器状态: G 校准 {}, CSR 回归 {}",
+            if models.g.is_some() {
+                "已启用"
+            } else {
+                "未启用"
+            },
+            if models.csr.is_some() {
+                "已启用"
+            } else {
+                "未启用"
+            },
+        );
+        let mut modelled = Accumulators::new();
+        sweep(
+            "verified4",
+            &verified,
+            &contract,
+            &models,
+            0.01,
+            200,
+            &mut modelled,
+        );
+        sweep("wide", &wide, &contract, &models, 0.03, 120, &mut modelled);
+        modelled.report("【仿射/回归行】solve_with_evaluators —— predict.rs 接上后即产品路径");
+
+        println!("\n对照: 放行量 / 化验 0.01 —— 这个比值越小越安全, 它是合同界被放宽的真实幅度.");
+
+        // 断言只管"测量确实跑到了", 不断言任何 master 内容.
+        // **每条路径都要断言**: 只盯线性那一条的话, 仿射/回归全 ⚠ 零样本时测试照样绿,
+        // 而零样本正是最该让人停下来的情形.
+        for (label, accumulators) in [("线性行", &linear), ("仿射/回归行", &modelled)] {
+            for (metric, extremum) in [
+                ("residual/(1+复核量级)", &accumulators.accept_ratio),
+                ("复核量级/LP 行量级", &accumulators.magnitude_ratio),
+                (
+                    "顶界行的复核量级/LP 行量级",
+                    &accumulators.magnitude_ratio_binding,
+                ),
+                ("residual/(1+LP 行量级)", &accumulators.lp_ratio),
+                ("绝对残差", &accumulators.residual_abs),
+                ("复核侧放行量", &accumulators.allowance),
+                ("LP 侧放行量", &accumulators.lp_allowance),
+            ] {
+                assert!(
+                    extremum.best.is_some(),
+                    "{label} 的 {metric} 0 样本: 测量没跑到, 不是测出来是 0"
+                );
+            }
+        }
     }
 }
