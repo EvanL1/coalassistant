@@ -2329,12 +2329,29 @@ mod tests {
 /// ```
 ///
 /// 为什么要能复跑, 而不是注释里记个数就算: 两个常量都是安全关键的, 余量却很薄
-/// (`FEASIBILITY_TOLERANCE` 只有 1.02 倍), 煤池变宽、合同变紧、Clarabel 升级,
-/// 任何一样都可能把它吃掉. 一段没法复跑的"实测"在被推翻之前与编造无法区分 ——
-/// 上一版就把一个 min 累加器的 sentinel 初值 (1.0000) 当成了实测结果报出去。
+/// (`FEASIBILITY_TOLERANCE` 只有 1.01 倍), 煤池变宽、合同变紧、Clarabel 升级,
+/// 任何一样都可能把它吃掉. 一段没法复跑的"实测"在被推翻之前与编造无法区分.
 ///
-/// 所以这里的累加器一律 `Option` + 样本计数: "零样本"和"恰好测出这个数"在输出上
-/// 必须长得不一样, 见 [`Extremum::report`].
+/// # 这个模块自己栽过三次, 都是同一个形状
+///
+/// 1. min 累加器的 sentinel 初值 (1.0000) 被当成实测结果报了出去;
+/// 2. 出处标签印的是本轮扫到的候选值而非该行自己的界, 于是出现 "G 界=6.00" 这种
+///    一看就不可能、却无从发觉的标注;
+/// 3. Lower 行重建执行界时符号写反 (`value + slack` 两个方向都用), 把一条**线性**
+///    G 行的量级印成 **106** —— 而 master 的 G 上限是 100.
+///
+/// 第三次最贵: 那个不可能的 106 当时就在输出里, 却没有被当成"工具坏了", 反而被编了
+/// 一个听起来很顺的解释 (回归模型输出越出 0~100), 还围着这个解释加了一整套 ≤100
+/// 的拆分代码. 解释越顺, 越不会回头查工具.
+///
+/// **所以规矩是: 测量产出一个不可能的值时, 第一假设永远是测量错了, 不是现实出人意料.**
+///
+/// 落到代码上的三条防线:
+/// - 累加器一律 `Option` + 样本计数, "零样本"与"恰好测出这个数"在输出上不许长得一样
+///   (见 [`Extremum::report`]), 且每条路径的每个口径都有断言兜底;
+/// - 出处标签印该行自己的合同界与实测量级, 让数字能自证;
+/// - 执行界不靠方向字段猜, 而是拿生产代码的 `effective_upper`/`effective_lower`
+///   反过来验, 对不上就 panic (见 [`measure_row`]).
 #[cfg(test)]
 mod measurements {
     use super::*;
@@ -2432,15 +2449,48 @@ mod measurements {
         result: &BlendResult,
         coals: &[Coal],
         models: &EvaluatorSet,
-        indicator: &str,
+        spec: &Spec,
+        truncate: bool,
     ) -> Option<RowMeasurement> {
+        let indicator = spec.indicator.as_str();
         let check = result
             .indicator_check
             .iter()
             .find(|check| check.indicator == indicator)?;
         let slack = check.slack?;
-        let executed = check.value + slack;
-        let upper = check.max.is_some();
+
+        // 执行界要从 slack 反推, 而**两个方向的符号是反的**:
+        // Upper 的 slack = 执行界 − 实测值, Lower 的 slack = 实测值 − 执行界.
+        // 两边都写成 `value + slack` 会让 Lower 行算出 `2·实测值 − 界` —— 这个错
+        // 曾经把一条线性 G 行的量级印成 106 (master 的 G 上限是 100), 而当时没被
+        // 当成工具坏了, 反倒给它编了个"回归输出越界"的解释.
+        //
+        // 所以这里不靠方向字段猜, 而是拿生产代码算出的两条执行界**反过来验**:
+        // 哪一侧重建得上就是哪一侧 (Range 两侧都在场时, slack 报的是最紧那一侧,
+        // 靠这个自然区分开). 两侧都对不上 = 测量工具坏了, 立刻炸, 不要出数.
+        let rule = acceptance_rule(spec, truncate);
+        let upper_bound = spec
+            .max
+            .filter(|_| matches!(spec.direction, Direction::Upper | Direction::Range))
+            .map(|maximum| effective_upper(maximum, &rule));
+        let lower_bound = spec
+            .min
+            .filter(|_| matches!(spec.direction, Direction::Lower | Direction::Range))
+            .map(|minimum| effective_lower(minimum, &rule));
+        let fits =
+            |candidate: f64, bound: f64| (candidate - bound).abs() <= 1e-9 * (1.0 + bound.abs());
+        let (executed, upper) = match (
+            upper_bound.filter(|bound| fits(check.value + slack, *bound)),
+            lower_bound.filter(|bound| fits(check.value - slack, *bound)),
+        ) {
+            (Some(bound), _) => (bound, true),
+            (None, Some(bound)) => (bound, false),
+            (None, None) => panic!(
+                "测量工具重建不出执行界: {indicator} 实测={} slack={slack:e} \
+                 上界候选={upper_bound:?} 下界候选={lower_bound:?} —— 先查工具, 别信数",
+                check.value
+            ),
+        };
 
         let borrowed: Vec<&Coal> = coals.iter().collect();
         let formulas = build_formulas(&borrowed, models);
@@ -2470,18 +2520,19 @@ mod measurements {
     struct Accumulators {
         /// residual/(1+复核量级) 的最大值 —— ACCEPT_TOLERANCE 的余量看它.
         accept_ratio: Extremum,
-        /// 复核量级/LP 行量级 的最小值 —— "复核会不会比 LP 严"看它.
+        /// 复核量级/LP 行量级 的最小值, 全部带界行.
         magnitude_ratio: Extremum,
+        /// 同上, 但只算**落在执行界外侧**的行.
+        ///
+        /// 分开报是因为两者结论不同: 顶不到界的行实测值离界很远, LP 行量级
+        /// `Σ|执行界−propᵢ|xᵢ` 随之变大, 比值自然跌到 1 以下 —— 但那种行的余量以
+        /// "档"计, 容限差几倍毫无后果. 真正有后果的只有已经顶在界上、差一丝就被否掉
+        /// 的行, 也就是这一条.
+        magnitude_ratio_binding: Extremum,
         /// residual/(1+LP 行量级) 的最大值 —— FEASIBILITY_TOLERANCE 的余量看它.
         lp_ratio: Extremum,
         /// 放行量换算到指标单位的最大值 —— 与化验 0.01 分辨率对比看它.
         allowance: Extremum,
-        /// 同上, 但只算实测量级落在物理量程内 (≤100) 的行.
-        ///
-        /// 分开报是因为: 放行量随**实测值**的量级走, 而回归模型可能吐出 CSR=133
-        /// 这种越出 0~100 的数 (代码已就此告警并降级为未验证). 那种行的放行量最大,
-        /// 却不该拿来给"合同界能被放宽多少"背书 —— 引用时用这一条.
-        allowance_in_range: Extremum,
     }
 
     impl Accumulators {
@@ -2489,9 +2540,9 @@ mod measurements {
             Self {
                 accept_ratio: Extremum::new(true),
                 magnitude_ratio: Extremum::new(false),
+                magnitude_ratio_binding: Extremum::new(false),
                 lp_ratio: Extremum::new(true),
                 allowance: Extremum::new(true),
-                allowance_in_range: Extremum::new(true),
             }
         }
 
@@ -2507,13 +2558,14 @@ mod measurements {
                 (1.0 + row.check_magnitude) / (1.0 + row.lp_magnitude),
                 witness,
             );
-            let allowance = ACCEPT_TOLERANCE * (1.0 + row.check_magnitude);
-            self.allowance.record(allowance, witness);
-            if row.check_magnitude <= 100.0 {
-                self.allowance_in_range.record(allowance, witness);
-            }
+            self.allowance
+                .record(ACCEPT_TOLERANCE * (1.0 + row.check_magnitude), witness);
             // 残差口径: 只有落在执行界外侧的行才进样本.
             let Some(residual) = row.residual else { return };
+            self.magnitude_ratio_binding.record(
+                (1.0 + row.check_magnitude) / (1.0 + row.lp_magnitude),
+                witness,
+            );
             self.accept_ratio
                 .record(residual / (1.0 + row.check_magnitude), witness);
             self.lp_ratio
@@ -2525,13 +2577,13 @@ mod measurements {
             self.accept_ratio
                 .report("最大 residual/(1+复核量级)  [ACCEPT_TOLERANCE 余量]");
             self.magnitude_ratio
-                .report("最小 复核量级/LP 行量级     [<1 即复核比 LP 严]");
+                .report("最小 复核量级/LP 行量级     [全部带界行]");
+            self.magnitude_ratio_binding
+                .report("  └ 仅顶界行 (有残差的)     [<1 即复核比 LP 严, 引用这一条]");
             self.lp_ratio
                 .report("最大 residual/(1+LP 行量级) [FEASIBILITY_TOLERANCE 余量]");
             self.allowance
-                .report("最大 放行量 (指标单位)      [含越出物理量程的模型输出]");
-            self.allowance_in_range
-                .report("  └ 仅物理量程内 (≤100)     [对比化验 0.01, 引用这一条]");
+                .report("最大 放行量 (指标单位)      [对比化验 0.01]");
         }
     }
 
@@ -2653,8 +2705,7 @@ mod measurements {
                             .iter()
                             .filter(|spec| spec.enabled && spec.enforcement == Enforcement::Hard)
                         {
-                            if let Some(row) = measure_row(&result, coals, models, &spec.indicator)
-                            {
+                            if let Some(row) = measure_row(&result, coals, models, spec, truncate) {
                                 into.absorb(&format!("{tag}·{label}"), &spec.indicator, &row);
                             }
                         }
@@ -2785,9 +2836,24 @@ mod measurements {
         println!("\n对照: 放行量 / 化验 0.01 —— 这个比值越小越安全, 它是合同界被放宽的真实幅度.");
 
         // 断言只管"测量确实跑到了", 不断言任何 master 内容.
-        assert!(
-            linear.accept_ratio.samples > 0,
-            "线性行 0 样本: 网格没解出任何顶界的解, 测量没跑到"
-        );
+        // **每条路径都要断言**: 只盯线性那一条的话, 仿射/回归全 ⚠ 零样本时测试照样绿,
+        // 而零样本正是最该让人停下来的情形.
+        for (label, accumulators) in [("线性行", &linear), ("仿射/回归行", &modelled)] {
+            for (metric, extremum) in [
+                ("residual/(1+复核量级)", &accumulators.accept_ratio),
+                ("复核量级/LP 行量级", &accumulators.magnitude_ratio),
+                (
+                    "顶界行的复核量级/LP 行量级",
+                    &accumulators.magnitude_ratio_binding,
+                ),
+                ("residual/(1+LP 行量级)", &accumulators.lp_ratio),
+                ("放行量", &accumulators.allowance),
+            ] {
+                assert!(
+                    extremum.best.is_some(),
+                    "{label} 的 {metric} 0 样本: 测量没跑到, 不是测出来是 0"
+                );
+            }
+        }
     }
 }

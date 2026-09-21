@@ -5,6 +5,27 @@
 //!
 //! 默认仍使用录入 CSR 代理；只有去重样本、LOOCV 误差与训练域均达标时，
 //! 回归值才可进入混合层约束。
+//!
+//! # ⚠ 模型一旦接进产品路径，必须重跑容限量级测量
+//!
+//! 本模块拟合出来的系数会经 `build_formulas` 变成 LP 的 `AffineCalibration`(G) /
+//! `Regression`(CSR) 行。这两种行的量级由**各煤分子系数的离散度**决定，与合同界
+//! 无关 —— 线性行那条"行量级 ≤ 2×界"的上界在这里**不成立**，只有实测余量。
+//!
+//! 而 `optimizer::FEASIBILITY_TOLERANCE`(= `quality::ACCEPT_TOLERANCE`) 的余量
+//! 只剩 1.01 倍，注释里记的那一列仿射/回归数据用的是测量测试里**合成**的评估器
+//! (G 仿射 slope 0.9 / intercept 4.0 + 六特征 CSR 拟合)。真实拟合系数一换，离散度
+//! 就变，那一列不保证还成立。
+//!
+//! 所以把真实模型接进 `solve_with_evaluators` 的那次改动，要连带跑：
+//!
+//! ```text
+//! cargo test --release -- --ignored measure_tolerance_headroom --nocapture
+//! ```
+//!
+//! 并按输出更新那两个常量的注释。余量掉到 1 倍以下就意味着"可行合同报不可行"会
+//! 复发 —— 那时要抬容限，但**顺序是硬的**：先修 `quality::judged_value` 的贴边
+//! 阈值，再抬容限，理由见 `quality::ACCEPT_TOLERANCE` 的"改动顺序"一节。
 
 use serde::{Deserialize, Serialize};
 
