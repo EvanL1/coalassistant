@@ -34,6 +34,7 @@
     "coal_type_basis": "按 GB/T 5751-2009, 判据为 props 的 V(视为 Vdaf)/G/Y. G>85 而缺 Y 时无法区分焦煤与肥煤, 现按焦煤或 1/3焦煤 记, 补 Y 后须复判",
     "form": {
       "精煤":      "洗选后的低灰产品, 炼焦配煤主力. 未特别说明的煤默认为此",
+      "筛选精煤":  "精煤的一种, 筛分产出, 粒度较粗, 水分低于浮选精煤",
       "浮选精煤":  "精煤的一种, 细粒级浮选产出, 水分偏高",
       "中煤":      "中间密度产品, 灰分高于精煤",
       "煤泥":      "<0.5mm 细泥, 高灰高水, 一般不直接入炉",
@@ -131,10 +132,10 @@
       "note": "用户主力煤. CSR/Y 是估值."
     },
 
-    { "name": "古交-原", "region": "山西", "coal_type": "焦煤", "form": "煤泥",
+    { "name": "古交煤泥", "region": "山西", "coal_type": "焦煤", "form": "煤泥",
       "status": "archived",
       "props": { "S": 1.1, "A": 13.5, "V": 21, "G": 80, "petro": 0.1 },
-      "note": "煤泥, 不可直接用. 被 '古交浮精' 取代." },
+      "note": "煤泥, 不可直接用. 被 '古交浮精' 取代. 原名「古交-原」易被读成原煤, 2026-09-21 改名." },
 
     { "name": "正文", "region": "山西", "coal_type": "焦煤", "form": "精煤",
       "status": "active", "props": { "S": 2.0, "A": 10.5, "V": 20, "G": 84, "Y": 9, "petro": 0.1, "CSR": 70, "M": 10 }, "confidence": { "CSR": "spec", "M": "spec" },
@@ -148,7 +149,7 @@
 
     { "name": "铁新",     "region": "山西",      "coal_type": "焦煤", "form": "精煤", "status": "active", "props": { "S": 3.2, "A": 6.5, "V": 21, "G": 92, "Y": 16, "CSR": 60, "M": 12, "petro": 0.1 }, "confidence": { "Y": "spec", "CSR": "spec", "M": "spec" }, "note": "2026-09-17 调研: Y≥16 CSR≥60 M≤12" },
     { "name": "安益",     "region": "山西",      "coal_type": "焦煤", "form": "精煤", "status": "active", "props": { "S": 3.3, "A": 7.28, "V": 18.1, "G": 81, "M": 12, "petro": 0.1, "Y": 15, "CSR": 65 }, "confidence": { "Y": "spec", "CSR": "spec" }, "note": "2026-05 报价" },
-    { "name": "筛精",     "region": "山西临汾",  "coal_type": "肥煤", "form": "精煤", "status": "active", "props": { "S": 3.9, "A": 9.5, "V": 25, "G": 100, "Y": 36, "M": 10, "petro": 0.1, "CSR": 70 }, "confidence": { "CSR": "spec", "Y": "spec", "M": "spec" }, "note": "2026-09-17 调研: Y≥36 M≤10" },
+    { "name": "老母坡筛精", "region": "山西临汾",  "coal_type": "肥煤", "form": "筛选精煤", "status": "active", "props": { "S": 3.9, "A": 9.5, "V": 25, "G": 100, "Y": 36, "M": 10, "petro": 0.1, "CSR": 70 }, "confidence": { "CSR": "spec", "Y": "spec", "M": "spec" }, "note": "临汾老母坡矿的筛选精煤. 2026-09-21 用户指认矿名 (调研表原记为产品名「筛精」, 矿井未确认). 2026-09-17 调研: Y≥36 M≤10" },
     { "name": "孟子峪",   "region": "山西吕梁",  "coal_type": "焦煤", "form": "精煤", "status": "active", "props": { "S": 2.0, "A": 9.2, "V": 17.5, "G": 75, "M": 12, "petro": 0.1, "Y": 12, "CSR": 70 }, "confidence": { "Y": "spec", "CSR": "spec" }, "note": "2026-05 报价 现货 1500 吨" },
     { "name": "神州-A",   "region": "山西大同",  "coal_type": "瘦煤", "form": "精煤", "status": "active", "props": { "S": 1.7, "A": 12,   "V": 18, "G": 62, "petro": 0.1, "Y": 14, "CSR": 60, "M": 8 }, "confidence": { "Y": "spec", "CSR": "spec", "M": "spec" }, "note": "第一批次" },
     { "name": "神州-B",   "region": "山西大同",  "coal_type": "瘦煤", "form": "精煤", "status": "active", "props": { "S": 2.1, "A": 11.5, "V": 19, "G": 53, "petro": 0.1, "Y": 14, "CSR": 60, "M": 8 }, "confidence": { "Y": "spec", "CSR": "spec", "M": "spec" }, "note": "第二批次" },
