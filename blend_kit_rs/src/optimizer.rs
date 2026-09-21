@@ -26,29 +26,33 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 ///
 /// 曾经写着"纯 Hard 配方残差本就在 1e-13 量级, 用不满这点容限" —— 这句是错的,
 /// 只对 Σx=1 那一行成立 (配比列经归一化重投影, 残差才塌到 1e-13). 指标约束行不
-/// 重投影, 残差就是 Clarabel 的原始收敛量级: 45.0 万条 Hard 行样本里最大
-/// residual/(1+magnitude) 实测到 9.77e-8, 已经贴着本值。Hard 行同样吃满这点容限。
+/// 重投影, 残差就是 Clarabel 的原始收敛量级, Hard 行同样吃满这点容限.
 ///
-/// 取值依据 (**已被下面那条取代, 保留是为了说明那个 16 倍是怎么来的**): 92 组良态
+/// 取值依据 (**已被实测表取代, 保留是为了说明那个 16 倍是怎么来的**): 92 组良态
 /// 计价输入 (合同上限 10.0, 单档 rate 10, ash 10.0~13.0 × reject 11.0~15.0) 实测
 /// 156 行, 最大 residual/(1+magnitude) = 6.36e-9, 号称留出约 16 倍余量.
 /// 那只是一张**窄网格**: 只有计价行、只有一个煤种、界只动了 ash 一项.
 ///
-/// ⚠ **真实余量是 1.01 倍**. 宽网格 (master 4+31 煤池 + 线上 4 煤池 × 五种合同变体
-/// × 逐界细扫) 实测最大 residual/(1+magnitude): 线性行 **9.771e-8**, 仿射/回归行
-/// **9.882e-8** —— 已经贴着本值的 98.8%.
+/// ⚠ **真实余量只剩 1.01 倍** —— 宽网格实测已经贴着本值的 98.8%.
+/// 具体数字见 `quality::ACCEPT_TOLERANCE` 那张实测表 (本 crate 唯一真源), 本处不
+/// 复述: 抄一份就多一处会各自变旧的地方, 这事已经发生过.
 ///
 /// 越过这条线的解由 LP 自己判不可行. 也就是说, 解后复核对齐之后,"可行合同报不可行"
 /// 的风险整体**转移到了本常量上**: 残差再漂 1.2% 就复发, 只是发作点从体检挪到了 LP
 /// 自己. 煤池变宽、合同变紧、Clarabel 升级, 任何一样都可能吃掉这点余量.
 ///
-/// 这两个数由 `measurements::measure_tolerance_headroom` 产出, 可复跑:
-/// `cargo test --release -- --ignored measure_tolerance_headroom --nocapture`.
-/// 想调本值就先重跑它, 别拿上面那 156 行说事.
+/// 想调本值: 先重跑
+/// `cargo test --release -- --ignored measure_tolerance_headroom --nocapture`,
+/// 别拿上面那 156 行说事. 而且**顺序是硬的** —— 本值与 `ACCEPT_TOLERANCE` 是同一个
+/// 数, 抬它会加深 `strict_bound_epsilon` 的倒挂, 必须先修 `quality::judged_value`
+/// 的贴边阈值, 理由见 `quality::ACCEPT_TOLERANCE` 的"改动顺序"一节.
 ///
-/// 安全边界: 放行量是 `本值 × (1 + magnitude)`, 随行量级变化 —— 灰分行约 3e-7,
-/// 宽煤池上的 CSR/G 行可达约 2.6e-6 (指标单位). 即便按后者算, 仍比化验 0.01%
-/// 的分辨率细 4 个数量级, 拒收线仍是硬墙.
+/// 安全边界: 放行量是 `本值 × (1 + magnitude)`, 随行量级变化. 实测的最大 LP 侧
+/// 放行量见 `quality::ACCEPT_TOLERANCE` 那张表 (本 crate 唯一真源) —— 约 3.7e-6
+/// 指标单位, 比化验 0.01 的分辨率细约 3.4 个数量级, 拒收线仍是硬墙.
+///
+/// 注意**别拿那张表里"复核侧放行量"那一行来读本常量**: 两者量级口径不同, 复核侧取
+/// 界本身, 本常量取 `Σ|aᵢxᵢ|`(行系数相对绑定值的平均绝对偏差), 数值差着四五倍.
 ///
 /// 解后复核 (`quality::ACCEPT_TOLERANCE`) 共用本值, 这是刻意的: 两边判的是同一件
 /// 事, 各写一个数就会重演"LP 认、复核不认"那个缺陷.
@@ -2130,9 +2134,9 @@ mod tests {
     /// 与上一条成对, 但**把住的不是同一道门**, 这点别记混:
     /// 上一条管"别把 LP 认下的解否掉" (解后复核那道门); 这一条管"真越界的进不来",
     /// 而 Hard 线性指标真正拦人的是 **LP 那一行** —— 它的界就是 `effective_*`,
-    /// 与解后复核同一条线, 所以越界的解根本走不到复核跟前. 实测可证: 把
-    /// `ACCEPT_TOLERANCE` 放大四个数量级, 45 万条样本里最差残差纹丝不动, 仍是
-    /// 1.25e-7 —— 复核对线性 Hard 指标是冗余的安全网, 不是墙.
+    /// 与解后复核同一条线, 所以越界的解根本走不到复核跟前 —— 复核对线性 Hard 指标
+    /// 是冗余的安全网, 不是墙. 自己动手验: 把 `ACCEPT_TOLERANCE` 临时放大四个数量级,
+    /// 重跑 `measure_tolerance_headroom`, "最大绝对残差"那一行纹丝不动.
     ///
     /// 所以这条测试守的是 LP 那道墙, **不守 `ACCEPT_TOLERANCE` 的上界**: 那个常量
     /// 调松了这条也不会红. 常量的上界靠"与 LP 共用同一个定义"钉死, 不靠断言.
@@ -2531,8 +2535,19 @@ mod measurements {
         magnitude_ratio_binding: Extremum,
         /// residual/(1+LP 行量级) 的最大值 —— FEASIBILITY_TOLERANCE 的余量看它.
         lp_ratio: Extremum,
-        /// 放行量换算到指标单位的最大值 —— 与化验 0.01 分辨率对比看它.
+        /// 复核侧放行量换算到指标单位的最大值 —— 与化验 0.01 分辨率对比看它.
+        ///
+        /// 口径: `ACCEPT_TOLERANCE × (1 + max(|实测值|,|执行界|))`.
         allowance: Extremum,
+        /// LP 侧放行量换算到指标单位的最大值.
+        ///
+        /// 口径: `FEASIBILITY_TOLERANCE × (1 + Σ|aᵢxᵢ|)` —— 量级取的是**行系数相对
+        /// 绑定值的平均绝对偏差**, 与复核侧那个"界的量级"不是一回事, 数值也差得远
+        /// (灰分行 MAD ≈ 2, 而界 ≈ 11). 两个常量相等不代表两个放行量相等, 所以分开测,
+        /// 各自的注释各自引用, 别互相抄.
+        lp_allowance: Extremum,
+        /// 最差绝对残差 (指标单位) —— 解最多能落在执行界外多远.
+        residual_abs: Extremum,
     }
 
     impl Accumulators {
@@ -2543,6 +2558,8 @@ mod measurements {
                 magnitude_ratio_binding: Extremum::new(false),
                 lp_ratio: Extremum::new(true),
                 allowance: Extremum::new(true),
+                lp_allowance: Extremum::new(true),
+                residual_abs: Extremum::new(true),
             }
         }
 
@@ -2560,6 +2577,8 @@ mod measurements {
             );
             self.allowance
                 .record(ACCEPT_TOLERANCE * (1.0 + row.check_magnitude), witness);
+            self.lp_allowance
+                .record(FEASIBILITY_TOLERANCE * (1.0 + row.lp_magnitude), witness);
             // 残差口径: 只有落在执行界外侧的行才进样本.
             let Some(residual) = row.residual else { return };
             self.magnitude_ratio_binding.record(
@@ -2570,6 +2589,7 @@ mod measurements {
                 .record(residual / (1.0 + row.check_magnitude), witness);
             self.lp_ratio
                 .record(residual / (1.0 + row.lp_magnitude), witness);
+            self.residual_abs.record(residual, witness);
         }
 
         fn report(&self, title: &str) {
@@ -2582,8 +2602,12 @@ mod measurements {
                 .report("  └ 仅顶界行 (有残差的)     [<1 即复核比 LP 严, 引用这一条]");
             self.lp_ratio
                 .report("最大 residual/(1+LP 行量级) [FEASIBILITY_TOLERANCE 余量]");
+            self.residual_abs
+                .report("最大 绝对残差 (指标单位)    [解能落在执行界外多远]");
             self.allowance
-                .report("最大 放行量 (指标单位)      [对比化验 0.01]");
+                .report("最大 复核侧放行量 (指标单位)[quality::ACCEPT_TOLERANCE 引用]");
+            self.lp_allowance
+                .report("最大 LP 侧放行量 (指标单位) [FEASIBILITY_TOLERANCE 引用]");
         }
     }
 
@@ -2847,7 +2871,9 @@ mod measurements {
                     &accumulators.magnitude_ratio_binding,
                 ),
                 ("residual/(1+LP 行量级)", &accumulators.lp_ratio),
-                ("放行量", &accumulators.allowance),
+                ("绝对残差", &accumulators.residual_abs),
+                ("复核侧放行量", &accumulators.allowance),
+                ("LP 侧放行量", &accumulators.lp_allowance),
             ] {
                 assert!(
                     extremum.best.is_some(),
