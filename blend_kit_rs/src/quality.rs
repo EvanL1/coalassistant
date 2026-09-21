@@ -7,9 +7,50 @@
 
 use crate::model::*;
 
-// 与 Clarabel 的 1e-8 可行性精度对齐。判定档位的开放边界另按小数位动态留缝。
+/// 判定规则自己那一层的容限: 把"落在档位边界上"的浮点噪声吸掉 (`judged_value` 的
+/// 贴边、`strict_bound_epsilon` 的下限)，以及 `raw_pass` —— 后者只区分"✓"和
+/// "≈判定通过"，不决定这一单认不认。
+///
+/// **它不是"认不认"的容限**。认不认看 [`ACCEPT_TOLERANCE`]，那一个必须跟着 LP 走；
+/// 这一个跟着判定档位走，两者本来就不是同一个量，别再并成一个数。
 const CHECK_TOLERANCE: f64 = 1e-8;
 const BINDING_TOL: f64 = 0.05;
+
+/// 解后复核"这一单认不认"的相对容限。
+///
+/// **直接取 LP 那一个, 不另起一个数** —— 这里修的缺陷就是两个容限各说各话:
+/// LP 用相对判据放行, 解后复核用绝对 `CHECK_TOLERANCE`(1e-8) 收口, 于是 Hard 界
+/// 顶格时 LP 认下的最优解被自己的体检否掉, 可行的合同报成"约束冲突, LP 不可行"
+/// (实测 A≤11.3 那一单落在执行界外 1.05e-8). 共用同一个常量, 两边就不会再分家。
+///
+/// 判据是 `距离 >= -本值 * (1 + 量级)`, 量级取 `max(|实测值|, |执行界|)`。
+///
+/// 取值依据: master 煤池 (4 条 verified + 31 条化验齐全按品质合成价) 与用户线上
+/// 那 4 条, 五种合同变体 (裸合同 / margin=0.3 / 两位小数四舍五入 / 两位小数截断 /
+/// 上下双界), 逐条 Hard 界按 0.0013/0.01 步长扫过 ±200 档 (宽煤池 0.03 步长 ±120
+/// 档), 共 45.0 万条"LP 认下的解 × 带界指标行"。其中 16.4 万条落在执行界外侧,
+/// 最大 residual/(1+量级) = 1.73e-8 (灰分, 宽煤池), 本值留出约 5.8 倍余量。
+///
+/// 同一批样本里, 解后复核的量级 `1+max(|实测|,|执行界|)` **45.0 万条无一** 小于
+/// LP 那一行自己的量级 `1+Σ|aᵢxᵢ|`(最差比值 1.0000)。所以同一个常量下, 复核的放行
+/// 量恒不小于 LP 的放行量 —— "复核不得比 LP 严"是结构性成立, 不只是余量够。
+///
+/// 安全边界: 放行量随界的量级变化 —— 灰分 (界~12) 约 1.3e-6, 粘结 (界~85) 约
+/// 8.6e-6, 都比化验 0.01 的分辨率细 3~4 个数量级, 合同界仍是硬墙。
+/// 这份实测记录是本值的唯一依据, 勿在没有重测的情况下改动。
+///
+/// **别"为了保险"把它调紧。** 线性 Hard 指标真正拦人的是 LP 那一行: 它的界就是
+/// `effective_upper`/`effective_lower`, 与这里比的是同一条线, 所以越界的解根本
+/// 走不到复核跟前 —— 复核是 LP 下游的冗余安全网, 不是墙。实测可证: 把本值放大
+/// 四个数量级, 45 万条样本里最差残差纹丝不动, 仍是 1.25e-7。
+/// 于是调紧只有一个效果: 把 LP 认下的正确解否掉。旧的绝对 1e-8 就是这样, 它从来
+/// 没挡下过任何真越界, 只制造了"可行合同报不可行"。
+const ACCEPT_TOLERANCE: f64 = crate::optimizer::FEASIBILITY_TOLERANCE;
+
+/// 放行量 = `ACCEPT_TOLERANCE × (1 + 量级)`，量级取"实测值与界"里大的那个。
+fn accept_slack(value: f64, bound: f64) -> f64 {
+    ACCEPT_TOLERANCE * (1.0 + value.abs().max(bound.abs()))
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct MetricFormula {
@@ -197,23 +238,32 @@ pub(crate) fn check_value(
 
     if use_max {
         if let Some(maximum) = spec.max {
-            accepted_slacks.push(effective_upper(maximum, &rule) - value);
+            let executed = effective_upper(maximum, &rule);
+            accepted_slacks.push((executed - value, accept_slack(value, executed)));
             raw_pass &= value <= maximum + CHECK_TOLERANCE;
-            judged_pass &= judged <= maximum + rule.tolerance.max(0.0) + CHECK_TOLERANCE;
+            let accepted_max = maximum + rule.tolerance.max(0.0);
+            judged_pass &= judged <= accepted_max + accept_slack(judged, accepted_max);
         }
     }
     if use_min {
         if let Some(minimum) = spec.min {
-            accepted_slacks.push(value - effective_lower(minimum, &rule));
+            let executed = effective_lower(minimum, &rule);
+            accepted_slacks.push((value - executed, accept_slack(value, executed)));
             raw_pass &= value + CHECK_TOLERANCE >= minimum;
-            judged_pass &= judged + CHECK_TOLERANCE >= minimum - rule.tolerance.max(0.0);
+            let accepted_min = minimum - rule.tolerance.max(0.0);
+            judged_pass &= judged + accept_slack(judged, accepted_min) >= accepted_min;
         }
     }
 
-    let slack = accepted_slacks.into_iter().reduce(f64::min);
+    // 上下界都在场时取最紧的那一侧, 连同它自己的放行量一起带走 —— 放行量随量级变化,
+    // 只留 slack 会让下面拿另一侧的量级去判这一侧.
+    let tightest = accepted_slacks
+        .into_iter()
+        .reduce(|left, right| if right.0 < left.0 { right } else { left });
+    let slack = tightest.map(|(distance, _)| distance);
     let binding =
-        slack.is_some_and(|distance| distance > -CHECK_TOLERANCE && distance < BINDING_TOL);
-    let accepted = slack.is_none_or(|distance| distance >= -CHECK_TOLERANCE) && judged_pass;
+        tightest.is_some_and(|(distance, allow)| distance > -allow && distance < BINDING_TOL);
+    let accepted = tightest.is_none_or(|(distance, allow)| distance >= -allow) && judged_pass;
     let status = if !accepted {
         EvaluationStatus::Fail
     } else if !verified {

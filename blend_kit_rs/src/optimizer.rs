@@ -22,9 +22,12 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 /// 残差保持在 Clarabel 的原始收敛量级 (~1e-8..1e-7).
 ///
 /// 判据是 `activity <= bound + 本值 * (1 + magnitude)`, 其中
-/// `magnitude = Σ|aᵢxᵢ|` 再与 `|bound|` 取大. 它**对所有行生效**, 不止计价行:
-/// 纯 Hard 配方没有档位列, 残差本就在 1e-13 量级, 远用不满这点容限, 故不受影响
-/// (master_demo 输出逐字节不变可证).
+/// `magnitude = Σ|aᵢxᵢ|` 再与 `|bound|` 取大. 它**对所有行生效**, 不止计价行.
+///
+/// 曾经写着"纯 Hard 配方残差本就在 1e-13 量级, 用不满这点容限" —— 这句是错的,
+/// 只对 Σx=1 那一行成立 (配比列经归一化重投影, 残差才塌到 1e-13). 指标约束行不
+/// 重投影, 残差就是 Clarabel 的原始收敛量级: 45.0 万条 Hard 行样本里最大
+/// residual/(1+magnitude) 实测到 9.77e-8, 已经贴着本值。Hard 行同样吃满这点容限。
 ///
 /// 取值依据: 92 组良态计价输入 (合同上限 10.0, 单档 rate 10, ash 10.0~13.0 ×
 /// reject 11.0~15.0) 实测 156 行, 最大 residual/(1+magnitude) = 6.36e-9,
@@ -33,7 +36,10 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 /// 安全边界: 放行量是 `本值 × (1 + magnitude)`, 随行量级变化 —— 灰分行约 3e-7,
 /// 宽煤池上的 CSR/G 行可达约 2.6e-6 (指标单位). 即便按后者算, 仍比化验 0.01%
 /// 的分辨率细 4 个数量级, 拒收线仍是硬墙.
-const FEASIBILITY_TOLERANCE: f64 = 1e-7;
+///
+/// 解后复核 (`quality::ACCEPT_TOLERANCE`) 共用本值, 这是刻意的: 两边判的是同一件
+/// 事, 各写一个数就会重演"LP 认、复核不认"那个缺陷.
+pub(crate) const FEASIBILITY_TOLERANCE: f64 = 1e-7;
 const OUTPUT_RATIO_TOLERANCE: f64 = 1e-5;
 
 /// 基础求解入口，不读取训练样本，也不在求解期间拟合模型.
@@ -701,10 +707,13 @@ fn enforced_bounds(
 /// 向要够到 10.06 却只放宽到 10.06, 执行界都没挪窝.
 ///
 /// 二, 光算对判定规则这一层还不够, 必须真解. 放宽某项之后, 最低成本解会把这项顶到
-/// 新界上 (便宜煤总是更差), 于是最优点正好落在界上; 这时 LP 的相对容限
-/// (`FEASIBILITY_TOLERANCE·(1+量级)`) 与解后复核的绝对容限 (`CHECK_TOLERANCE`) 谁松谁紧
-/// 就决定了这一单认不认 —— 实测过 A≤11.3 时解落在界外 1.05e-8, LP 认、复核不认,
-/// 整单被判不可行. 差一档 (11.4) 又恰好认了. 这个差别算不出来, 只能解出来.
+/// 新界上 (便宜煤总是更差), 于是最优点正好落在界上, 只差浮点收敛那一丝 —— 认不认
+/// 由容限说了算. 两边的容限曾经不是一回事: LP 用相对判据, 解后复核用绝对 1e-8,
+/// 实测过 A≤11.3 时解落在界外 1.05e-8, LP 认、复核不认, 整单被判不可行, relax_to
+/// 只好再让一档给到 11.4. 现在两边共用 `FEASIBILITY_TOLERANCE`, 那一档不再白丢.
+///
+/// 口径统一了也仍要真解: 放宽这一项**未必**就够 (还有岩相精确复核那一关), 而
+/// "够不够"只有解出来才知道.
 ///
 /// 所以这里逐档往外试, 每档都跑一遍真流程 (`diagnose = false`, 防止试解里再诊断),
 /// 第一个真解得出配方的档位才是答案.
@@ -1970,15 +1979,197 @@ mod tests {
         bound.relax_to.expect("这一档应能试出可填的数")
     }
 
+    /// 下限方向要顶界, 得让"高粘结煤贵、低粘结煤便宜": 最低成本解才会把 G 压到界上.
+    fn cohesion_pool() -> Vec<Coal> {
+        vec![
+            assay_coal("高粘结贵", (0.5, 9.0, 24.0, 92.0, 18.0, 9.0), 2300.0),
+            assay_coal("低粘结廉", (0.5, 9.0, 24.0, 71.0, 13.0, 9.0), 1400.0),
+            assay_coal("中间", (0.5, 9.0, 24.0, 83.0, 15.0, 9.0), 1800.0),
+        ]
+    }
+
+    /// 回归: Hard 界顶格时, 解后复核的容限必须与 LP 可行性复核同口径.
+    ///
+    /// Hard 界一旦卡住, LP 最优解**按定义**就落在界上, 只差浮点收敛那一丝. LP 用相对
+    /// 判据 `FEASIBILITY_TOLERANCE × (1 + 量级)` 认下它; 解后复核原本用绝对 1e-8,
+    /// 于是同一个解 LP 认、体检不认 —— `solve_once` 返回 None, 可行的合同被报成
+    /// "约束冲突, LP 不可行". 计价侧在扣款那一版已经对齐过, Hard 侧漏了.
+    ///
+    /// 三条用例刻意各不相同, 少一条这测试就说不清覆盖到哪:
+    /// - 上限 × 截断判定: 走的是 `slack` 那条比较 (判定值 11.3 本身是达标的);
+    /// - 上限 × Raw 判定: Raw 下 judged 就是实测值, 卡人的是 `judged_pass` 那条;
+    /// - 下限 × Raw 判定: 上面两条都只走上界分支, 下界是另一行代码.
+    #[test]
+    fn test_hard_check_tolerance_matches_lp_wall() {
+        struct Case {
+            label: &'static str,
+            coals: Vec<Coal>,
+            specs: Vec<Spec>,
+            truncate: bool,
+            indicator: &'static str,
+            bound: f64,
+            /// 顶的是上界还是下界.
+            upper: bool,
+        }
+
+        let cases = vec![
+            Case {
+                label: "上限×截断: 用户线上那一单, 灰分改到 11.3",
+                coals: real_case_coals(),
+                specs: vec![
+                    Spec::upper("A", 11.3),
+                    Spec::upper("S", 1.0),
+                    Spec::upper("V", 28.0),
+                    Spec::lower("Y", 15.0),
+                    Spec::lower("G", 85.0),
+                ],
+                truncate: true,
+                indicator: "A",
+                bound: 11.3,
+                upper: true,
+            },
+            Case {
+                label: "上限×Raw: 灰分 ≤11.46 不折档, 实测值本身就是判定值",
+                coals: real_case_coals(),
+                specs: vec![Spec::upper("A", 11.46)],
+                truncate: false,
+                indicator: "A",
+                bound: 11.46,
+                upper: true,
+            },
+            Case {
+                label: "下限×Raw: 粘结 ≥73 顶在下界上",
+                coals: cohesion_pool(),
+                specs: vec![Spec::lower("G", 73.0)],
+                truncate: false,
+                indicator: "G",
+                bound: 73.0,
+                upper: false,
+            },
+        ];
+
+        for case in cases {
+            let Case {
+                label,
+                coals,
+                specs,
+                truncate,
+                indicator,
+                bound,
+                upper,
+            } = case;
+            let request = BlendRequest {
+                coals,
+                specs,
+                total_quantity: Some(3_700.0),
+                truncate_decimal: truncate,
+            };
+            let result = solve(&request);
+            assert!(
+                result.ok,
+                "{label}: LP 认下的解不该被体检否掉: {:?}",
+                result.reason
+            );
+
+            let check = result
+                .indicator_check
+                .iter()
+                .find(|check| check.indicator == indicator)
+                .unwrap_or_else(|| panic!("{label}: 应有 {indicator} 体检"));
+            let slack = check.slack.expect("带界的指标应有余量");
+
+            // 这三条用例的意义全在"解确实落在执行界外侧一丝". 哪天煤池或求解器变了,
+            // 解不再顶界, 上面的 ok 断言就成了空转 —— 这里先把它拦住.
+            assert!(
+                slack < -1e-8,
+                "{label}: 本用例须让解落在执行界外、且超出旧的绝对 1e-8 才有意义, 实得余量 {slack:e}"
+            );
+            assert_ne!(
+                check.status,
+                EvaluationStatus::Fail,
+                "{label}: LP 已认可的解不应被体检判 Fail (实测 {}, 余量 {slack:e})",
+                check.value
+            );
+            assert!(
+                check.binding,
+                "{label}: 顶在界上的指标必须标成 binding, 界面的谈判方向靠它"
+            );
+
+            // 放行的前提是"报到化验刻度上仍然达标" —— 不是"差得不多就算了".
+            let judged = check.judged_value.expect("带界的指标应有判定值");
+            let reported = (judged * 100.0).round() / 100.0;
+            if upper {
+                assert!(
+                    reported <= bound,
+                    "{label}: 报到 0.01 刻度的 {reported} 仍越过合同界 {bound}"
+                );
+            } else {
+                assert!(
+                    reported >= bound,
+                    "{label}: 报到 0.01 刻度的 {reported} 仍够不到合同界 {bound}"
+                );
+            }
+        }
+    }
+
+    /// Hard 界是硬墙: 超界 0.01 (化验一个刻度) 必须判不可行.
+    ///
+    /// 与上一条成对, 但**把住的不是同一道门**, 这点别记混:
+    /// 上一条管"别把 LP 认下的解否掉" (解后复核那道门); 这一条管"真越界的进不来",
+    /// 而 Hard 线性指标真正拦人的是 **LP 那一行** —— 它的界就是 `effective_*`,
+    /// 与解后复核同一条线, 所以越界的解根本走不到复核跟前. 实测可证: 把
+    /// `ACCEPT_TOLERANCE` 放大四个数量级, 45 万条样本里最差残差纹丝不动, 仍是
+    /// 1.25e-7 —— 复核对线性 Hard 指标是冗余的安全网, 不是墙.
+    ///
+    /// 所以这条测试守的是 LP 那道墙, **不守 `ACCEPT_TOLERANCE` 的上界**: 那个常量
+    /// 调松了这条也不会红. 常量的上界靠"与 LP 共用同一个定义"钉死, 不靠断言.
+    /// (计价侧的同名守卫是 `test_reject_line_still_blocks_one_assay_increment`;
+    /// Hard 侧一直空着, 这里补上.)
+    ///
+    /// 用 Raw 判定: 截断/四舍五入下合同 ≤10 本来就按 ≤10.0999 执行, 超 0.01 是合同
+    /// 认可的, 那时判可行并非放水. 硬墙要在"判定规则不折档"这一口径上验.
+    #[test]
+    fn test_hard_bound_still_blocks_one_assay_increment() {
+        let solves = |assay: (f64, f64, f64, f64, f64, f64), spec: Spec| -> bool {
+            solve(&BlendRequest {
+                coals: vec![assay_coal("独苗", assay, 1000.0)],
+                specs: vec![spec],
+                total_quantity: None,
+                truncate_decimal: false,
+            })
+            .ok
+        };
+
+        // 上界: 灰 ≤10.
+        assert!(
+            solves((0.5, 10.0, 24.0, 88.0, 16.0, 9.0), Spec::upper("A", 10.0)),
+            "正好压合同上限应可行"
+        );
+        assert!(
+            !solves((0.5, 10.01, 24.0, 88.0, 16.0, 9.0), Spec::upper("A", 10.0)),
+            "超合同上限 0.01 (化验一个刻度) 必须判不可行"
+        );
+
+        // 下界: 粘结 ≥80. 只验上界的话, 下界那行代码的墙没人验.
+        assert!(
+            solves((0.5, 9.0, 24.0, 80.0, 16.0, 9.0), Spec::lower("G", 80.0)),
+            "正好压合同下限应可行"
+        );
+        assert!(
+            !solves((0.5, 9.0, 24.0, 79.99, 16.0, 9.0), Spec::lower("G", 80.0)),
+            "差合同下限 0.01 (化验一个刻度) 必须判不可行"
+        );
+    }
+
     /// 用户线上那一单: 合同灰分改到多少才真解得出配方.
     ///
     /// 判定规则层面的最小值是 **11.3** —— 一位小数截断下执行界 = (floor(b×10)+1)/10 − eps,
     /// 要容下 11.3125 就需要 floor(b×10) ≥ 113 ⇒ b ≥ 11.3 (11.2 落回 11.29999 那一档).
     ///
-    /// 但 relax_to 给的是 **11.4**, 因为 11.3 真解一遍解不出来: 放宽之后最低成本解会把
-    /// 灰分顶到新界上, 这一单的最优点落在界外 1.05e-8 —— LP 的相对容限认, 解后复核的
-    /// 绝对容限 CHECK_TOLERANCE 不认, 于是整单仍判不可行. 下面第二条断言把这件事钉住:
-    /// 哪天那个容限口径对齐了, 这条会先红, 那时 relax_to 就该回到 11.3.
+    /// 这个数曾经是 **11.4**: 11.3 放宽之后最低成本解把灰分顶到新界上, 落在界外 1.05e-8,
+    /// LP 的相对容限认、解后复核的绝对容限不认, 整单仍判不可行, 于是 relax_to 只好再让
+    /// 一档. 容限口径对齐 (见 `test_hard_check_tolerance_matches_lp_wall`) 之后 11.3
+    /// 真解得出来了, 期望值随之回到 11.3 —— 期望是跟着缺陷修复走的, 不是被改松的.
     ///
     /// 用户问的是"我该往合同里填几", 不是"数学下限是几", 所以这里必须给真解得出的那个数.
     #[test]
@@ -2002,14 +2193,21 @@ mod tests {
             "改成 relax_to={relax_to} 之后必须真的解得出配方"
         );
         assert!(
-            (relax_to - 11.4).abs() < 1e-9,
-            "应给真解得出的 11.4, 实得 {relax_to}"
+            (relax_to - 11.3).abs() < 1e-9,
+            "应给真解得出的 11.3, 实得 {relax_to}"
         );
 
-        // 判定规则层面的下限 11.3 解不出来 —— 这正是 relax_to 不能只算不解的原因.
+        // 判定规则层面的下限就是 11.3, 现在它真解得出来了.
         assert!(
-            !resolve_after_relaxing(&request, ash, 11.3).ok,
-            "11.3 若已能解出, 说明解后复核的容限口径变了, relax_to 应回到 11.3"
+            resolve_after_relaxing(&request, ash, 11.3).ok,
+            "11.3 是判定规则算得出的下限, 容限口径对齐后必须真能解"
+        );
+
+        // 再紧一档仍然不行 —— 11.2 的执行界落回 11.29999, 容不下 11.3125.
+        // 少了这条, 上面那条断言就只说明"11.3 能解", 说不明"11.3 是最紧的那一档".
+        assert!(
+            !resolve_after_relaxing(&request, ash, 11.2).ok,
+            "11.2 的执行界是 11.29999, 够不到 11.3125, 不该能解"
         );
 
         // 反例钉死: 差值法给出的 11.2126 连执行界那一档都没挪动.
