@@ -132,9 +132,9 @@ npm run check:data   # master 数据自检
 
 ## Agent 环境 (E2B)
 
-`e2b/build.sh` 构建 E2B 模板 `doudou-blend`: 沙箱里预装 `blend` 命令行 (`/usr/local/bin/blend`)
-与给 agent 的说明 `/home/user/README.md` (源文件 `e2b/README.sandbox.md`), 构建完在真沙箱里跑
-`e2b/smoke.py` 冒烟。master 数据编进二进制, **改了 `coal_master.json` 要重建模板**, 否则沙箱里是旧数据。
+根目录 `Dockerfile` 是唯一的镜像定义: Railway 部署用它, 最终镜像里同时带 `/usr/local/bin/blend`
+命令行, 所以这个镜像本身就是 agent 环境。E2B 不支持多阶段 Dockerfile, 模板要从构建好的镜像创建
+(fromImage), 模板定义不放在本仓库。master 编进二进制, 改了 `coal_master.json` 要重建镜像。
 
 ## Conventions
 
