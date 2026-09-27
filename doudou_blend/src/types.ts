@@ -133,6 +133,8 @@ export interface BlendRequest {
   specs: Spec[];
   total_quantity?: number | null;
   truncate_decimal?: boolean;
+  /** 验算模式: 煤名 → 份数 (按总和归一). 给了就不求最优, 直接按此配比出结果. */
+  fixed_ratios?: Record<string, number> | null;
 }
 
 export interface CostBreakdown {

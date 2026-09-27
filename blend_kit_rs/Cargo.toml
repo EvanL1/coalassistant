@@ -7,7 +7,7 @@ license = "MIT"
 
 [lib]
 name = "blend_kit"
-crate-type = ["lib", "cdylib", "staticlib"]
+crate-type = ["lib"]
 
 [dependencies]
 clarabel = "0.10"
