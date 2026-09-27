@@ -130,6 +130,12 @@ npm run check:data   # master 数据自检
   stage builds `blend_kit_server`, final image ships the server + static assets). See
   `docs/railway-deployment.md` for the required `AUTH_*` / `DATABASE_URL` env vars.
 
+## Agent 环境 (E2B)
+
+`e2b/build.sh` 构建 E2B 模板 `doudou-blend`: 沙箱里预装 `blend` 命令行 (`/usr/local/bin/blend`)
+与给 agent 的说明 `/home/user/README.md` (源文件 `e2b/README.sandbox.md`), 构建完在真沙箱里跑
+`e2b/smoke.py` 冒烟。master 数据编进二进制, **改了 `coal_master.json` 要重建模板**, 否则沙箱里是旧数据。
+
 ## Conventions
 
 - Commit messages: `<type>(<scope>): <desc>` in Chinese, e.g. `feat(coal-pool): ...`, `data: ...`, `ci: ...`,
