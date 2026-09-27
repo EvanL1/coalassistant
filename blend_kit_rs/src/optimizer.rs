@@ -4,7 +4,7 @@
 //! 显式接收已训练且通过门控的评估器，岩相在 LP 后按全方差定律复验并收紧重算。
 
 use crate::model::*;
-use crate::penalty::{cif_eff, cif_eff_or_quoted, clauses_missing_assay};
+use crate::penalty::{cif_eff, cif_eff_or_quoted, clauses_missing_assay, tiered_amount};
 use crate::petrography::{self, Petrography, NOTCH_WINDOW};
 use crate::predict::EvaluatorSet;
 use crate::quality::{
@@ -187,6 +187,17 @@ fn solve_internal(
     {
         let reason = format!("{}缺少可用输入", label_zh(&spec.indicator));
         return BlendResult::infeasible(&reason, warnings);
+    }
+    if let Some(fixed) = &request.fixed_ratios {
+        return evaluate_fixed(
+            &kept,
+            &active_specs,
+            request,
+            &formulas,
+            evaluators,
+            fixed,
+            warnings,
+        );
     }
     let petro_spec = active_specs
         .iter()
@@ -999,7 +1010,7 @@ fn solve_once(
     models: &EvaluatorSet,
     petro_proxy_lower: Option<f64>,
     petro_proxy_upper: Option<f64>,
-    mut warnings: Vec<String>,
+    warnings: Vec<String>,
 ) -> Option<(BlendResult, Vec<f64>)> {
     let count = coals.len();
     let (problem, blocks) = build_lp(
@@ -1014,24 +1025,62 @@ fn solve_once(
     )?;
     let (solution, _) = problem.solve()?;
     let ratios = solution[..count].to_vec();
-
     let penalty_by_indicator = read_back_penalties(&blocks, &solution);
+    let result = assemble_result(
+        coals,
+        specs,
+        request,
+        formulas,
+        models,
+        &ratios,
+        &penalty_by_indicator,
+        warnings,
+    );
+    // LP 给出的配方若在复算里越了 Hard 界, 视同本轮无解, 交上层 (岩相修复 / 报不可行).
+    // 验算不走这里: 用户给定的配方超标要逐项报出来, 不能吞掉.
+    let hard_failed = specs
+        .iter()
+        .filter(|spec| spec.enforcement == Enforcement::Hard)
+        .any(|spec| {
+            result.indicator_check.iter().any(|check| {
+                check.indicator == spec.indicator && check.status == EvaluationStatus::Fail
+            })
+        });
+    if hard_failed {
+        return None;
+    }
+    Some((result, ratios))
+}
+
+/// 配比 → 成本 / 订单 / 8 项体检. 求最优 ([`solve_once`]) 与验算 ([`evaluate_fixed`])
+/// 共用这一段: 两条路必须算出同一套数, 各写一遍迟早漂移.
+#[allow(clippy::too_many_arguments)]
+fn assemble_result(
+    coals: &[&Coal],
+    specs: &[&Spec],
+    request: &BlendRequest,
+    formulas: &HashMap<String, MetricFormula>,
+    models: &EvaluatorSet,
+    ratios: &[f64],
+    penalty_by_indicator: &HashMap<String, f64>,
+    mut warnings: Vec<String>,
+) -> BlendResult {
     let penalty_per_ton: f64 = penalty_by_indicator.values().sum();
 
     let recipe = coals
         .iter()
-        .zip(&ratios)
+        .zip(ratios)
         .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
         .map(|(coal, ratio)| (coal.name.clone(), *ratio))
         .collect();
     let fob_per_ton: f64 = coals
         .iter()
-        .zip(&ratios)
+        .zip(ratios)
         .map(|(coal, ratio)| coal.fob * ratio)
         .sum();
     let frt_per_ton: f64 = coals
         .iter()
-        .zip(&ratios)
+        .zip(ratios)
         .map(|(coal, ratio)| coal.frt * ratio)
         .sum();
     let cif_per_ton = fob_per_ton + frt_per_ton;
@@ -1040,7 +1089,7 @@ fn solve_once(
     // 1e-13 量级残差, 再乘以总吨数放大成一笔并不存在的买入修正.
     let purchase_adjust_per_ton: f64 = coals
         .iter()
-        .zip(&ratios)
+        .zip(ratios)
         .map(|(coal, ratio)| (cif_eff_or_quoted(coal) - coal.cif()) * ratio)
         .sum();
     let cost = CostBreakdown {
@@ -1071,7 +1120,7 @@ fn solve_once(
     };
     let mut orders: Vec<OrderItem> = coals
         .iter()
-        .zip(&ratios)
+        .zip(ratios)
         .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
         .map(|(coal, ratio)| {
             let tons = request.total_quantity.map(|quantity| quantity * ratio);
@@ -1104,7 +1153,7 @@ fn solve_once(
                     .collect::<Option<Vec<_>>>();
                 let proxy = proxy_coefficients
                     .as_deref()
-                    .map(|values| values.iter().zip(&ratios).map(|(a, b)| a * b).sum());
+                    .map(|values| values.iter().zip(ratios).map(|(a, b)| a * b).sum());
                 indicator_check.push(IndicatorCheck {
                     indicator: indicator.into(),
                     label_zh: label_zh(indicator).into(),
@@ -1125,12 +1174,12 @@ fn solve_once(
             }
             continue;
         };
-        let Some(evaluated) = formula.evaluate(&ratios) else {
+        let Some(evaluated) = formula.evaluate(ratios) else {
             continue;
         };
-        let proxy = formula.proxy_value(&ratios);
+        let proxy = formula.proxy_value(ratios);
         let (mut verified, model_summary) =
-            runtime_model_state(indicator, formula, coals, &ratios, models);
+            runtime_model_state(indicator, formula, coals, ratios, models);
         let invalid_model_output = model_summary.is_some()
             && matches!(indicator, "G" | "CSR")
             && !(0.0..=100.0).contains(&evaluated);
@@ -1198,18 +1247,6 @@ fn solve_once(
         });
     }
 
-    if specs
-        .iter()
-        .filter(|spec| spec.enforcement == Enforcement::Hard)
-        .any(|spec| {
-            indicator_check.iter().any(|check| {
-                check.indicator == spec.indicator && check.status == EvaluationStatus::Fail
-            })
-        })
-    {
-        return None;
-    }
-
     let mut result = BlendResult {
         ok: true,
         reason: None,
@@ -1224,7 +1261,91 @@ fn solve_once(
         evaluation_iterations: 0,
     };
     finalize_quality_status(&mut result, specs);
-    Some((result, ratios))
+    result
+}
+
+/// 验算: 按用户给定的配比出成本与 8 项体检, 不求最优.
+///
+/// 与求最优共用 [`assemble_result`], 所以两条路对同一配比算出的是同一套数.
+/// 差别只在: 配方是用户给的, 超标逐项标 Fail (整体 NeedsReview), 不回"不可行";
+/// 计价指标的扣款按偏离量直接走档位表, 与 LP 档位列在最优点上相等.
+fn evaluate_fixed(
+    kept: &[&Coal],
+    specs: &[&Spec],
+    request: &BlendRequest,
+    formulas: &HashMap<String, MetricFormula>,
+    evaluators: &EvaluatorSet,
+    fixed: &HashMap<String, f64>,
+    mut warnings: Vec<String>,
+) -> BlendResult {
+    for (name, share) in fixed {
+        if !share.is_finite() || *share < 0.0 {
+            let reason = format!("验算配比无效: {name} 的份数 {share} 须为非负数");
+            return BlendResult::infeasible(&reason, warnings);
+        }
+        if *share <= 0.0 {
+            continue;
+        }
+        if !request.coals.iter().any(|coal| &coal.name == name) {
+            let reason = format!("验算配比里的 {name} 不在煤池中");
+            return BlendResult::infeasible(&reason, warnings);
+        }
+        // 缺合同要求指标 / 越采购拒收线的煤已被剔出; 用户给了份数就不能悄悄按 0 算.
+        if !kept.iter().any(|coal| &coal.name == name) {
+            let reason = format!("{name} 已被剔出煤池 (原因见警告), 不能按给定配比验算");
+            return BlendResult::infeasible(&reason, warnings);
+        }
+    }
+    let share_of = |coal: &&Coal| fixed.get(&coal.name).copied().unwrap_or(0.0);
+    let total: f64 = kept.iter().map(share_of).sum();
+    if total <= 0.0 {
+        return BlendResult::infeasible("验算配比的份数合计须大于 0", warnings);
+    }
+    let ratios: Vec<f64> = kept.iter().map(|coal| share_of(coal) / total).collect();
+
+    let mut penalty_by_indicator = HashMap::new();
+    for spec in specs
+        .iter()
+        .filter(|spec| spec.enforcement == Enforcement::Priced)
+    {
+        let (Some(formula), Some(penalty)) = (formulas.get(&spec.indicator), &spec.penalty) else {
+            continue;
+        };
+        let Some(value) = formula.evaluate(&ratios) else {
+            continue;
+        };
+        // 超出合同界的量 —— 与 append_priced_blocks 吸收行的合同界是同一条线.
+        let rule = acceptance_rule(spec, request.truncate_decimal);
+        let deviation = match spec.direction {
+            Direction::Upper => spec.max.map(|max| value - effective_upper(max, &rule)),
+            Direction::Lower => spec.min.map(|min| effective_lower(min, &rule) - value),
+            Direction::Range => None,
+        };
+        if let Some(deviation) = deviation {
+            penalty_by_indicator.insert(
+                spec.indicator.clone(),
+                tiered_amount(&penalty.tiers, deviation),
+            );
+        }
+    }
+
+    if kept
+        .iter()
+        .zip(&ratios)
+        .any(|(coal, ratio)| *ratio > 0.0 && coal.petrography.is_some())
+    {
+        warnings.push("验算模式未做岩相精确复核, 岩相按线性代理估算".into());
+    }
+    assemble_result(
+        kept,
+        specs,
+        request,
+        formulas,
+        evaluators,
+        &ratios,
+        &penalty_by_indicator,
+        warnings,
+    )
 }
 
 fn runtime_model_state(
@@ -1702,6 +1823,7 @@ mod tests {
             specs,
             total_quantity: Some(3_700.0),
             truncate_decimal: true,
+            fixed_ratios: None,
         }
     }
 
@@ -1772,6 +1894,7 @@ mod tests {
             specs: vec![ash, Spec::lower("G", 85.0)],
             total_quantity: Some(3_700.0),
             truncate_decimal: false,
+            fixed_ratios: None,
         });
 
         assert!(!result.ok, "灰分连拒收线 10 都够不到, 应当不可行");
@@ -1884,6 +2007,7 @@ mod tests {
         );
         let request = BlendRequest {
             truncate_decimal: false,
+            fixed_ratios: None,
             ..request
         };
         let result = solve_with_evaluators(&request, &trained_evaluators());
@@ -1950,6 +2074,7 @@ mod tests {
             specs: vec![ash],
             total_quantity: None,
             truncate_decimal: false,
+            fixed_ratios: None,
         };
         let result = solve(&request);
 
@@ -2080,6 +2205,7 @@ mod tests {
                 specs,
                 total_quantity: Some(3_700.0),
                 truncate_decimal: truncate,
+                fixed_ratios: None,
             };
             let result = solve(&request);
             assert!(
@@ -2153,6 +2279,7 @@ mod tests {
                 specs: vec![spec],
                 total_quantity: None,
                 truncate_decimal: false,
+                fixed_ratios: None,
             })
             .ok
         };
@@ -2254,6 +2381,7 @@ mod tests {
             specs: vec![ash],
             total_quantity: None,
             truncate_decimal: false,
+            fixed_ratios: None,
         };
         let result = solve(&request);
 
@@ -2293,6 +2421,7 @@ mod tests {
             specs: vec![cohesion],
             total_quantity: None,
             truncate_decimal: false,
+            fixed_ratios: None,
         };
         let result = solve(&request);
 
@@ -2720,6 +2849,7 @@ mod measurements {
                             specs: specs.clone(),
                             total_quantity: Some(3_700.0),
                             truncate_decimal: truncate,
+                            fixed_ratios: None,
                         };
                         let result = solve_with_evaluators(&request, models);
                         if !result.ok {

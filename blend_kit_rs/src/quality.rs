@@ -782,6 +782,7 @@ mod tests {
             specs: vec![spec],
             total_quantity: None,
             truncate_decimal: false,
+            fixed_ratios: None,
         }
     }
 
@@ -1015,6 +1016,7 @@ mod tests {
             specs: vec![],
             total_quantity: None,
             truncate_decimal: false,
+            fixed_ratios: None,
         }
     }
 

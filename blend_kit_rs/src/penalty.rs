@@ -26,7 +26,7 @@ pub(crate) struct CullReason {
 /// 卖出侧对同一份档位表走的是 LP 档位列(见 `optimizer::append_priced_blocks`),
 /// 两条实现必须对同样的 tiers 与偏离量算出同样的钱; 凸性(rate 严格递增)是它们
 /// 能一致的前提, 由 `quality::validate_penalty` 统一保证.
-fn tiered_amount(tiers: &[PenaltyTier], deviation: f64) -> f64 {
+pub(crate) fn tiered_amount(tiers: &[PenaltyTier], deviation: f64) -> f64 {
     let mut remaining = deviation.max(0.0);
     let mut amount = 0.0;
     for tier in tiers {

@@ -302,6 +302,11 @@ pub struct BlendRequest {
     /// 是否启用一位小数截断规则.
     #[serde(default = "default_truncate")]
     pub truncate_decimal: bool,
+    /// 验算模式: 煤名 → 份数 (按总和归一, 所以 2:4:3:2 可直接填). 给了就不求最优,
+    /// 直接按这个配比出成本与 8 项体检; 超标逐项报 Fail, 不回"不可行".
+    /// None = 正常求最低成本配方.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_ratios: Option<HashMap<String, f64>>,
 }
 
 fn default_truncate() -> bool {

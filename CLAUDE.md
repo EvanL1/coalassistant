@@ -80,6 +80,7 @@ cargo test --release                          # all tests (live in lib.rs + per-
 cargo test --release test_basic_solve         # a single test by name
 cargo run --release --example master_demo     # demo against the full master DB
 cargo run --release --example demo
+cargo run --release --bin blend -- eval < request.json   # 命令行 (给 agent/脚本): solve 求最优 / eval 按 fixed_ratios 验算 / master 输出内置数据
 cargo clippy --release -- -D warnings
 cargo fmt
 ```
