@@ -41,18 +41,21 @@ const BINDING_TOL: f64 = 0.05;
 /// 五种合同变体 (裸合同 / margin=0.3 / 两位小数四舍五入 / 两位小数截断 / 上下双界),
 /// 逐条 Hard 界按 0.01 步长扫过 ±200 档 (宽煤池 0.03 步长 ±120 档)。
 ///
+/// 2026-09-27 重测 (判定改为"容限在量化之前加"之后): 样本数比上一版多了约 3.2 万条,
+/// 多出来的是以前被判定掉格误杀、现在救回的解, 残差上限也随之变大。
+///
 /// | 口径 | 线性行 | 仿射/回归行 |
 /// |---|---|---|
-/// | 最大 `residual/(1+复核量级)` | **1.7308e-8** | **1.9004e-8** |
-/// | └ 本值留出的余量 | 5.8 倍 | 5.3 倍 |
-/// | 最大 `residual/(1+LP 行量级)` | **9.7710e-8** | **9.8820e-8** |
-/// | └ `FEASIBILITY_TOLERANCE` 留出的余量 | 1.02 倍 | **1.01 倍** |
+/// | 最大 `residual/(1+复核量级)` | **5.9871e-8** | **6.5808e-8** |
+/// | └ 本值留出的余量 | 1.7 倍 | 1.5 倍 |
+/// | 最大 `residual/(1+LP 行量级)` | **9.6727e-8** | **9.9948e-8** |
+/// | └ `FEASIBILITY_TOLERANCE` 留出的余量 | 1.03 倍 | **1.0005 倍** |
 /// | 最小 `复核量级/LP 行量级` (顶界行) | **1.0716** | **1.0716** |
-/// | └ 同上, 全部带界行 | 0.922 | 0.924 |
-/// | 最大绝对残差 (指标单位) | 1.2540e-7 | **6.3586e-7** |
+/// | └ 同上, 全部带界行 | 0.925 | 0.921 |
+/// | 最大绝对残差 (指标单位) | 1.5594e-7 | **1.3144e-6** |
 /// | 复核侧放行量 (指标单位) | 9.40e-6 | 9.87e-6 |
-/// | LP 侧放行量 (指标单位) | 2.07e-6 | 3.67e-6 |
-/// | 残差样本 / 量级样本 | 10.5 万 / 26.9 万 | 5.7 万 / 21.8 万 |
+/// | LP 侧放行量 (指标单位) | 2.03e-6 | 3.67e-6 |
+/// | 残差样本 / 量级样本 | 11.8 万 / 29.7 万 | 7.6 万 / 28.5 万 |
 ///
 /// 两个"放行量"**不是同一个量, 别互相抄**: 复核侧是 `本值 × (1 + max(|实测值|,
 /// |执行界|))`, 量级取界本身 (灰分 ≈11); LP 侧是
@@ -74,8 +77,9 @@ const BINDING_TOL: f64 = 0.05;
 ///
 /// - **线性行** (`formula_for` 的加权平均, 今天 `solve` 走的全部 Hard 行):
 ///   `aᵢ = propᵢ − 执行界`, 最优解处 `Σ(propᵢ−界)xᵢ ≈ 0` ⇒ 正负偏差等量, 又因化验
-///   值非负, 负向偏差 ≤ 界 ⇒ `Σ|aᵢxᵢ| ≤ 2×界`。所以复核**最多比 LP 严 2 倍**, 被
-///   5.8 倍余量盖得住 —— **是余量, 不是恒等式**。
+///   值非负, 负向偏差 ≤ 界 ⇒ `Σ|aᵢxᵢ| ≤ 2×界`。所以复核**最多比 LP 严 2 倍**。
+///   实测余量 1.7 倍**已盖不住**这个理论上界; 眼下的保障是实测 —— 顶界行上比值
+///   ≥ 1.0716, 复核从没比 LP 严过。这是观测, 不是证明。
 /// - **仿射 / 回归行** (`build_formulas` 里 G 的 `AffineCalibration`、CSR 的
 ///   `Regression`): `numerators` 是回归系数而非化验值, `intercept ≠ 0` 使
 ///   `shifted = 界 − intercept`。行量级由**各煤分子系数的离散度**决定, 与合同界无关,
@@ -86,40 +90,31 @@ const BINDING_TOL: f64 = 0.05;
 ///
 /// 这份实测记录是本值的唯一依据, 勿在没有重跑上面那条命令的情况下改动。
 ///
-/// ## 必需不变量: `strict_bound_epsilon(rule) > 本值 × (1 + 量级)`
+/// ## 容限必须在量化之前加 (2026-09-27 修复)
 ///
-/// `effective_upper` 把执行界放在"下一个量化格 − `strict_bound_epsilon`"上。放行量
-/// 一旦超过这个 eps, 被放行的解就可能落到量化格边界之外 ⇒ `judged_value` 的贴边
-/// 阈值(只有 `CHECK_TOLERANCE × scale`)够不着 ⇒ 判定值被推过整整一格 ⇒
-/// `judged_pass` 挂 ⇒ `Fail` ⇒ **又一个假不可行**, 正是本次在修的那个症状换了入口。
+/// 截断/四舍五入是跳一整格的量化: 求解器残差把解推过格线一丝, 量化后就差一整格。
+/// 原先容限加在量化**之后** (`judged + 放行量 >= 界`), 救不回那一格 —— 线上实例:
+/// 两种煤、G≥80、一位小数截断, LP 解出 G=79.99999998857, 截断成 79.9, 判 Fail,
+/// 有解的合同被报成"LP 不可行"。下界的执行界恰好压在格线上 (80.0), 残差一过线
+/// 就发作; 上界执行界在 `下一格 − strict_bound_epsilon`, 两位小数时 eps=1e-6
+/// 小于放行量, 同样可能发作 (旧文档称之为"倒挂")。
 ///
-/// **这条不变量现在是倒挂的**: `strict_bound_epsilon = 量子×1e-4`, 两位小数时
-/// = 1e-6; 而复核侧放行量在量级 > 9 时就反超 (上表最大 9.87e-6, 差了近 10 倍)。
+/// 现在 `check_value` 按方向先推再量化: 上界判 `judged(值 − 放行量)`, 下界判
+/// `judged(值 + 放行量)`。外面还有一道闸 —— 离执行界不得超过放行量 —— 所以真超标
+/// 的值照样 Fail, 放宽的只是求解器噪声那一丝。这条后果链切断后, 抬本值不再会引入
+/// 假不可行; `test_accept_tolerance_can_outrun_strict_bound_epsilon` 由"钉住缺陷"
+/// 改为"钉住修复"。
 ///
-/// 它今天没发作, 因为发作还要求**实测残差**真落进那段缝。上表的最大绝对残差:
-/// 线性行 1.25e-7, 比 1e-6 小 8 倍; 但**仿射/回归行已经到 6.36e-7, 只小 1.6 倍**。
-/// 也就是说 `predict.rs` 接上回归之后, 这条倒挂离发作只差一个身位 —— 靠的是余量,
-/// 不是设计, 而那点余量正在变薄。
-///
-/// ### ⚠ 改动顺序是硬的: 先修吸附阈值, 再抬容限
-///
-/// `FEASIBILITY_TOLERANCE` 的余量只剩 1.01 倍 (见它自己的注释), 迟早要抬。但本值
-/// 是它的别名, **先抬会把上面这个倒挂推得更深**: 抬到 1e-6 时, 粘结行的放行量变成
-/// 1e-6×101 ≈ 1e-4, 比 `strict_bound_epsilon` 的 1e-6 大两个数量级, 那条后果链就
-/// 从"潜伏"变成"常发", 用一个假不可行换掉另一个。
-///
-/// 所以顺序只能是: **先修 `judged_value` 的贴边阈值 (让它跟得上求解器残差),
-/// 再抬容限**。反过来做会在抬容限的那一刻引入回归。`test_accept_tolerance_can_outrun_strict_bound_epsilon` 把这个已知
-/// 缺陷钉成存档用例。真修法在 `judged_value` 的贴边阈值那一侧 (它对求解器残差同样
-/// 太紧), 与 `strict_bound_epsilon` 同属判定档位的构造, 排在下一个任务, **不要**
-/// 用调小本值来回避: 那会把第一个假不可行原样请回来。
+/// 没选的修法: 把下界执行界也往里缩一个 eps (与上界"对称")。上界的缓冲在格子
+/// 远端 (2.5999), 碰不到常见的整数化验值; 下界的缓冲却在近端 (80.00001), 恰好
+/// 卡掉 G 正好 80 的煤 —— 见 `tests/truncated_lower_bound.rs`。
 ///
 /// **别"为了保险"把它调紧。** 线性 Hard 指标真正拦人的是 LP 那一行: 它的界就是
 /// `effective_upper`/`effective_lower`, 与这里比的是同一条线, 所以越界的解根本
 /// 走不到复核跟前 —— 复核是 LP 下游的冗余安全网, 不是墙。
 ///
 /// 自己动手验: 把本值临时放大四个数量级, 重跑上面那条 `--ignored` 命令, 上表的
-/// "最大绝对残差"纹丝不动 (线性行仍是 1.25e-7)。拦人的从来是 LP。
+/// "最大绝对残差"纹丝不动 (线性行仍是 1.56e-7)。拦人的从来是 LP。
 /// 于是调紧只有一个效果: 把 LP 认下的正确解否掉。旧的绝对 1e-8 就是这样, 它从来
 /// 没挡下过任何真越界, 只制造了"可行合同报不可行"。
 pub(crate) const ACCEPT_TOLERANCE: f64 = crate::optimizer::FEASIBILITY_TOLERANCE;
@@ -306,7 +301,6 @@ pub(crate) fn check_value(
         };
     };
     let rule = acceptance_rule(spec, legacy_truncate);
-    let judged = judged_value(value, &rule);
     let use_max = matches!(spec.direction, Direction::Upper | Direction::Range);
     let use_min = matches!(spec.direction, Direction::Lower | Direction::Range);
     let mut accepted_slacks = Vec::new();
@@ -316,19 +310,23 @@ pub(crate) fn check_value(
     if use_max {
         if let Some(maximum) = spec.max {
             let executed = effective_upper(maximum, &rule);
-            accepted_slacks.push((executed - value, accept_slack(value, executed)));
+            let allow = accept_slack(value, executed);
+            // 容限在量化之前按方向推: 截断/四舍五入是跳一整格的, 量化之后再加容限,
+            // 救不回已被求解器残差推过格线的那一格.
+            let lenient = judged_value(value - allow, &rule);
+            accepted_slacks.push((executed - value, allow, lenient));
             raw_pass &= value <= maximum + CHECK_TOLERANCE;
-            let accepted_max = maximum + rule.tolerance.max(0.0);
-            judged_pass &= judged <= accepted_max + accept_slack(judged, accepted_max);
+            judged_pass &= lenient <= maximum + rule.tolerance.max(0.0);
         }
     }
     if use_min {
         if let Some(minimum) = spec.min {
             let executed = effective_lower(minimum, &rule);
-            accepted_slacks.push((value - executed, accept_slack(value, executed)));
+            let allow = accept_slack(value, executed);
+            let lenient = judged_value(value + allow, &rule);
+            accepted_slacks.push((value - executed, allow, lenient));
             raw_pass &= value + CHECK_TOLERANCE >= minimum;
-            let accepted_min = minimum - rule.tolerance.max(0.0);
-            judged_pass &= judged + accept_slack(judged, accepted_min) >= accepted_min;
+            judged_pass &= lenient >= minimum - rule.tolerance.max(0.0);
         }
     }
 
@@ -341,10 +339,12 @@ pub(crate) fn check_value(
     let tightest = accepted_slacks
         .into_iter()
         .reduce(|left, right| if right.0 < left.0 { right } else { left });
-    let slack = tightest.map(|(distance, _)| distance);
+    let slack = tightest.map(|(distance, _, _)| distance);
+    // 展示的判定值与做判定的是同一个数, 否则会出现"判定 10.01"旁边写"通过".
+    let judged = tightest.map_or_else(|| judged_value(value, &rule), |(_, _, lenient)| lenient);
     let binding =
-        tightest.is_some_and(|(distance, allow)| distance > -allow && distance < BINDING_TOL);
-    let accepted = tightest.is_none_or(|(distance, allow)| distance >= -allow) && judged_pass;
+        tightest.is_some_and(|(distance, allow, _)| distance > -allow && distance < BINDING_TOL);
+    let accepted = tightest.is_none_or(|(distance, allow, _)| distance >= -allow) && judged_pass;
     let status = if !accepted {
         EvaluationStatus::Fail
     } else if !verified {
@@ -634,20 +634,17 @@ fn validate_penalty(
 mod tests {
     use super::*;
 
-    /// **存档用例, 不是期望行为**: 放行量反超 `strict_bound_epsilon` 时会怎样.
+    /// 放行量反超 `strict_bound_epsilon` 时, 顶在上界的解不能被判 Fail.
     ///
-    /// 见 [`ACCEPT_TOLERANCE`] 的"必需不变量"一节. 两位小数判定下
+    /// 见 [`ACCEPT_TOLERANCE`] 的"容限必须在量化之前加"一节. 两位小数判定下
     /// `strict_bound_epsilon` = 量子×1e-4 = 1e-6, 而放行量 = 1e-7×(1+量级), 量级
     /// 超过 9 就反超它. 这里把界放在 10.00、残差取在两者之间, 复现那条后果链:
-    /// slack 这一关认了, 判定值却已经被推过整整一个量化格, `judged_pass` 挂,
+    /// slack 这一关认了, 旧实现里判定值却被推过整整一个量化格, `judged_pass` 挂,
     /// 整条判 Fail —— Hard 指标上这就是一个假不可行.
     ///
-    /// **断言的是"今天会这样", 不是"应该这样"。** 真修法在 `judged_value` 的贴边
-    /// 阈值那一侧, 属于判定档位的构造, 排在下一个任务. 那一版落地后这条会红,
-    /// 那时请把它改成断言 `Fail` 之外的状态, 而不是删掉.
-    ///
-    /// 今天它不发作: 实测最差绝对残差 1.254e-7, 比 1e-6 小 8 倍, 求解器根本走不到
-    /// 这个残差. 所以这里直接喂 `check_value` 一个构造值, 不经求解器.
+    /// 原先这里断言 `Fail` —— 钉住的是已知缺陷 (容限加在量化之后). 2026-09-27
+    /// 修成"容限在量化之前按方向推"后改为断言不 Fail, 用例本身保留作回归.
+    /// 直接喂 `check_value` 一个构造值, 不经求解器.
     #[test]
     fn test_accept_tolerance_can_outrun_strict_bound_epsilon() {
         let mut spec = Spec::upper("A", 10.00);
@@ -666,20 +663,20 @@ mod tests {
             "本用例的前提就是放行量反超了 eps: 放行量 {allowance:e} vs eps {epsilon:e}"
         );
 
-        // 残差取在 eps 与放行量之间 —— 这正是不变量倒挂让出来的那段缝.
+        // 残差取在 eps 与放行量之间 —— 旧实现在这段缝里会把判定值推过一整格.
         let residual = (epsilon + allowance) / 2.0;
         let value = executed + residual;
         let outcome = check_value(value, Some(&spec), false, true);
 
         assert_eq!(
-            outcome.judged, 10.01,
-            "判定值被推过整整一个量化格 (合同界 10.00), 实得 {}",
+            outcome.judged, 10.00,
+            "容限在量化之前推回, 判定值留在合同那一格, 实得 {}",
             outcome.judged
         );
-        assert_eq!(
+        assert_ne!(
             outcome.status,
             EvaluationStatus::Fail,
-            "已知缺陷: slack 认了, judged_pass 不认, 整条判 Fail"
+            "slack 认了的解, judged_pass 也必须认"
         );
         assert!(
             outcome.slack.is_some_and(|slack| slack >= -allowance),
@@ -749,6 +746,67 @@ mod tests {
         };
         assert!((effective_lower(80.0, &rule) - 79.95).abs() < 1e-9);
         assert_eq!(judged_value(79.96, &rule), 80.0);
+    }
+
+    /// 求解器残差会把解推到执行界外一丝; 截断/四舍五入是跳一整格的量化, 所以容限
+    /// 必须在量化**之前**按方向推 —— 在量化之后加容限救不回已经掉下去的一格.
+    /// 原先就是后者: G≥80 的解 79.99999998857 截断成 79.9, 整单被判"LP 不可行".
+    ///
+    /// 残差按各行自己的放行量取比例 (放行量随量级变, S≈2.6 的行只有 3.6e-7, G≈80 的行
+    /// 有 8.1e-6), 外加线上那个实测值 1.143e-8. 真超标的值必须照样判 Fail ——
+    /// 容限只吸收求解器噪声, 不放宽合同.
+    #[test]
+    fn test_judging_absorbs_solver_residual_but_not_real_violations() {
+        for mode in [AcceptanceMode::Truncate, AcceptanceMode::Round] {
+            let rule = AcceptanceRule {
+                mode,
+                decimals: Some(1),
+                tolerance: 0.0,
+            };
+            let mut lower = Spec::lower("G", 80.0);
+            lower.acceptance = Some(rule.clone());
+            let mut upper = Spec::upper("S", 2.5);
+            upper.acceptance = Some(rule.clone());
+            let status =
+                |value: f64, spec: &Spec| check_value(value, Some(spec), false, true).status;
+
+            let low_edge = effective_lower(80.0, &rule);
+            let high_edge = effective_upper(2.5, &rule);
+            for fraction in [0.0, 0.1, 0.5, 0.99] {
+                let residual = fraction * accept_slack(low_edge, low_edge);
+                let low = low_edge - residual;
+                assert_ne!(
+                    status(low, &lower),
+                    EvaluationStatus::Fail,
+                    "{mode:?} 下界 残差 {residual:e}"
+                );
+                let residual = fraction * accept_slack(high_edge, high_edge);
+                let high = high_edge + residual;
+                assert_ne!(
+                    status(high, &upper),
+                    EvaluationStatus::Fail,
+                    "{mode:?} 上界 残差 {residual:e}"
+                );
+            }
+            // 线上那一单的原值: 截断下 G 79.99999998857 曾被判成 79.9.
+            if mode == AcceptanceMode::Truncate {
+                let outcome = check_value(80.0 - 1.143e-8, Some(&lower), false, true);
+                assert_ne!(outcome.status, EvaluationStatus::Fail);
+                assert_eq!(outcome.judged, 80.0, "展示的判定值要和做判定的一致");
+            }
+            let below = effective_lower(80.0, &rule) - 0.01;
+            assert_eq!(
+                status(below, &lower),
+                EvaluationStatus::Fail,
+                "{mode:?} 真低于下界"
+            );
+            let above = effective_upper(2.5, &rule) + 0.01;
+            assert_eq!(
+                status(above, &upper),
+                EvaluationStatus::Fail,
+                "{mode:?} 真高于上界"
+            );
+        }
     }
 
     fn priced_spec(tiers: Vec<PenaltyTier>, reject: f64) -> Spec {

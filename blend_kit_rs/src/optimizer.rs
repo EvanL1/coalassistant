@@ -33,7 +33,7 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 /// 156 行, 最大 residual/(1+magnitude) = 6.36e-9, 号称留出约 16 倍余量.
 /// 那只是一张**窄网格**: 只有计价行、只有一个煤种、界只动了 ash 一项.
 ///
-/// ⚠ **真实余量只剩 1.01 倍** —— 宽网格实测已经贴着本值的 98.8%.
+/// ⚠ **真实余量只剩 1.0005 倍** —— 宽网格实测已经贴着本值的 99.95%.
 /// 具体数字见 `quality::ACCEPT_TOLERANCE` 那张实测表 (本 crate 唯一真源), 本处不
 /// 复述: 抄一份就多一处会各自变旧的地方, 这事已经发生过.
 ///
@@ -43,9 +43,8 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 ///
 /// 想调本值: 先重跑
 /// `cargo test --release -- --ignored measure_tolerance_headroom --nocapture`,
-/// 别拿上面那 156 行说事. 而且**顺序是硬的** —— 本值与 `ACCEPT_TOLERANCE` 是同一个
-/// 数, 抬它会加深 `strict_bound_epsilon` 的倒挂, 必须先修 `quality::judged_value`
-/// 的贴边阈值, 理由见 `quality::ACCEPT_TOLERANCE` 的"改动顺序"一节.
+/// 别拿上面那 156 行说事. 本值与 `ACCEPT_TOLERANCE` 是同一个数; 判定已改为"容限在
+/// 量化之前加" (见 `quality::ACCEPT_TOLERANCE`), 抬它不再会让判定值掉格.
 ///
 /// 安全边界: 放行量是 `本值 × (1 + magnitude)`, 随行量级变化. 实测的最大 LP 侧
 /// 放行量见 `quality::ACCEPT_TOLERANCE` 那张表 (本 crate 唯一真源) —— 约 3.7e-6
@@ -2462,7 +2461,7 @@ mod tests {
 /// ```
 ///
 /// 为什么要能复跑, 而不是注释里记个数就算: 两个常量都是安全关键的, 余量却很薄
-/// (`FEASIBILITY_TOLERANCE` 只有 1.01 倍), 煤池变宽、合同变紧、Clarabel 升级,
+/// (`FEASIBILITY_TOLERANCE` 只有 1.0005 倍), 煤池变宽、合同变紧、Clarabel 升级,
 /// 任何一样都可能把它吃掉. 一段没法复跑的"实测"在被推翻之前与编造无法区分.
 ///
 /// # 这个模块自己栽过三次, 都是同一个形状
