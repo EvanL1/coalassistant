@@ -877,32 +877,68 @@ fn gauss_jordan(aug: &mut [[f64; 8]; 7]) -> Result<(), String> {
 // 单元测试
 // ============================================================================
 
+/// 煤灰成分 (占灰的质量百分数), 算矿物质催化指数 [`mineral_catalysis_index`] 用.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AshComposition {
+    pub fe2o3: f64,
+    pub k2o: f64,
+    pub na2o: f64,
+    pub cao: f64,
+    pub mgo: f64,
+    pub mno: f64,
+    pub sio2: f64,
+    pub al2o3: f64,
+    pub tio2: f64,
+}
+
+/// 矿物质催化指数 MCI, **以百分数计**:
+///
+/// ```text
+/// MCI = 100 × Ad × (Fe₂O₃ + 1.85K₂O + 2.2Na₂O + 1.6CaO + 0.83MgO + 0.9MnO)
+///             / ((100 − Vd) × (SiO₂ + 0.41Al₂O₃ + 2.5TiO₂)),   Vd = Vdaf × (100 − Ad)/100
+/// ```
+///
+/// 必须乘 100: MCI 的常见取值在 1~8, 基准 δ=1.0 也在这个量级; 不乘 100 的话
+/// 典型灰成分只得 0.02 上下, 与之对不上。
+/// 分子是促进焦炭溶损的碱性氧化物, 分母是惰性的酸性氧化物; Ad、Vdaf 以 % 计。
+pub fn mineral_catalysis_index(ad: f64, vdaf: f64, ash: &AshComposition) -> f64 {
+    let vd = vdaf * (100.0 - ad) / 100.0;
+    let basic = ash.fe2o3
+        + 1.85 * ash.k2o
+        + 2.2 * ash.na2o
+        + 1.6 * ash.cao
+        + 0.83 * ash.mgo
+        + 0.9 * ash.mno;
+    let acidic = ash.sio2 + 0.41 * ash.al2o3 + 2.5 * ash.tio2;
+    100.0 * ad * basic / ((100.0 - vd) * acidic)
+}
+
 /// 捣固炼焦的焦炭 CSR 估算 —— 与按单煤 CSR 线性加权并列展示的第二个估计, 不进 LP.
 ///
-/// 公式出自专利 CN104268646A《通过炼焦煤 MCI 预测焦炭 CSR 模型的方法》
-/// (山西汾渭能源咨询有限公司, 2017 年授权, **有效期至 2034-09-27**), 按山西柳林
-/// 50 个煤样标定:
+/// 以山西柳林煤为基准标定:
 ///
 /// ```text
 /// M40 = −1.14·Vdaf + 0.036·G + 1.13·Y + 87.5 + 50·ρ − 50
 /// CSR = −0.032·M40² + 6.336·M40 − 241.18 − (MCI − 1.0) × 5.7
 /// ```
 ///
-/// - ρ 取 1.0 (t/m³): 产品默认捣固炼焦 (全国约 65% 产能, 独立焦化厂基本都是捣固).
-/// - **MCI 项不算**: 专利原文的 MCI 算式是图片, 文字版只剩变量名; 标准矿物催化指数
-///   要用灰成分, 我们没有。
-/// - 输入是配合煤的挥发/G/Y, 不看单煤 CSR —— 所以它绕开了"单煤 CSR 多是规格下限"
-///   的问题, 也分不出挥发/G/Y 相近但单煤 CSR 差很多的煤 (如荣欣 75 与北沟 55)。
+/// - ρ 取 1.0 (t/m³): 产品默认捣固炼焦。
+/// - `mci` 为 None 时不做 MCI 修正, 等于假设灰成分与柳林基准煤相当 (MCI = δ = 1.0)。
+///   MCI 常见取值在 1~8、基准 1.0 在最低端, 大多数煤高于它 —— 所以不修正
+///   对灰中碱金属多的煤会**高估** CSR (MCI 3 就差 11.4 个点)。目前没有灰成分数据,
+///   调用方一律传 None; 有了灰成分再用 [`mineral_catalysis_index`] 算出来传入。
+/// - 输入是配合煤的挥发/G/Y, 不看单煤 CSR, 分不出挥发/G/Y 相近而单煤 CSR 差很多的煤。
 /// - 二次式在 M40 = 99 处取极大值约 72.5, 超过后反而下降, 不外推到那一侧去读。
 ///
 /// 唯一的实测对照: 配方 2:4:3:2, 配合煤实测 Vdaf 22.14 / G 87 / Y 20, 焦炭实测
-/// CSR 70; 本式 68.6, 线性加权 62.8。一个样本, 只是合理性检查。
-///
-/// ⚠ 专利仍有效, 商用前需确认授权或改用自有数据拟合的系数。
-pub fn csr_stamp_charging(vdaf: f64, g: f64, y: f64) -> f64 {
+/// CSR 70; 本式 (不修正 MCI) 68.6, 线性加权 62.8。一个样本, 只是合理性检查。
+pub fn csr_stamp_charging(vdaf: f64, g: f64, y: f64, mci: Option<f64>) -> f64 {
     const BULK_DENSITY: f64 = 1.0;
+    const MCI_BASELINE: f64 = 1.0;
+    const MCI_SLOPE: f64 = 5.7;
     let m40 = -1.14 * vdaf + 0.036 * g + 1.13 * y + 87.5 + 50.0 * BULK_DENSITY - 50.0;
-    -0.032 * m40 * m40 + 6.336 * m40 - 241.18
+    let correction = mci.map_or(0.0, |mci| (mci - MCI_BASELINE) * MCI_SLOPE);
+    -0.032 * m40 * m40 + 6.336 * m40 - 241.18 - correction
 }
 
 #[cfg(test)]
