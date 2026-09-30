@@ -1,13 +1,13 @@
-//! 捣固炼焦 CSR 估算 (专利 CN104268646A 公式, ρ=1.0, 不含 MCI 项): 只展示, 不参与求解.
+//! 捣固炼焦 CSR 估算 (ρ=1.0, 不含 MCI 项): 只展示, 不参与求解.
 
 use blend_kit::*;
 use std::collections::HashMap;
 
-/// 用专利公布的系数手算: M40 = 87.9924, CSR = 68.573.
+/// 按公式系数手算: M40 = 87.9924, CSR = 68.573.
 /// 输入取朋友配方 2:4:3:2 的配合煤实测值 (Vdaf 22.14 / G 87 / Y 20), 实测焦炭 CSR 70.
 #[test]
 fn test_formula_matches_published_coefficients() {
-    let csr = predict::csr_stamp_charging(22.14, 87.0, 20.0);
+    let csr = predict::csr_stamp_charging(22.14, 87.0, 20.0, None);
     assert!((csr - 68.573).abs() < 0.01, "得 {csr}");
 }
 
@@ -64,6 +64,7 @@ fn test_result_carries_estimate_from_its_own_blend_indicators() {
         value_of(&result, "V"),
         value_of(&result, "G"),
         value_of(&result, "Y"),
+        None,
     );
     let got = result.csr_stamp_estimate.expect("挥发/G/Y 齐全时应有估算");
     assert!((got - expected).abs() < 1e-9);
@@ -100,4 +101,37 @@ fn test_no_estimate_when_infeasible() {
     let result = solve(&req);
     assert!(!result.ok);
     assert_eq!(result.csr_stamp_estimate, None);
+}
+
+/// MCI 以百分数计 (常见取值 1~8), 所以要乘 100。手算: 分子 5+1.85·1+2.2·0.5+1.6·3+0.83·1+0.9·0.1 = 13.67,
+/// Vd = 25×(100−10)/100 = 22.5, 分母 (100−22.5)×(50+0.41·30+2.5·1) = 5022,
+/// MCI = 100 × 10 × 13.67 / 5022 = 2.7220.
+#[test]
+fn test_mineral_catalysis_index_in_percent() {
+    let ash = predict::AshComposition {
+        fe2o3: 5.0,
+        k2o: 1.0,
+        na2o: 0.5,
+        cao: 3.0,
+        mgo: 1.0,
+        mno: 0.1,
+        sio2: 50.0,
+        al2o3: 30.0,
+        tio2: 1.0,
+    };
+    let mci = predict::mineral_catalysis_index(10.0, 25.0, &ash);
+    assert!((mci - 2.7220).abs() < 1e-3, "得 {mci}");
+}
+
+/// MCI 修正: 相对柳林基准 δ=1.0, 每高 1 扣 5.7。没有灰成分 (None) 时不修正.
+#[test]
+fn test_mci_term_only_applies_when_given() {
+    let base = predict::csr_stamp_charging(22.14, 87.0, 20.0, None);
+    let at_baseline = predict::csr_stamp_charging(22.14, 87.0, 20.0, Some(1.0));
+    let alkaline = predict::csr_stamp_charging(22.14, 87.0, 20.0, Some(3.0));
+    assert!((base - at_baseline).abs() < 1e-12);
+    assert!(
+        (base - alkaline - 11.4).abs() < 1e-9,
+        "MCI 3 应比基准低 11.4"
+    );
 }

@@ -275,7 +275,7 @@ export interface BlendResult {
   /** 以下字段由混合质量引擎写入；旧历史结果可能缺失. */
   quality_status?: QualityStatus;
   evaluation_iterations?: number;
-  /** 捣固炼焦 CSR 估算 (专利公式, 由体检里的挥发/G/Y 算出); 只展示, 不参与求解. */
+  /** 捣固炼焦 CSR 估算 (由体检里的挥发/G/Y 算出); 只展示, 不参与求解. */
   csr_stamp_estimate?: number | null;
 }
 

@@ -1268,7 +1268,10 @@ fn assemble_result(
             .map(|check| check.value)
     };
     result.csr_stamp_estimate = match (blend_value("V"), blend_value("G"), blend_value("Y")) {
-        (Some(vdaf), Some(g), Some(y)) => Some(crate::predict::csr_stamp_charging(vdaf, g, y)),
+        // 没有灰成分数据, MCI 不修正 (按柳林基准); 见 csr_stamp_charging 的说明.
+        (Some(vdaf), Some(g), Some(y)) => {
+            Some(crate::predict::csr_stamp_charging(vdaf, g, y, None))
+        }
         _ => None,
     };
     finalize_quality_status(&mut result, specs);
