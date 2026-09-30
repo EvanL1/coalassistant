@@ -549,6 +549,10 @@ pub struct BlendResult {
     /// 求解后评估和修复的重算次数.
     #[serde(default)]
     pub evaluation_iterations: usize,
+    /// 捣固炼焦 CSR 估算 ([`crate::predict::csr_stamp_charging`]), 由本结果体检里的
+    /// 挥发/G/Y 算出; 只展示, 不参与求解。缺任一输入或无解时为 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csr_stamp_estimate: Option<f64>,
 }
 
 impl BlendResult {
@@ -565,6 +569,7 @@ impl BlendResult {
             warnings,
             quality_status: QualityStatus::NeedsReview,
             evaluation_iterations: 0,
+            csr_stamp_estimate: None,
         }
     }
 

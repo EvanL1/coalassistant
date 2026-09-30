@@ -457,6 +457,46 @@ describe("TodayScreen 指标体检行", () => {
   });
 });
 
+describe("TodayScreen 捣固公式 CSR 估算", () => {
+  const csrCheck = {
+    indicator: "CSR",
+    label_zh: "焦炭强度",
+    value: 62.82,
+    min: 62,
+    binding: false,
+    status: "Unverified" as const,
+  };
+
+  it("有估算值时在焦炭强度格里并列显示, 主显示仍是线性结果", async () => {
+    const result = makeResult(1_000, 3_700);
+    result.indicator_check = [csrCheck];
+    result.csr_stamp_estimate = 68.573;
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    expect(screen.getByText("捣固公式估算 68.6")).toBeTruthy();
+  });
+
+  it("没有估算值时不显示这一行", async () => {
+    const result = makeResult(1_000, 3_700);
+    result.indicator_check = [csrCheck];
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    expect(screen.queryByText(/捣固公式估算/)).toBeNull();
+  });
+});
+
 describe("TodayScreen 采购扣款模板缺失告警 (Step 8)", () => {
   it("启用煤有采购保证值但本机没有扣款模板时, 端到端显示告警", async () => {
     // localStorage 里没有 doudou_blend.penalty_template.v1 (beforeEach 已清空),
