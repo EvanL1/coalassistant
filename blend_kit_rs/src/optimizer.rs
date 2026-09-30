@@ -1258,6 +1258,18 @@ fn assemble_result(
         warnings,
         quality_status: QualityStatus::Estimated,
         evaluation_iterations: 0,
+        csr_stamp_estimate: None,
+    };
+    let blend_value = |indicator: &str| {
+        result
+            .indicator_check
+            .iter()
+            .find(|check| check.indicator == indicator)
+            .map(|check| check.value)
+    };
+    result.csr_stamp_estimate = match (blend_value("V"), blend_value("G"), blend_value("Y")) {
+        (Some(vdaf), Some(g), Some(y)) => Some(crate::predict::csr_stamp_charging(vdaf, g, y)),
+        _ => None,
     };
     finalize_quality_status(&mut result, specs);
     result

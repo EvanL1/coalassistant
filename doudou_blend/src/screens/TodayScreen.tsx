@@ -859,6 +859,13 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
                   {ic.model?.version ? ` · ${ic.model.version}` : ""}
                   {ic.model?.in_domain === false ? " · 训练域外" : ""}
                 </div>
+                {/* 第二个 CSR 估计: 按配合煤挥发/G/Y 推 (捣固), 与上面的单煤加权并列.
+                    公式精度在个位数, 只给一位小数. */}
+                {key === "CSR" && result.csr_stamp_estimate != null && (
+                  <div className="indicator-meta">
+                    捣固公式估算 {result.csr_stamp_estimate.toFixed(1)}
+                  </div>
+                )}
               </div>
             );
           })}
