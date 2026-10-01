@@ -20,7 +20,8 @@ export default defineRailway(() => {
     deploy: {
       healthcheckPath: "/api/health",
       healthcheckTimeout: 300,
-      restartPolicyType: "ON_FAILURE",
+      // 重启策略取 Railway 默认的 ON_FAILURE (失败时重启)。不写 restartPolicyType:
+      // 默认值在线上存为空, 显式写上会让 plan 每次都报一条 null → ON_FAILURE 的假差异.
       restartPolicyMaxRetries: 3,
     },
     env: {
