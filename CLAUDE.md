@@ -129,6 +129,10 @@ npm run check:data   # master 数据自检
 - Production deploy is **Railway + Supabase** via the repo-root `Dockerfile` (Node stage builds React, Rust
   stage builds `blend_kit_server`, final image ships the server + static assets). See
   `docs/railway-deployment.md` for the required `AUTH_*` / `DATABASE_URL` env vars.
+- Railway 服务设置由 `.railway/railway.ts` 声明 (根目录 `package.json` 只为装它的 SDK)。它是**声明式**的:
+  没写的东西 apply 时会被删掉 —— 代码来源要写 `github(...)`, 环境变量要逐个声明, 机密用 `preserve()`。
+  改完先 `railway config plan`, 确认 **0 to destroy** 再 `railway config apply`; 不要用
+  `railway config migrate` 覆盖它 (生成的版本会丢掉仓库来源、变量和重启策略)。
 
 ## Agent 环境 (E2B)
 
