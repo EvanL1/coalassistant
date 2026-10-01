@@ -1,0 +1,8 @@
+{
+  "name": "coalassistant-infra",
+  "private": true,
+  "description": "仅供 Railway 部署配置 (.railway/railway.ts) 使用; 前端依赖在 doudou_blend/",
+  "devDependencies": {
+    "railway": "3.12.0"
+  }
+}
