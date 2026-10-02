@@ -841,6 +841,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            price_factor: None,
         }
     }
 
@@ -1075,6 +1076,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            price_factor: None,
         }
     }
 

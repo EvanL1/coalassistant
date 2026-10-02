@@ -68,6 +68,7 @@ fn main() {
         total_quantity: Some(3700.0),
         truncate_decimal: true,
         fixed_ratios: None,
+        price_factor: None,
     };
     let r = solve(&req);
 

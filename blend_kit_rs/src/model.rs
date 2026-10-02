@@ -307,10 +307,83 @@ pub struct BlendRequest {
     /// None = 正常求最低成本配方.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_ratios: Option<HashMap<String, f64>>,
+    /// 价格因子 (按质量估每种煤应值多少钱). 只做评估, 不进 LP.
+    /// None = 不评估, 结果里 coal_values 为空.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_factor: Option<PriceFactor>,
 }
 
 fn default_truncate() -> bool {
     true
+}
+
+// ============================================================================
+// 价格因子: 按质量升贴水估"应值价", 与报价对比 (只评估, 不进 LP)
+// ============================================================================
+
+/// 单条升贴水规则. 费率单位: 元/吨 per 1 个指标单位.
+///
+/// direction 只接受 Upper (越低越好, 如 S/A) 或 Lower (越高越好, 如 G/Y/CSR).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PriceAdjust {
+    pub indicator: String,
+    pub direction: Direction,
+    /// 基准品该指标的值; 优于基准升价, 劣于基准扣价.
+    pub base: f64,
+    /// 优于基准时每 1 个指标单位的升价 (元/吨), ≥0.
+    pub premium_rate: f64,
+    /// 劣于基准时每 1 个指标单位的扣价 (元/吨), ≥0.
+    pub discount_rate: f64,
+    /// 计价前先把指标值截到 [lo, hi] (如硫低于 0.70 按 0.70 计).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clamp: Option<[f64; 2]>,
+    /// 系数可信的线性区间; 原始值落在区间外照算, 但标记为外推.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_range: Option<[f64; 2]>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+/// 价格因子配置.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PriceFactor {
+    #[serde(default)]
+    pub adjusts: Vec<PriceAdjust>,
+    /// 基准品价 P0 (元/吨). None = 由请求煤池组内反推.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_price: Option<f64>,
+}
+
+/// 单项升贴水金额.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PricePart {
+    pub indicator: String,
+    /// 元/吨; 正 = 升价, 负 = 扣价.
+    pub amount: f64,
+}
+
+/// 单种煤的价格评估. 只用出厂价 (fob), 不含运费.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CoalValue {
+    pub name: String,
+    /// 报价 (出厂价).
+    pub fob: f64,
+    /// 质量升贴水合计 Adj.
+    pub adjustment: f64,
+    /// 按质量应值 = P0 + Adj.
+    pub fair: f64,
+    /// 差额 = fob − fair; >0 偏贵, <0 划算.
+    pub gap: f64,
+    /// fob / fair; fair ≤ 0 时记 0.
+    pub ratio: f64,
+    #[serde(default)]
+    pub parts: Vec<PricePart>,
+    /// 缺该指标而跳过的规则.
+    #[serde(default)]
+    pub missing: Vec<String>,
+    /// 原始值落在线性区间外 (外推) 的指标.
+    #[serde(default)]
+    pub extrapolated: Vec<String>,
 }
 
 // ============================================================================
@@ -553,6 +626,16 @@ pub struct BlendResult {
     /// 挥发/G/Y 算出; 只展示, 不参与求解。缺任一输入或无解时为 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub csr_stamp_estimate: Option<f64>,
+    /// 价格因子评估 (按请求煤池顺序). 未配置价格因子或配置无效时为空.
+    /// `#[serde(default)]`: 兼容价格因子上线前的存量记录.
+    #[serde(default)]
+    pub coal_values: Vec<CoalValue>,
+    /// 本次采用的基准品价 P0. 无评估时为 None.
+    #[serde(default)]
+    pub price_base: Option<f64>,
+    /// P0 是否由煤池组内反推 (false = 请求指定).
+    #[serde(default)]
+    pub price_base_from_group: bool,
 }
 
 impl BlendResult {
@@ -570,6 +653,9 @@ impl BlendResult {
             quality_status: QualityStatus::NeedsReview,
             evaluation_iterations: 0,
             csr_stamp_estimate: None,
+            coal_values: Vec::new(),
+            price_base: None,
+            price_base_from_group: false,
         }
     }
 
