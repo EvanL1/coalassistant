@@ -900,7 +900,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       )}
 
       {/* 煤价对比与配方无关, 有解无解都显示 (没有 coal_values 时组件不渲染). */}
-      <CoalValueCard result={result} />
+      <CoalValueCard result={result} drifted={(price?.driftedCount ?? 0) > 0} />
 
       {result.warnings.length > 0 && (
         <div

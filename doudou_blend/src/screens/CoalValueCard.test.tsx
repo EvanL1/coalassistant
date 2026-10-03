@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CoalValueCard } from "./CoalValueCard";
 import type { BlendResult, CoalValue } from "../types";
 
-function value(name: string, fob: number, fair: number, extra: Partial<CoalValue> = {}): CoalValue {
+function value(
+  name: string,
+  fob: number,
+  fair: number,
+  extra: Partial<CoalValue> = {},
+): CoalValue {
   return {
     name,
     fob,
@@ -62,7 +67,9 @@ describe("CoalValueCard", () => {
     expect(screen.getByText("2054")).toBeTruthy();
     expect(screen.getByText("偏贵 46")).toBeTruthy();
     expect(screen.getByText("划算 12")).toBeTruthy();
-    expect(screen.getByText(/基准品价 2167 元\/吨 \(由本次煤池反推\)/)).toBeTruthy();
+    expect(
+      screen.getByText(/基准品价 2167 元\/吨 \(由本次煤池反推\)/),
+    ).toBeTruthy();
     expect(screen.getByText(/只用出厂价, 不含运费/)).toBeTruthy();
   });
 
@@ -83,5 +90,40 @@ describe("CoalValueCard", () => {
     expect(screen.getByText(/基准品价 2000 元\/吨 \(指定\)/)).toBeTruthy();
     expect(screen.getByText("外推")).toBeTruthy();
     expect(screen.getByText("缺 胶质、焦炭强度")).toBeTruthy();
+  });
+});
+
+describe("CoalValueCard 口径与标签", () => {
+  const values = [
+    value("北沟", 2200, 2165.45, { extrapolated: ["S"] }),
+    value("浮精", 2000, 2000.3),
+    value("新星", 2100, 2099.7),
+  ];
+
+  it("表头写出厂价 (求解口径); 有报价推算时脚注说明按推算价对比", () => {
+    render(<CoalValueCard result={result({ coal_values: values })} drifted />);
+    expect(screen.getByText("出厂价 (求解口径)")).toBeTruthy();
+    expect(screen.queryByText("报价")).toBeNull();
+    expect(screen.getByText(/按推算后的出厂价对比/)).toBeTruthy();
+  });
+
+  it("无推算时不出推算说明; 脚注说明未录出厂价的煤不参与", () => {
+    render(<CoalValueCard result={result({ coal_values: values })} />);
+    expect(screen.queryByText(/按推算后的出厂价对比/)).toBeNull();
+    expect(screen.getByText(/未录出厂价的煤不参与对比/)).toBeTruthy();
+  });
+
+  it("取整后持平用中性色, 不按正负号着色", () => {
+    render(<CoalValueCard result={result({ coal_values: values })} />);
+    for (const cellEl of screen.getAllByText("持平")) {
+      expect((cellEl as HTMLElement).style.color).toBe("var(--c-text-3)");
+    }
+  });
+
+  it("外推悬停说明用中文指标名", () => {
+    render(<CoalValueCard result={result({ coal_values: values })} />);
+    expect(screen.getByText("外推").getAttribute("title")).toBe(
+      "超出系数线性区间: 硫",
+    );
   });
 });
