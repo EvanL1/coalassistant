@@ -135,6 +135,49 @@ export interface BlendRequest {
   truncate_decimal?: boolean;
   /** 验算模式: 煤名 → 份数 (按总和归一). 给了就不求最优, 直接按此配比出结果. */
   fixed_ratios?: Record<string, number> | null;
+  /** 价格因子 (按质量估应值价). 只做评估, 不进 LP. */
+  price_factor?: PriceFactor | null;
+}
+
+/** 单条升贴水规则. 费率: 元/吨 每 1 个指标单位. direction 只用 Upper/Lower. */
+export interface PriceAdjust {
+  indicator: string;
+  direction: Direction;
+  base: number;
+  premium_rate: number;
+  discount_rate: number;
+  clamp?: [number, number] | null;
+  linear_range?: [number, number] | null;
+  enabled?: boolean;
+}
+
+export interface PriceFactor {
+  adjusts: PriceAdjust[];
+  /** 基准品价 P0; 缺省 = 由请求煤池组内反推. */
+  base_price?: number | null;
+}
+
+/** master 里的价格因子系数表, 多一段出处说明. */
+export interface MasterPriceFactor extends PriceFactor {
+  description?: string;
+}
+
+export interface PricePart {
+  indicator: string;
+  amount: number;
+}
+
+/** 单种煤的价格评估 (只用出厂价, 不含运费). gap > 0 偏贵, < 0 划算. */
+export interface CoalValue {
+  name: string;
+  fob: number;
+  adjustment: number;
+  fair: number;
+  gap: number;
+  ratio: number;
+  parts: PricePart[];
+  missing: string[];
+  extrapolated: string[];
 }
 
 export interface CostBreakdown {
@@ -277,6 +320,10 @@ export interface BlendResult {
   evaluation_iterations?: number;
   /** 捣固炼焦 CSR 估算 (由体检里的挥发/G/Y 算出); 只展示, 不参与求解. */
   csr_stamp_estimate?: number | null;
+  /** 价格因子评估; 未配置或旧历史结果为空/缺失. */
+  coal_values?: CoalValue[];
+  price_base?: number | null;
+  price_base_from_group?: boolean;
 }
 
 /** 混合后 6 项指标 (CSR 回归自变量 X). */
@@ -361,5 +408,7 @@ export interface CoalMaster {
   /** 词表声明; 录入界面从这里取煤种/形态选项, 不在前端另写一份. */
   schema?: MasterSchema | null;
   default_contract: DefaultContract;
+  /** 价格因子默认系数表; 求解时原样带进请求. */
+  price_factor?: MasterPriceFactor | null;
   coals: MasterCoalEntry[];
 }

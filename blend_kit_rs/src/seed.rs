@@ -95,6 +95,9 @@ pub struct CoalMaster {
     #[serde(default)]
     pub schema: Option<serde_json::Value>,
     pub default_contract: DefaultContract,
+    /// 价格因子默认系数表 (按质量升贴水). 前端求解时原样带进请求; 系数是数据不是代码.
+    #[serde(default)]
+    pub price_factor: Option<crate::PriceFactor>,
     pub coals: Vec<CoalMasterEntry>,
 }
 
@@ -204,6 +207,25 @@ mod tests {
             !master.default_contract.specs.is_empty(),
             "默认合同不应为空"
         );
+    }
+
+    /// master 的 price_factor 可选: 缺省为 None; 带 description 等说明字段也能读.
+    #[test]
+    fn test_master_price_factor_optional() {
+        let base = r#""version": "1.0", "updated_at": "2026-01-01", "description": "",
+            "default_contract": { "name": "合同", "specs": [] }, "coals": []"#;
+        let without: CoalMaster = serde_json::from_str(&format!("{{{base}}}")).unwrap();
+        assert!(without.price_factor.is_none());
+        let with: CoalMaster = serde_json::from_str(&format!(
+            r#"{{{base}, "price_factor": {{ "description": "出处说明", "adjusts": [
+                {{ "indicator": "S", "direction": "Upper", "base": 1.3,
+                   "premium_rate": 150, "discount_rate": 250, "enabled": false }} ] }}}}"#
+        ))
+        .unwrap();
+        let factor = with.price_factor.expect("应读到 price_factor");
+        assert_eq!(factor.adjusts.len(), 1);
+        assert!(!factor.adjusts[0].enabled);
+        assert!(factor.base_price.is_none());
     }
 
     /// has_basic 只认 S/A/V/G 四项.

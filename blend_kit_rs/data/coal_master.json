@@ -69,6 +69,17 @@
     ]
   },
 
+  "price_factor": {
+    "description": "价格因子默认系数表: 按质量升贴水估每种煤应值多少钱, 与出厂价对比 (只评估, 不进配方 LP; 不含运费). 单位: 元/吨 每 1 个指标单位. direction: Upper=越低越好, Lower=越高越好. 未给 base_price 时基准品价由当次煤池组内反推. 系数出处 —— S: 大商所焦煤交割标准 F/DCE JM004-2025, 硫分每 0.01% 升 1.5 元 / 扣 2.5 元, 低于 0.70% 按 0.70% 计 (clamp), 线性区间 0.70–1.60. A: 大商所 2013 焦煤期货合约设计说明, 灰分每 +0.1% 成本 +7.20 元 (取下限), 线性区间取 Mysteel 标准化范围 8–12. G: 现货合同 G 第一档 5 元/点, 截断及线性区间取 Mysteel 40–95. Y: 现货合同每 0.5mm 3 元. CSR: 大商所 CSR [60,65) 扣 50 元约合 10 元/点; 默认关闭, 因库里多数 CSR 是报价规格边界而非化验值. 未做: 挥发分 (16–26 交割区间内不调价, 26–28 的一次性扣款第一版不做); 水分折重 (第一版不做).",
+    "adjusts": [
+      { "indicator": "S",   "direction": "Upper", "base": 1.30, "premium_rate": 150, "discount_rate": 250, "clamp": [0.70, 100], "linear_range": [0.70, 1.60] },
+      { "indicator": "A",   "direction": "Upper", "base": 10.5, "premium_rate": 72,  "discount_rate": 72,  "linear_range": [8, 12] },
+      { "indicator": "G",   "direction": "Lower", "base": 85,   "premium_rate": 5,   "discount_rate": 5,   "clamp": [40, 95] },
+      { "indicator": "Y",   "direction": "Lower", "base": 15,   "premium_rate": 6,   "discount_rate": 6 },
+      { "indicator": "CSR", "direction": "Lower", "base": 65,   "premium_rate": 10,  "discount_rate": 10,  "enabled": false }
+    ]
+  },
+
   "coals": [
     {
       "name": "临北", "region": "山西吕梁", "coal_type": "焦煤", "form": "精煤",

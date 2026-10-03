@@ -157,6 +157,36 @@ if (!contract || !Array.isArray(contract.specs) || contract.specs.length === 0) 
   if (duplicated.length) fail(`默认合同: 指标重复 ${[...new Set(duplicated)].join("/")}`);
 }
 
+// ---------- 价格因子系数表 (可选) ----------
+const priceFactor = master.price_factor;
+if (priceFactor != null) {
+  const adjusts = priceFactor.adjusts;
+  if (!Array.isArray(adjusts)) {
+    fail("price_factor.adjusts 必须是数组");
+  } else {
+    const isRate = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+    const isInterval = (v) =>
+      v == null ||
+      (Array.isArray(v) && v.length === 2 && v.every(Number.isFinite) && v[0] < v[1]);
+    for (const rule of adjusts) {
+      const label = `price_factor ${rule.indicator}`;
+      if (!INDICATORS.includes(rule.indicator)) fail(`${label}: 未知指标`);
+      if (rule.direction !== "Upper" && rule.direction !== "Lower") {
+        fail(`${label}: direction 只能是 Upper/Lower, 实际 ${JSON.stringify(rule.direction)}`);
+      }
+      if (typeof rule.base !== "number" || !Number.isFinite(rule.base)) fail(`${label}: base 不是有限数值`);
+      if (!isRate(rule.premium_rate)) fail(`${label}: premium_rate 须为 ≥0 的有限数`);
+      if (!isRate(rule.discount_rate)) fail(`${label}: discount_rate 须为 ≥0 的有限数`);
+      if (!isInterval(rule.clamp)) fail(`${label}: clamp 须为 [lo, hi] 且 lo < hi`);
+      if (!isInterval(rule.linear_range)) fail(`${label}: linear_range 须为 [lo, hi] 且 lo < hi`);
+    }
+    const duplicated = adjusts
+      .map((r) => r.indicator)
+      .filter((ind, i, all) => all.indexOf(ind) !== i);
+    if (duplicated.length) fail(`price_factor: 指标重复 ${[...new Set(duplicated)].join("/")}`);
+  }
+}
+
 // ---------- 结果 ----------
 if (failures.length) {
   console.error(`Master 数据自检失败 (${failures.length} 项):`);
