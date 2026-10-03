@@ -309,6 +309,14 @@ export interface MeasuredQuality {
   y?: number | null;
   m?: number | null;
   csr?: number | null;
+  /** 焦炭反应性与冷态强度 (%), 选填. */
+  cri?: number | null;
+  m40?: number | null;
+  m10?: number | null;
+  /** 炼焦条件, 选填: 装煤密度 (t/m³)、结焦时间 (小时)、炉温 (℃). */
+  bulk_density?: number | null;
+  coking_hours?: number | null;
+  flue_temp?: number | null;
 }
 
 /** 历史方案 (跨后端统一形状). mixed/实测各列支撑「回填实测焦质」数据闭环. */
@@ -329,6 +337,13 @@ export interface HistoryRecord {
   g_measured: number | null;
   y_measured: number | null;
   m_measured: number | null;
+  /** 焦炭 CRI/M40/M10 与炼焦条件回填 (区分煤的原因和炉子的原因); null = 未回填. */
+  cri_measured: number | null;
+  m40_measured: number | null;
+  m10_measured: number | null;
+  bulk_density: number | null;
+  coking_hours: number | null;
+  flue_temp: number | null;
 }
 
 // ===== Master schema =====

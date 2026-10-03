@@ -90,20 +90,41 @@ pub struct MeasuredQuality {
     pub y: Option<f64>,
     pub m: Option<f64>,
     pub csr: Option<f64>,
+    /// 焦炭反应性与冷态强度 (%), 选填.
+    pub cri: Option<f64>,
+    pub m40: Option<f64>,
+    pub m10: Option<f64>,
+    /// 炼焦条件, 选填: 装煤密度 (t/m³)、结焦时间 (小时)、炉温 (℃, 标准火道温度).
+    pub bulk_density: Option<f64>,
+    pub coking_hours: Option<f64>,
+    pub flue_temp: Option<f64>,
 }
 
 impl MeasuredQuality {
     pub fn validate(&self) -> Result<(), &'static str> {
-        let values = [self.s, self.a, self.v, self.g, self.y, self.m, self.csr];
-        if values.iter().all(Option::is_none) {
+        const PERCENT: (f64, f64, &str) = (0.0, 100.0, "实测值必须在 0 到 100 之间");
+        let checks = [
+            (self.s, PERCENT),
+            (self.a, PERCENT),
+            (self.v, PERCENT),
+            (self.g, PERCENT),
+            (self.y, PERCENT),
+            (self.m, PERCENT),
+            (self.csr, PERCENT),
+            (self.cri, PERCENT),
+            (self.m40, PERCENT),
+            (self.m10, PERCENT),
+            (self.bulk_density, (0.5, 1.5, "装煤密度应在 0.5~1.5 t/m³")),
+            (self.coking_hours, (10.0, 40.0, "结焦时间应在 10~40 小时")),
+            (self.flue_temp, (900.0, 1500.0, "炉温应在 900~1500 ℃")),
+        ];
+        if checks.iter().all(|(value, _)| value.is_none()) {
             return Err("至少提供一项实测值");
         }
-        if values
-            .into_iter()
-            .flatten()
-            .any(|value| !value.is_finite() || value <= 0.0 || value > 100.0)
-        {
-            return Err("实测值必须在 0 到 100 之间");
+        for (value, (minimum, maximum, message)) in checks {
+            if value.is_some_and(|v| !v.is_finite() || v <= minimum || v > maximum) {
+                return Err(message);
+            }
         }
         Ok(())
     }
@@ -147,6 +168,12 @@ pub struct HistoryRecord {
     pub g_measured: Option<f64>,
     pub y_measured: Option<f64>,
     pub m_measured: Option<f64>,
+    pub cri_measured: Option<f64>,
+    pub m40_measured: Option<f64>,
+    pub m10_measured: Option<f64>,
+    pub bulk_density: Option<f64>,
+    pub coking_hours: Option<f64>,
+    pub flue_temp: Option<f64>,
 }
 
 pub async fn connect_from_env() -> Option<PgPool> {
@@ -334,7 +361,8 @@ pub async fn list_history(
         SELECT
             id, occurred_at, contract_name, cost_cif, recipe_json, result_json,
             csr_measured, s_measured, a_measured, v_measured, g_measured,
-            y_measured, m_measured
+            y_measured, m_measured, cri_measured, m40_measured, m10_measured,
+            bulk_density, coking_hours, flue_temp
         FROM web_blend_history
         WHERE username = $1
         ORDER BY occurred_at DESC
@@ -361,6 +389,12 @@ pub async fn list_history(
                 g_measured: row.try_get("g_measured")?,
                 y_measured: row.try_get("y_measured")?,
                 m_measured: row.try_get("m_measured")?,
+                cri_measured: row.try_get("cri_measured")?,
+                m40_measured: row.try_get("m40_measured")?,
+                m10_measured: row.try_get("m10_measured")?,
+                bulk_density: row.try_get("bulk_density")?,
+                coking_hours: row.try_get("coking_hours")?,
+                flue_temp: row.try_get("flue_temp")?,
             })
         })
         .collect()
@@ -381,7 +415,13 @@ pub async fn set_measured_quality(
             g_measured = COALESCE($6, g_measured),
             y_measured = COALESCE($7, y_measured),
             m_measured = COALESCE($8, m_measured),
-            csr_measured = COALESCE($9, csr_measured)
+            csr_measured = COALESCE($9, csr_measured),
+            cri_measured = COALESCE($10, cri_measured),
+            m40_measured = COALESCE($11, m40_measured),
+            m10_measured = COALESCE($12, m10_measured),
+            bulk_density = COALESCE($13, bulk_density),
+            coking_hours = COALESCE($14, coking_hours),
+            flue_temp = COALESCE($15, flue_temp)
         WHERE id = $1 AND username = $2
         "#,
     )
@@ -394,6 +434,12 @@ pub async fn set_measured_quality(
     .bind(measured.y)
     .bind(measured.m)
     .bind(measured.csr)
+    .bind(measured.cri)
+    .bind(measured.m40)
+    .bind(measured.m10)
+    .bind(measured.bulk_density)
+    .bind(measured.coking_hours)
+    .bind(measured.flue_temp)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -623,13 +669,40 @@ mod tests {
             y: None,
             m: None,
             csr: None,
+            cri: None,
+            m40: None,
+            m10: None,
+            bulk_density: None,
+            coking_hours: None,
+            flue_temp: None,
         };
         assert!(empty.validate().is_err());
 
         let valid = MeasuredQuality {
             csr: Some(62.0),
-            ..empty
+            ..empty.clone()
         };
         assert!(valid.validate().is_ok());
+
+        // 炼焦条件各有量程, 不能套 0~100: 炉温 1350 合法, 装煤密度 2.0 不合法.
+        let conditions = MeasuredQuality {
+            bulk_density: Some(1.1),
+            coking_hours: Some(25.0),
+            flue_temp: Some(1350.0),
+            ..empty.clone()
+        };
+        assert!(conditions.validate().is_ok());
+        let too_dense = MeasuredQuality {
+            bulk_density: Some(2.0),
+            ..empty.clone()
+        };
+        assert_eq!(too_dense.validate(), Err("装煤密度应在 0.5~1.5 t/m³"));
+        let coke_only = MeasuredQuality {
+            cri: Some(25.0),
+            m40: Some(88.0),
+            m10: Some(6.5),
+            ..empty
+        };
+        assert!(coke_only.validate().is_ok());
     }
 }

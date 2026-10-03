@@ -13,16 +13,28 @@ import {
 import { getBackend } from "../backend";
 import type { HistoryRecord, MeasuredQuality } from "../types";
 
-/** 回填字段定义: [MeasuredQuality 键, 显示标签, HistoryRecord 列]. */
-const MEASURED_FIELDS = [
-  ["csr", "CSR", "csr_measured"],
-  ["g", "粘结G", "g_measured"],
-  ["y", "胶质Y", "y_measured"],
-  ["s", "硫S", "s_measured"],
-  ["a", "灰A", "a_measured"],
-  ["v", "挥发V", "v_measured"],
-  ["m", "水分M", "m_measured"],
+/** 回填字段定义: [MeasuredQuality 键, 显示标签, HistoryRecord 列, 下限 (不含), 上限, 单位]. */
+const QUALITY_FIELDS = [
+  ["csr", "CSR", "csr_measured", 0, 100, ""],
+  ["g", "粘结G", "g_measured", 0, 100, ""],
+  ["y", "胶质Y", "y_measured", 0, 100, ""],
+  ["s", "硫S", "s_measured", 0, 100, ""],
+  ["a", "灰A", "a_measured", 0, 100, ""],
+  ["v", "挥发V", "v_measured", 0, 100, ""],
+  ["m", "水分M", "m_measured", 0, 100, ""],
 ] as const;
+
+/** 焦炭强度与炼焦条件, 全部选填; 以后拟合 CSR 时用来区分煤的原因和炉子的原因. */
+const COKE_FIELDS = [
+  ["cri", "焦CRI", "cri_measured", 0, 100, ""],
+  ["m40", "焦M40", "m40_measured", 0, 100, ""],
+  ["m10", "焦M10", "m10_measured", 0, 100, ""],
+  ["bulk_density", "装煤密度", "bulk_density", 0.5, 1.5, " t/m³"],
+  ["coking_hours", "结焦时间", "coking_hours", 10, 40, " 小时"],
+  ["flue_temp", "炉温", "flue_temp", 900, 1500, " ℃"],
+] as const;
+
+const MEASURED_FIELDS = [...QUALITY_FIELDS, ...COKE_FIELDS] as const;
 
 type MeasuredKey = (typeof MEASURED_FIELDS)[number][0];
 
@@ -198,7 +210,7 @@ function inputsFromEntry(entry: HistoryRecord): Record<MeasuredKey, string> {
   return out;
 }
 
-/** 单条历史卡片 + 内联回填混煤实测化验 (7 项均可选, 至少填一项). */
+/** 单条历史卡片 + 内联回填混煤实测化验与焦炭/炼焦条件 (均可选, 至少填一项). */
 function HistoryCard({ entry }: { entry: HistoryRecord }) {
   const [editing, setEditing] = useState(false);
   const [inputs, setInputs] = useState<Record<MeasuredKey, string>>(() =>
@@ -228,14 +240,14 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
       return;
     }
     const measured: MeasuredQuality = {};
-    for (const [key, label] of filled) {
+    for (const [key, label, , min, max, unit] of filled) {
       const v = Number(inputs[key]);
       if (!Number.isFinite(v) || v <= 0) {
         setErr(`${label} 请输入正数`);
         return;
       }
-      if (v > 100) {
-        setErr(`${label} 量程应在 0~100`);
+      if (v <= min || v > max) {
+        setErr(`${label} 量程应在 ${min}~${max}${unit}`);
         return;
       }
       measured[key] = v;
@@ -254,6 +266,35 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
   }
 
   const savedValues = MEASURED_FIELDS.filter(([, , col]) => entry[col] != null);
+
+  function fieldGrid(fields: typeof QUALITY_FIELDS | typeof COKE_FIELDS) {
+    return (
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))",
+          gap: 8,
+        }}
+      >
+        {fields.map(([key, label]) => (
+          <label key={key} style={{ fontSize: 11, color: "var(--c-text-2)" }}>
+            {label}
+            <input
+              type="number"
+              inputMode="decimal"
+              value={inputs[key]}
+              placeholder="—"
+              style={{ ...miniInput, width: "100%", marginTop: 2 }}
+              onChange={(e) => {
+                setInputs({ ...inputs, [key]: e.target.value });
+                setErr(null);
+              }}
+            />
+          </label>
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div className="card">
@@ -283,30 +324,11 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
         <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--c-border)" }}>
           {editing ? (
             <div>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))",
-                  gap: 8,
-                }}
-              >
-                {MEASURED_FIELDS.map(([key, label]) => (
-                  <label key={key} style={{ fontSize: 11, color: "var(--c-text-2)" }}>
-                    {label}
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      value={inputs[key]}
-                      placeholder="—"
-                      style={{ ...miniInput, width: "100%", marginTop: 2 }}
-                      onChange={(e) => {
-                        setInputs({ ...inputs, [key]: e.target.value });
-                        setErr(null);
-                      }}
-                    />
-                  </label>
-                ))}
+              {fieldGrid(QUALITY_FIELDS)}
+              <div style={{ fontSize: 11, color: "var(--c-text-3)", margin: "10px 0 4px" }}>
+                焦炭与炼焦条件（选填）
               </div>
+              {fieldGrid(COKE_FIELDS)}
               <div style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 6 }}>
                 留空 = 保持原值（不会清除已录数据）
               </div>
@@ -334,7 +356,8 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
                   {label}{" "}
                   <span style={{ fontWeight: 700 }}>
                     {/* 硫等小量纲值 (<10) 保留两位小数, 0.65 显示成 0.7 会误导数据对照 */}
-                    {entry[col]!.toFixed(entry[col]! < 10 ? 2 : 1)}
+                    {/* 炉温 (≥1000) 不带小数 */}
+                    {entry[col]!.toFixed(entry[col]! < 10 ? 2 : entry[col]! >= 1000 ? 0 : 1)}
                   </span>
                 </span>
               ))}

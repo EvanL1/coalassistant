@@ -71,6 +71,13 @@ async function makeHttpBackend(): Promise<Backend> {
     g_measured: number | null;
     y_measured: number | null;
     m_measured: number | null;
+    // 新列: 旧版服务端不返回, 按缺省处理.
+    cri_measured?: number | null;
+    m40_measured?: number | null;
+    m10_measured?: number | null;
+    bulk_density?: number | null;
+    coking_hours?: number | null;
+    flue_temp?: number | null;
   };
 
   return {
@@ -126,6 +133,12 @@ async function makeHttpBackend(): Promise<Backend> {
           g_measured: row.g_measured ?? null,
           y_measured: row.y_measured ?? null,
           m_measured: row.m_measured ?? null,
+          cri_measured: row.cri_measured ?? null,
+          m40_measured: row.m40_measured ?? null,
+          m10_measured: row.m10_measured ?? null,
+          bulk_density: row.bulk_density ?? null,
+          coking_hours: row.coking_hours ?? null,
+          flue_temp: row.flue_temp ?? null,
         };
       });
     },
