@@ -212,3 +212,110 @@ fn test_petrography_mean_preferred_over_vdaf() {
     let var = 0.25 * 0.2_f64.powi(2);
     assert!((result.rank_variance.unwrap() - var).abs() < 1e-12);
 }
+
+/// 单用任一种煤就达标 (各 65 ≥ 63): 计交互不能把它误判成无解.
+/// 线性化只在中心 c 附近精确, c 取在两煤中间时每种煤都被扣到 60 —— 必须换中心再试.
+#[test]
+fn test_feasible_single_coal_not_rejected() {
+    let d_ro = ro(18.0) - ro(30.0);
+    let k = 5.0 / (0.25 * d_ro * d_ro);
+    let result = solve(&request(
+        low_rank_gap_pair(),
+        vec![Spec::lower("CSR", 63.0)],
+        Some(k),
+    ));
+    assert!(result.ok, "{:?} {:?}", result.reason, result.warnings);
+    let coals = low_rank_gap_pair();
+    assert!(true_csr(&result, &coals, k) >= 63.0 - 1e-6);
+    assert!((csr_of(&result) - true_csr(&result, &coals, k)).abs() < 1e-6);
+}
+
+/// 不计交互就无解时, 原样返回不计交互的结果 (含逐项诊断), 不被交互改写.
+#[test]
+fn test_infeasible_keeps_plain_diagnosis() {
+    let specs = vec![Spec::lower("CSR", 70.0)];
+    let plain = solve(&request(low_rank_gap_pair(), specs.clone(), None));
+    let with_k = solve(&request(low_rank_gap_pair(), specs, Some(66.0)));
+    assert_eq!(
+        serde_json::to_value(&plain).unwrap(),
+        serde_json::to_value(&with_k).unwrap()
+    );
+}
+
+/// 审查复现: 远煤阶的气煤 (CSR 25) 在线性化时会被扣成负数. 只扣公式不改化验值,
+/// 所以不触发"负值"输入校验; 单用焦煤验算应得真实值 66, 不报 Fail.
+#[test]
+fn test_far_rank_coal_does_not_break_eval() {
+    let mut req: BlendRequest = serde_json::from_value(serde_json::json!({
+        "coals": [
+            {"name": "焦煤", "props": {"S": 0.5, "A": 9, "V": 24, "G": 85, "Y": 16, "petro": 0.1, "CSR": 66, "M": 8}, "fob": 1200, "frt": 0},
+            {"name": "瘦煤", "props": {"S": 0.5, "A": 9, "V": 14, "G": 40, "Y": 8, "petro": 0.1, "CSR": 55, "M": 8}, "fob": 700, "frt": 0},
+            {"name": "气煤", "props": {"S": 0.5, "A": 9, "V": 40, "G": 70, "Y": 12, "petro": 0.1, "CSR": 25, "M": 8}, "fob": 600, "frt": 0}
+        ],
+        "specs": [{"indicator": "CSR", "direction": "Lower", "min": 62, "enforcement": "Hard", "enabled": true}],
+        "truncate_decimal": false,
+        "rank_interaction": {"k": 66}
+    }))
+    .unwrap();
+    req.fixed_ratios = Some([("焦煤".to_string(), 1.0)].into_iter().collect());
+    let result = solve(&req);
+    assert!(
+        (csr_of(&result) - 66.0).abs() < 1e-9,
+        "得 {}",
+        csr_of(&result)
+    );
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// 审查复现: 采购合同按煤自身 CSR 设拒收线. 线性化不能改煤的化验值, 否则会凭空剔煤.
+#[test]
+fn test_purchase_clause_reads_true_coal_csr() {
+    let req: BlendRequest = serde_json::from_value(serde_json::json!({
+        "coals": [
+            {"name": "焦煤", "props": {"S": 0.5, "A": 9, "V": 24, "G": 85, "Y": 16, "petro": 0.1, "CSR": 66, "M": 8}, "fob": 1200, "frt": 0},
+            {"name": "瘦煤", "props": {"S": 0.5, "A": 9, "V": 14, "G": 40, "Y": 8, "petro": 0.1, "CSR": 55, "M": 8}, "fob": 700, "frt": 0,
+             "purchase_terms": {"clauses": [{"indicator": "CSR", "direction": "Lower", "guarantee": 55,
+                                             "penalty": {"reject": 50, "tiers": [{"width": null, "rate": 10}]}}]}},
+            {"name": "气煤", "props": {"S": 0.5, "A": 9, "V": 38, "G": 70, "Y": 12, "petro": 0.1, "CSR": 35, "M": 8}, "fob": 600, "frt": 0}
+        ],
+        "specs": [{"indicator": "CSR", "direction": "Lower", "min": 62, "enforcement": "Hard", "enabled": true}],
+        "truncate_decimal": false,
+        "rank_interaction": {"k": 66}
+    }))
+    .unwrap();
+    let result = solve(&req);
+    assert!(result.ok, "{:?}", result.reason);
+    assert!(
+        !result.warnings.iter().any(|w| w.contains("剔除")),
+        "{:?}",
+        result.warnings
+    );
+    // 瘦煤 CSR 55 = 保证值, 不该有采购扣款.
+    assert_eq!(result.cost.as_ref().unwrap().purchase_adjust_per_ton, 0.0);
+}
+
+/// CSR 合同是上限时线性化不保守 (线性值 ≤ 真实值), 不启用.
+#[test]
+fn test_csr_upper_spec_skips_with_warning() {
+    let result = solve(&request(
+        low_rank_gap_pair(),
+        vec![Spec::upper("CSR", 70.0)],
+        Some(66.0),
+    ));
+    assert!(result.rank_variance.is_none());
+    assert!(
+        result.warnings.iter().any(|w| w.contains("上限")),
+        "{:?}",
+        result.warnings
+    );
+}
+
+/// 有煤缺 CSR, 体检里没有 CSR 时不报罚项字段 (不然界面会显示扣了分却看不到 CSR).
+#[test]
+fn test_no_csr_in_check_reports_nothing() {
+    let mut coals = low_rank_gap_pair();
+    coals[0].props.remove("CSR");
+    let result = solve(&request(coals, vec![Spec::lower("G", 50.0)], Some(66.0)));
+    assert!(result.ok);
+    assert!(result.csr_interaction_penalty.is_none());
+}

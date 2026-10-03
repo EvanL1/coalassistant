@@ -79,10 +79,25 @@ fn solve_internal(
     diagnose: bool,
 ) -> BlendResult {
     if request.rank_interaction.is_some() {
-        return crate::rank_interaction::solve(request, evaluators.csr.is_some(), |inner| {
-            solve_internal(inner, evaluators, diagnose)
-        });
+        return crate::rank_interaction::solve(
+            request,
+            evaluators.csr.is_some(),
+            |plain, csr_shift, inner_diagnose| {
+                solve_core(plain, evaluators, diagnose && inner_diagnose, csr_shift)
+            },
+        );
     }
+    solve_core(request, evaluators, diagnose, None)
+}
+
+/// `csr_shift`: 煤名 → 该煤 CSR 在公式里要扣的点数 (煤阶交互的线性化). 只改 CSR 公式,
+/// 不改煤的 props —— 输入校验、采购条款扣款与拒收线读的仍是煤的真实化验值.
+fn solve_core(
+    request: &BlendRequest,
+    evaluators: &EvaluatorSet,
+    diagnose: bool,
+    csr_shift: Option<&HashMap<String, f64>>,
+) -> BlendResult {
     if let Err(reason) = validate_request(request) {
         return BlendResult::infeasible(&reason, Vec::new());
     }
@@ -180,7 +195,14 @@ fn solve_internal(
         return BlendResult::infeasible("无可用煤", warnings);
     }
 
-    let formulas = build_formulas(&kept, evaluators);
+    let mut formulas = build_formulas(&kept, evaluators);
+    if let (Some(shift), Some(csr)) = (csr_shift, formulas.get_mut("CSR")) {
+        for (index, coal) in kept.iter().enumerate() {
+            let delta = shift.get(&coal.name).copied().unwrap_or(0.0);
+            csr.numerators[index] -= delta;
+            csr.proxy_coefficients[index] -= delta;
+        }
+    }
     if let Some(spec) = active_specs
         .iter()
         .find(|spec| {
