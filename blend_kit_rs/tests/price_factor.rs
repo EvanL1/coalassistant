@@ -24,14 +24,14 @@ fn coals() -> Value {
 fn default_factor() -> Value {
     json!({
         "adjusts": [
-            {"indicator": "S", "direction": "Upper", "base": 1.30, "premium_rate": 150, "discount_rate": 250,
+            {"indicator": "S", "direction": "Upper", "base": 1.30, "premium_rate": 75, "discount_rate": 125,
              "clamp": [0.70, 100], "linear_range": [0.70, 1.60]},
-            {"indicator": "A", "direction": "Upper", "base": 10.5, "premium_rate": 72, "discount_rate": 72,
+            {"indicator": "A", "direction": "Upper", "base": 10.5, "premium_rate": 36, "discount_rate": 36,
              "linear_range": [8, 12]},
-            {"indicator": "G", "direction": "Lower", "base": 85, "premium_rate": 5, "discount_rate": 5,
+            {"indicator": "G", "direction": "Lower", "base": 85, "premium_rate": 2.5, "discount_rate": 2.5,
              "clamp": [40, 95]},
-            {"indicator": "Y", "direction": "Lower", "base": 15, "premium_rate": 6, "discount_rate": 6},
-            {"indicator": "CSR", "direction": "Lower", "base": 65, "premium_rate": 10, "discount_rate": 10,
+            {"indicator": "Y", "direction": "Lower", "base": 15, "premium_rate": 3, "discount_rate": 3},
+            {"indicator": "CSR", "direction": "Lower", "base": 65, "premium_rate": 5, "discount_rate": 5,
              "enabled": true}
         ]
     })
@@ -73,25 +73,36 @@ fn test_without_price_factor_coal_values_empty() {
     let result = run(&request(1.5, None));
     assert_eq!(result["ok"], true);
     assert_eq!(result["coal_values"], json!([]));
-    assert!(result["price_base"].is_null());
-    assert_eq!(result["price_base_from_group"], false);
+    assert!(result["market_price"].is_null());
+    assert_eq!(result["market_price_from_group"], false);
 }
 
 #[test]
 fn test_price_factor_fills_coal_values() {
-    let result = run(&request(1.5, Some(default_factor())));
+    // 指定市场价 2000: 应值 = 2000/1000 × 质量指数 (1172.8 / 943.5 / 999.4 / 951).
+    let mut factor = default_factor();
+    factor["market_price"] = json!(2000.0);
+    let result = run(&request(1.5, Some(factor)));
     assert_eq!(result["ok"], true);
     assert_eq!(result["coal_values"].as_array().unwrap().len(), 4);
-    assert_eq!(result["price_base_from_group"], true);
-    assert!((result["price_base"].as_f64().unwrap() - 2166.65).abs() < 1e-6);
+    assert_eq!(result["market_price_from_group"], false);
+    assert!((result["market_price"].as_f64().unwrap() - 2000.0).abs() < 1e-9);
     for (name, expected) in [
-        ("荣欣", -12.25),
-        ("新星", 46.35),
-        ("北沟", 34.55),
-        ("浮精", -68.65),
+        ("荣欣", 2500.0 - 2345.6),
+        ("新星", 2100.0 - 1887.0),
+        ("北沟", 2200.0 - 1998.8),
+        ("浮精", 2000.0 - 1902.0),
     ] {
         assert!((gap(&result, name) - expected).abs() < 1e-6, "{name}");
     }
+}
+
+/// 不给市场价时由煤池反推, 结果里要标明来源.
+#[test]
+fn test_market_price_inferred_when_absent() {
+    let result = run(&request(1.5, Some(default_factor())));
+    assert_eq!(result["market_price_from_group"], true);
+    assert!(result["market_price"].as_f64().unwrap() > 0.0);
 }
 
 /// 回归: 价格因子只评估, 配方/成本/指标/警告与不带时完全相同.
@@ -110,7 +121,7 @@ fn test_price_factor_does_not_change_solution() {
         let mut a = run(&plain);
         let mut b = run(&priced);
         assert!(!b["coal_values"].as_array().unwrap().is_empty());
-        for field in ["coal_values", "price_base", "price_base_from_group"] {
+        for field in ["coal_values", "market_price", "market_price_from_group"] {
             a.as_object_mut().unwrap().remove(field);
             b.as_object_mut().unwrap().remove(field);
         }
@@ -147,10 +158,10 @@ fn test_infeasible_result_still_has_coal_values() {
 #[test]
 fn test_old_result_without_price_fields_deserializes() {
     let mut old = run(&request(1.5, None));
-    for field in ["coal_values", "price_base", "price_base_from_group"] {
+    for field in ["coal_values", "market_price", "market_price_from_group"] {
         old.as_object_mut().unwrap().remove(field);
     }
     let parsed: BlendResult = serde_json::from_value(old).unwrap();
     assert!(parsed.coal_values.is_empty());
-    assert!(parsed.price_base.is_none());
+    assert!(parsed.market_price.is_none());
 }

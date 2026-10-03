@@ -45,6 +45,7 @@ function CoalValueRow({ value }: { value: CoalValue }) {
         )}
       </td>
       <td style={cell}>{value.fob.toFixed(0)}</td>
+      <td style={cell}>{value.points.toFixed(0)}</td>
       <td style={cell}>{value.fair.toFixed(0)}</td>
       <td style={{ ...cell, color: gapColor(value.gap) }}>
         {gapText(value.gap)}
@@ -54,7 +55,8 @@ function CoalValueRow({ value }: { value: CoalValue }) {
 }
 
 /**
- * 煤价对比卡: 每种煤的出厂价 vs 按质量升贴水推出的应值价.
+ * 煤价对比卡: 每种煤的出厂价 vs 按质量算出的应值价.
+ * 质量指数以标准品 = 1000 点计; 应值 = 市场价/1000 × 质量指数.
  * 出厂价取送进求解的口径 (发生锚点推算时是推算价, 不是录入的原始报价), drifted 时脚注说明.
  * 只是评估, 与配方无关; 有解无解都可显示. 没有 coal_values 时整卡不渲染.
  */
@@ -67,7 +69,7 @@ export function CoalValueCard({
 }) {
   const values = result.coal_values ?? [];
   if (values.length === 0) return null;
-  const base = result.price_base;
+  const market = result.market_price;
   return (
     <div className="card coal-value-card" style={{ marginTop: 12 }}>
       <div className="card-title">煤价对比 (按质量)</div>
@@ -78,6 +80,7 @@ export function CoalValueCard({
           <tr style={{ fontSize: 11, color: "var(--c-text-3)" }}>
             <th style={{ textAlign: "left", fontWeight: "normal" }}>煤名</th>
             <th style={{ ...cell, fontWeight: "normal" }}>出厂价 (求解口径)</th>
+            <th style={{ ...cell, fontWeight: "normal" }}>质量指数</th>
             <th style={{ ...cell, fontWeight: "normal" }}>按质量应值</th>
             <th style={{ ...cell, fontWeight: "normal" }}>差额</th>
           </tr>
@@ -89,9 +92,9 @@ export function CoalValueCard({
         </tbody>
       </table>
       <p style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 8 }}>
-        {base != null &&
-          `基准品价 ${base.toFixed(0)} 元/吨 (${
-            result.price_base_from_group ? "由本次煤池反推" : "指定"
+        {market != null &&
+          `市场价 ${market.toFixed(0)} 元/吨 = 标准品 1000 点 (${
+            result.market_price_from_group ? "由本次煤池反推" : "指定"
           }) · `}
         只用出厂价, 不含运费
         {drifted && " · 有煤用旧报价推算, 按推算后的出厂价对比"} ·

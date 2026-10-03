@@ -1263,8 +1263,8 @@ fn assemble_result(
         evaluation_iterations: 0,
         csr_stamp_estimate: None,
         coal_values: Vec::new(),
-        price_base: None,
-        price_base_from_group: false,
+        market_price: None,
+        market_price_from_group: false,
     };
     let blend_value = |indicator: &str| {
         result

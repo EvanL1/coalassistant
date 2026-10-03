@@ -225,7 +225,7 @@ mod tests {
         let factor = with.price_factor.expect("应读到 price_factor");
         assert_eq!(factor.adjusts.len(), 1);
         assert!(!factor.adjusts[0].enabled);
-        assert!(factor.base_price.is_none());
+        assert!(factor.market_price.is_none());
     }
 
     /// has_basic 只认 S/A/V/G 四项.

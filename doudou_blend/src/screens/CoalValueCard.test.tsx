@@ -14,7 +14,8 @@ function value(
   return {
     name,
     fob,
-    adjustment: fair - 2000,
+    adjustment: fair / 2 - 1000,
+    points: fair / 2,
     fair,
     gap: fob - fair,
     ratio: fob / fair,
@@ -56,8 +57,8 @@ describe("CoalValueCard", () => {
             value("新星", 2100, 2053.65),
             value("荣欣", 2500, 2512.25),
           ],
-          price_base: 2166.65,
-          price_base_from_group: true,
+          market_price: 2000,
+          market_price_from_group: true,
         })}
       />,
     );
@@ -66,9 +67,11 @@ describe("CoalValueCard", () => {
     expect(screen.getByText("2100")).toBeTruthy();
     expect(screen.getByText("2054")).toBeTruthy();
     expect(screen.getByText("偏贵 46")).toBeTruthy();
+    expect(screen.getByText("质量指数")).toBeTruthy();
+    expect(screen.getByText("1027")).toBeTruthy();
     expect(screen.getByText("划算 12")).toBeTruthy();
     expect(
-      screen.getByText(/基准品价 2167 元\/吨 \(由本次煤池反推\)/),
+      screen.getByText(/市场价 2000 元\/吨 = 标准品 1000 点 \(由本次煤池反推\)/),
     ).toBeTruthy();
     expect(screen.getByText(/只用出厂价, 不含运费/)).toBeTruthy();
   });
@@ -82,12 +85,14 @@ describe("CoalValueCard", () => {
             value("北沟", 2200, 2165.45, { extrapolated: ["S"] }),
             value("浮精", 2000, 2068.65, { missing: ["Y", "CSR"] }),
           ],
-          price_base: 2000,
-          price_base_from_group: false,
+          market_price: 2000,
+          market_price_from_group: false,
         })}
       />,
     );
-    expect(screen.getByText(/基准品价 2000 元\/吨 \(指定\)/)).toBeTruthy();
+    expect(
+      screen.getByText(/市场价 2000 元\/吨 = 标准品 1000 点 \(指定\)/),
+    ).toBeTruthy();
     expect(screen.getByText("外推")).toBeTruthy();
     expect(screen.getByText("缺 胶质、焦炭强度")).toBeTruthy();
   });

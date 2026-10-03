@@ -723,6 +723,7 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
       name: "测试煤",
       fob: 900,
       adjustment: 120,
+      points: 1120,
       fair: 860,
       gap: 40,
       ratio: 900 / 860,
@@ -756,8 +757,8 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
   it("结果带 coal_values 时显示煤价对比卡, 不带时不显示", async () => {
     const result = makeResult(1_000, 3_700);
     result.coal_values = coalValues;
-    result.price_base = 740;
-    result.price_base_from_group = true;
+    result.market_price = 768;
+    result.market_price_from_group = true;
     mocks.getBackend.mockResolvedValue({
       solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
       saveHistory: vi.fn(),
@@ -789,8 +790,8 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
       warnings: [],
       quality_status: "NeedsReview",
       coal_values: coalValues.map((v) => ({ ...v, gap: -15 })),
-      price_base: 2000,
-      price_base_from_group: false,
+      market_price: 2000,
+      market_price_from_group: false,
     };
     mocks.getBackend.mockResolvedValue({
       solveJson: vi.fn().mockResolvedValue(JSON.stringify(infeasible)),

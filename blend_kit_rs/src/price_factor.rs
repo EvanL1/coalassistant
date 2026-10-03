@@ -9,8 +9,12 @@
 //!   - Upper (越低越好): d = base − x; Lower (越高越好): d = x − base.
 //!   - adj_i = d ≥ 0 ? premium_rate·d : discount_rate·d.
 //!
-//! Adj(c) = Σ adj_i; 基准品价 P0 = 指定值, 或组内反推 mean(fob − Adj);
-//! Fair = P0 + Adj, Gap = fob − Fair, Ratio = fob / Fair. fob ≤ 0 的煤不参与.
+//! 升贴水按**点**计: 标准品 = 1000 点, 质量指数 F(c) = 1000 + Σ adj_i.
+//! 应值 = 市场价/1000 × F(c); 市场价是标准品 (1000 点) 对应的公开价, 不给就由煤池反推
+//! 市场价 = 1000 × mean(报价 / F). Gap = 报价 − 应值, Ratio = 报价 / 应值. fob ≤ 0 的煤不参与.
+//!
+//! 为什么用点而不是元: 升贴水随行情按比例缩放 —— 市场价翻倍, 好煤坏煤的价差跟着翻倍,
+//! 系数表不用改。1000 是贩煤人直觉里的整数基准 ("这煤 1050 点" = 比标准品好 5%)。
 use crate::model::{
     BlendRequest, BlendResult, Coal, CoalValue, Direction, PriceAdjust, PriceFactor, PricePart,
     INDICATORS,
@@ -20,9 +24,13 @@ use crate::model::{
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PriceEvaluation {
     pub coal_values: Vec<CoalValue>,
-    pub base: Option<f64>,
-    pub base_from_group: bool,
+    /// 标准品 (1000 点) 对应的市场价.
+    pub market: Option<f64>,
+    pub market_from_group: bool,
 }
+
+/// 标准品的质量指数.
+pub const POINTS_BASE: f64 = 1000.0;
 
 fn validate_interval(
     indicator: &str,
@@ -75,13 +83,13 @@ pub fn validate(factor: &PriceFactor) -> Result<(), String> {
             return Err(format!("指标 {} 重复配置", rule.indicator));
         }
     }
-    match factor.base_price {
-        Some(p) if !p.is_finite() => Err(format!("基准品价 {p} 不是有限数")),
+    match factor.market_price {
+        Some(p) if !(p.is_finite() && p > 0.0) => Err(format!("市场价 {p} 无效, 须为 >0 的有限数")),
         _ => Ok(()),
     }
 }
 
-/// 单条规则对一个指标值的升贴水 (元/吨).
+/// 单条规则对一个指标值的升贴水 (点).
 fn adjust_amount(rule: &PriceAdjust, raw: f64) -> f64 {
     let x = rule.clamp.map_or(raw, |[lo, hi]| raw.clamp(lo, hi));
     let d = match rule.direction {
@@ -101,6 +109,7 @@ fn adjust_coal(coal: &Coal, rules: &[&PriceAdjust]) -> CoalValue {
         name: coal.name.clone(),
         fob: coal.fob,
         adjustment: 0.0,
+        points: POINTS_BASE,
         fair: 0.0,
         gap: 0.0,
         ratio: 0.0,
@@ -121,6 +130,7 @@ fn adjust_coal(coal: &Coal, rules: &[&PriceAdjust]) -> CoalValue {
         }
         let amount = adjust_amount(rule, raw);
         value.adjustment += amount;
+        value.points += amount;
         value.parts.push(PricePart {
             indicator: rule.indicator.clone(),
             amount,
@@ -138,18 +148,28 @@ pub fn evaluate(coals: &[Coal], factor: &PriceFactor) -> Result<PriceEvaluation,
         .filter(|c| c.fob > 0.0)
         .map(|c| adjust_coal(c, &rules))
         .collect();
-    let (base, base_from_group) = match factor.base_price {
+    let (market, market_from_group) = match factor.market_price {
         Some(p) => (p, false),
-        None if values.is_empty() => return Ok(PriceEvaluation::default()),
         None => {
-            let total: f64 = values.iter().map(|v| v.fob - v.adjustment).sum();
-            (total / values.len() as f64, true)
+            // 质量指数 ≤ 0 的煤 (极端劣质外推) 没有有意义的"报价/指数", 不参与反推.
+            let ratios: Vec<f64> = values
+                .iter()
+                .filter(|v| v.points > 0.0)
+                .map(|v| v.fob / v.points)
+                .collect();
+            if ratios.is_empty() {
+                return Ok(PriceEvaluation::default());
+            }
+            (
+                POINTS_BASE * ratios.iter().sum::<f64>() / ratios.len() as f64,
+                true,
+            )
         }
     };
     let coal_values = values
         .into_iter()
         .map(|mut v| {
-            v.fair = base + v.adjustment;
+            v.fair = market / POINTS_BASE * v.points;
             v.gap = v.fob - v.fair;
             v.ratio = if v.fair > 0.0 { v.fob / v.fair } else { 0.0 };
             v
@@ -157,8 +177,8 @@ pub fn evaluate(coals: &[Coal], factor: &PriceFactor) -> Result<PriceEvaluation,
         .collect();
     Ok(PriceEvaluation {
         coal_values,
-        base: Some(base),
-        base_from_group,
+        market: Some(market),
+        market_from_group,
     })
 }
 
@@ -170,8 +190,8 @@ pub(crate) fn attach(request: &BlendRequest, result: &mut BlendResult) {
     match evaluate(&request.coals, factor) {
         Ok(eval) => {
             result.coal_values = eval.coal_values;
-            result.price_base = eval.base;
-            result.price_base_from_group = eval.base_from_group;
+            result.market_price = eval.market;
+            result.market_price_from_group = eval.market_from_group;
         }
         Err(e) => result
             .warnings
@@ -179,7 +199,7 @@ pub(crate) fn attach(request: &BlendRequest, result: &mut BlendResult) {
     }
 }
 
-/// 全部用 fixture, 不读 master. 期望值由调研方案手算 (见 test_four_coals_csr_enabled).
+/// 全部用 fixture, 不读 master. 系数是 master 默认表的点数版 (元系数按市场价 2000 折半).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,21 +248,28 @@ mod tests {
         }
     }
 
-    /// 与 master 默认表同构的规则; csr 控制 CSR 规则是否启用.
+    /// 与 master 默认表同构的规则 (单位: 点/指标单位); csr 控制 CSR 规则是否启用.
     fn default_rules(csr: bool) -> PriceFactor {
-        let mut s = rule("S", Direction::Upper, 1.30, 150.0, 250.0);
+        let mut s = rule("S", Direction::Upper, 1.30, 75.0, 125.0);
         s.clamp = Some([0.70, 100.0]);
         s.linear_range = Some([0.70, 1.60]);
-        let mut a = rule("A", Direction::Upper, 10.5, 72.0, 72.0);
+        let mut a = rule("A", Direction::Upper, 10.5, 36.0, 36.0);
         a.linear_range = Some([8.0, 12.0]);
-        let mut g = rule("G", Direction::Lower, 85.0, 5.0, 5.0);
+        let mut g = rule("G", Direction::Lower, 85.0, 2.5, 2.5);
         g.clamp = Some([40.0, 95.0]);
-        let y = rule("Y", Direction::Lower, 15.0, 6.0, 6.0);
-        let mut c = rule("CSR", Direction::Lower, 65.0, 10.0, 10.0);
+        let y = rule("Y", Direction::Lower, 15.0, 3.0, 3.0);
+        let mut c = rule("CSR", Direction::Lower, 65.0, 5.0, 5.0);
         c.enabled = csr;
         PriceFactor {
             adjusts: vec![s, a, g, y, c],
-            base_price: None,
+            market_price: None,
+        }
+    }
+
+    fn with_market(csr: bool, market: f64) -> PriceFactor {
+        PriceFactor {
+            market_price: Some(market),
+            ..default_rules(csr)
         }
     }
 
@@ -267,34 +294,74 @@ mod tests {
         );
     }
 
-    /// 手算 (CSR 启用):
-    ///   荣欣 S0.4→截到0.70: +0.6×150=90; A +0.8×72=57.6; G97→95 +10×5=50; Y +8×6=48; CSR +10×10=100 ⇒ +345.6
-    ///   新星 S −0.3×250=−75; A 0; G −10×5=−50; Y +2×6=12; CSR 0 ⇒ −113
-    ///   北沟 S −0.5×250=−125; A +1.9×72=136.8; G +45; Y +42; CSR −100 ⇒ −1.2
-    ///   浮精 S +0.5×150=75; A −1.5×72=−108; G −25; Y +30; CSR −70 ⇒ −98
-    ///   P0 = mean(2154.4, 2213, 2201.2, 2098) = 2166.65
-    ///   Gap = fob − Adj − P0 = −12.25 / +46.35 / +34.55 / −68.65
-    ///   (调研方案写的 −12.2/+46.3/+34.5/−68.7 是这组数四舍五入到一位小数.)
+    /// 手算质量指数 (CSR 启用, 标准品 1000 点):
+    ///   荣欣 S0.4→截到0.70: +0.6×75=45; A +0.8×36=28.8; G97→95 +10×2.5=25; Y +8×3=24; CSR +10×5=50 ⇒ 1172.8
+    ///   新星 S −0.3×125=−37.5; A 0; G −10×2.5=−25; Y +2×3=6; CSR 0 ⇒ 943.5
+    ///   北沟 S −0.5×125=−62.5; A +1.9×36=68.4; G +22.5; Y +21; CSR −50 ⇒ 999.4
+    ///   浮精 S +0.5×75=37.5; A −1.5×36=−54; G −12.5; Y +15; CSR −35 ⇒ 951
     #[test]
-    fn test_four_coals_csr_enabled() {
+    fn test_points_are_1000_plus_adjustments() {
         let eval = evaluate(&four_coals(), &default_rules(true)).unwrap();
-        assert!(eval.base_from_group);
-        close(eval.base.unwrap(), 2166.65, "P0");
-        for (name, adj, gap) in [
-            ("荣欣", 345.6, -12.25),
-            ("新星", -113.0, 46.35),
-            ("北沟", -1.2, 34.55),
-            ("浮精", -98.0, -68.65),
+        for (name, points) in [
+            ("荣欣", 1172.8),
+            ("新星", 943.5),
+            ("北沟", 999.4),
+            ("浮精", 951.0),
         ] {
             let v = value(&eval, name);
-            close(v.adjustment, adj, &format!("{name} Adj"));
-            close(v.gap, gap, &format!("{name} Gap"));
-            close(v.fair, 2166.65 + adj, &format!("{name} Fair"));
-            close(v.ratio, v.fob / v.fair, &format!("{name} Ratio"));
+            close(v.points, points, &format!("{name} 质量指数"));
+            close(v.adjustment, points - 1000.0, &format!("{name} 升贴水点数"));
         }
-        // 结果按请求煤池顺序.
         let names: Vec<_> = eval.coal_values.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["荣欣", "新星", "北沟", "浮精"]);
+    }
+
+    /// 应值 = 市场价/1000 × 质量指数. 市场价 2000 时与原来按元计的升贴水 (P0=2000) 完全一致:
+    /// 荣欣 2000/1000 × 1172.8 = 2345.6, 新星 1887, 北沟 1998.8, 浮精 1902.
+    #[test]
+    fn test_fair_scales_points_by_market_price() {
+        let eval = evaluate(&four_coals(), &with_market(true, 2000.0)).unwrap();
+        assert!(!eval.market_from_group);
+        close(eval.market.unwrap(), 2000.0, "市场价");
+        for (name, fair) in [
+            ("荣欣", 2345.6),
+            ("新星", 1887.0),
+            ("北沟", 1998.8),
+            ("浮精", 1902.0),
+        ] {
+            let v = value(&eval, name);
+            close(v.fair, fair, &format!("{name} 应值"));
+            close(v.gap, v.fob - fair, &format!("{name} 差额"));
+            close(v.ratio, v.fob / fair, &format!("{name} 比值"));
+        }
+    }
+
+    /// 这个设计的意义: 行情翻倍, 好煤坏煤的价差跟着翻倍, 系数不用改.
+    #[test]
+    fn test_doubling_market_doubles_fair_values() {
+        let at_2000 = evaluate(&four_coals(), &with_market(true, 2000.0)).unwrap();
+        let at_4000 = evaluate(&four_coals(), &with_market(true, 4000.0)).unwrap();
+        for (a, b) in at_2000.coal_values.iter().zip(&at_4000.coal_values) {
+            close(b.fair, 2.0 * a.fair, &format!("{} 应值翻倍", a.name));
+            close(
+                b.points,
+                a.points,
+                &format!("{} 质量指数不随行情变", a.name),
+            );
+        }
+    }
+
+    /// 不填市场价: 市场价 = 1000 × mean(报价/质量指数), 于是各煤 报价/应值 的平均值恰为 1.
+    #[test]
+    fn test_market_inferred_from_group() {
+        let eval = evaluate(&four_coals(), &default_rules(true)).unwrap();
+        assert!(eval.market_from_group);
+        let expected =
+            1000.0 * (2500.0 / 1172.8 + 2100.0 / 943.5 + 2200.0 / 999.4 + 2000.0 / 951.0) / 4.0;
+        close(eval.market.unwrap(), expected, "反推市场价");
+        let mean_ratio: f64 =
+            eval.coal_values.iter().map(|v| v.ratio).sum::<f64>() / eval.coal_values.len() as f64;
+        close(mean_ratio, 1.0, "平均 报价/应值");
     }
 
     #[test]
@@ -308,23 +375,21 @@ mod tests {
 
     #[test]
     fn test_csr_disabled_has_no_csr_part() {
-        let eval = evaluate(&four_coals(), &default_rules(false)).unwrap();
+        let eval = evaluate(&four_coals(), &with_market(false, 2000.0)).unwrap();
         for v in &eval.coal_values {
             assert!(part(v, "CSR").is_none(), "{} 不应含 CSR 项", v.name);
             assert_eq!(v.parts.len(), 4);
         }
-        // 关掉 CSR: Adj = 245.6 / −113 / 98.8 / −28, P0 = 2149.15.
-        close(eval.base.unwrap(), 2149.15, "P0");
-        close(value(&eval, "荣欣").gap, 105.25, "荣欣 Gap");
-        close(value(&eval, "新星").gap, 63.85, "新星 Gap");
-        close(value(&eval, "北沟").gap, -47.95, "北沟 Gap");
-        close(value(&eval, "浮精").gap, -121.15, "浮精 Gap");
+        // 关掉 CSR: 质量指数 1122.8 / 943.5 / 1049.4 / 986.
+        close(value(&eval, "荣欣").points, 1122.8, "荣欣");
+        close(value(&eval, "北沟").points, 1049.4, "北沟");
+        close(value(&eval, "浮精").points, 986.0, "浮精");
     }
 
     fn single(s: f64) -> f64 {
         let factor = PriceFactor {
             adjusts: default_rules(false).adjusts.into_iter().take(1).collect(),
-            base_price: Some(2000.0),
+            market_price: Some(2000.0),
         };
         let coal = coal_from_tuple(
             "甲",
@@ -335,63 +400,36 @@ mod tests {
 
     #[test]
     fn test_sulfur_segment_boundaries() {
-        close(single(0.70), 0.6 * 150.0, "S=0.70");
-        close(single(0.50), 0.6 * 150.0, "S=0.50 截到 0.70");
+        close(single(0.70), 0.6 * 75.0, "S=0.70");
+        close(single(0.50), 0.6 * 75.0, "S=0.50 截到 0.70");
         close(single(1.30), 0.0, "S=1.30 基准");
-        close(single(1.60), -0.3 * 250.0, "S=1.60");
-        close(single(1.10), 0.2 * 150.0, "S=1.10 升价");
+        close(single(1.60), -0.3 * 125.0, "S=1.60");
+        close(single(1.10), 0.2 * 75.0, "S=1.10 升价");
     }
 
     #[test]
     fn test_g_clamped_to_95() {
         let factor = PriceFactor {
             adjusts: vec![default_rules(false).adjusts[2].clone()],
-            base_price: Some(2000.0),
+            market_price: Some(2000.0),
         };
         let coal = coal_from_tuple(
             "甲",
             (1.0, 10.0, 24.0, 99.0, 15.0, 0.1, 65.0, 10.0, 2000.0, 0.0),
         );
         let v = &evaluate(&[coal], &factor).unwrap().coal_values[0];
-        close(v.adjustment, 10.0 * 5.0, "G99 截到 95");
+        close(v.adjustment, 10.0 * 2.5, "G99 截到 95");
     }
 
     #[test]
     fn test_missing_indicator_is_skipped() {
         let mut coal = four_coals().remove(0);
         coal.props.remove("Y");
-        let eval = evaluate(
-            &[coal],
-            &PriceFactor {
-                base_price: Some(2000.0),
-                ..default_rules(true)
-            },
-        )
-        .unwrap();
+        let eval = evaluate(&[coal], &with_market(true, 2000.0)).unwrap();
         let v = &eval.coal_values[0];
         assert_eq!(v.missing, vec!["Y".to_string()]);
         assert!(part(v, "Y").is_none());
-        close(v.adjustment, 345.6 - 48.0, "缺 Y 的 Adj");
-    }
-
-    #[test]
-    fn test_given_base_price_is_used() {
-        let factor = PriceFactor {
-            base_price: Some(2000.0),
-            ..default_rules(true)
-        };
-        let eval = evaluate(&four_coals(), &factor).unwrap();
-        assert!(!eval.base_from_group);
-        close(eval.base.unwrap(), 2000.0, "P0");
-        close(value(&eval, "荣欣").fair, 2345.6, "荣欣 Fair");
-        close(value(&eval, "荣欣").gap, 154.4, "荣欣 Gap");
-    }
-
-    #[test]
-    fn test_group_base_gaps_sum_to_zero() {
-        let eval = evaluate(&four_coals(), &default_rules(true)).unwrap();
-        let total: f64 = eval.coal_values.iter().map(|v| v.gap).sum();
-        assert!(total.abs() < 1e-6, "Σgap = {total}");
+        close(v.points, 1172.8 - 24.0, "缺 Y 的质量指数");
     }
 
     #[test]
@@ -400,8 +438,8 @@ mod tests {
         coals[3].fob = 0.0;
         let eval = evaluate(&coals, &default_rules(true)).unwrap();
         assert_eq!(eval.coal_values.len(), 3);
-        // P0 只用前三种: mean(2154.4, 2213, 2201.2).
-        close(eval.base.unwrap(), (2154.4 + 2213.0 + 2201.2) / 3.0, "P0");
+        let expected = 1000.0 * (2500.0 / 1172.8 + 2100.0 / 943.5 + 2200.0 / 999.4) / 3.0;
+        close(eval.market.unwrap(), expected, "只用前三种反推");
     }
 
     #[test]
@@ -412,7 +450,7 @@ mod tests {
         }
         let eval = evaluate(&coals, &default_rules(true)).unwrap();
         assert!(eval.coal_values.is_empty());
-        assert!(eval.base.is_none());
+        assert!(eval.market.is_none());
     }
 
     #[test]
@@ -431,12 +469,13 @@ mod tests {
         assert!(bad(&|f| f.adjusts[0].direction = Direction::Range));
         assert!(bad(&|f| f.adjusts[0].indicator = "灰".into()));
         assert!(bad(&|f| f.adjusts[0].base = f64::INFINITY));
-        assert!(bad(&|f| f.base_price = Some(f64::NAN)));
+        assert!(bad(&|f| f.market_price = Some(f64::NAN)));
+        assert!(bad(&|f| f.market_price = Some(0.0)), "市场价须 > 0");
         assert!(evaluate(
             &four_coals(),
             &PriceFactor {
                 adjusts: vec![rule("X", Direction::Upper, 1.0, 1.0, 1.0)],
-                base_price: None,
+                market_price: None,
             }
         )
         .is_err());

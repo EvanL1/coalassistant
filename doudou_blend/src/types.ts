@@ -153,8 +153,8 @@ export interface PriceAdjust {
 
 export interface PriceFactor {
   adjusts: PriceAdjust[];
-  /** 基准品价 P0; 缺省 = 由请求煤池组内反推. */
-  base_price?: number | null;
+  /** 市场公开价: 标准品 (1000 点) 对应的元/吨; 缺省 = 由请求煤池反推. */
+  market_price?: number | null;
 }
 
 /** master 里的价格因子系数表, 多一段出处说明. */
@@ -171,7 +171,11 @@ export interface PricePart {
 export interface CoalValue {
   name: string;
   fob: number;
+  /** 质量升贴水合计 (点). */
   adjustment: number;
+  /** 质量指数 = 1000 + 升贴水; 标准品 = 1000 点. */
+  points: number;
+  /** 应值 = 市场价/1000 × 质量指数 (元/吨). */
   fair: number;
   gap: number;
   ratio: number;
@@ -322,8 +326,9 @@ export interface BlendResult {
   csr_stamp_estimate?: number | null;
   /** 价格因子评估; 未配置或旧历史结果为空/缺失. */
   coal_values?: CoalValue[];
-  price_base?: number | null;
-  price_base_from_group?: boolean;
+  /** 标准品 1000 点对应的市场价 (元/吨). */
+  market_price?: number | null;
+  market_price_from_group?: boolean;
 }
 
 /** 混合后 6 项指标 (CSR 回归自变量 X). */
