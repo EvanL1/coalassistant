@@ -17,7 +17,8 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
 use super::{
-    bad_request, database_error, merged_master_json, require_admin, require_database, AppState,
+    bad_request, database_error, merged_master_json, require_admin, require_database,
+    require_json_content_type, AppState,
 };
 
 /// 煤阶交互系数 k 在 app_settings 里的键.
@@ -31,7 +32,7 @@ const MIXED_KEYS: [&str; 6] = ["S", "A", "V", "G", "Y", "M"];
 // 设置
 // ---------------------------------------------------------------------------
 
-/// 读取全局 k. 只返回 > 0 的有效值; 读库失败只记日志 —— 设置坏了不能拖垮求解.
+/// 启动时读取全局 k. 只返回 > 0 的有效值; 读库失败只记日志 —— 设置坏了不能拖垮启动.
 pub(crate) async fn load_rank_interaction_k(pool: &PgPool) -> Option<f64> {
     match read_rank_k(pool).await {
         Ok(k) => k.filter(|k| k.is_finite() && *k > 0.0),
@@ -108,6 +109,9 @@ pub(crate) async fn put_settings(
     if let Err(response) = require_admin(&headers, &state) {
         return *response;
     }
+    if let Err(response) = require_json_content_type(&headers) {
+        return *response;
+    }
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_SETTINGS_BODY).await else {
         return bad_request("请求体读取失败或超出大小上限");
     };
@@ -121,6 +125,8 @@ pub(crate) async fn put_settings(
     };
     match write_rank_k(pool, k).await {
         Ok(()) => {
+            // 落库成功后才更新缓存, 求解从缓存取 k.
+            state.set_rank_k(k);
             tracing::info!(?k, "煤阶交互 k 已更新");
             settings_response(k)
         }

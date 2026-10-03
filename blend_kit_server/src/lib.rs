@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -33,14 +35,24 @@ const DATA_API_KEY_HEADER: &str = "x-api-key";
 /// 数据更新接口的请求体上限. 合法批次最多两百余条 (见 master_data::MAX_UPDATES),
 /// 256KB 绰绰有余。
 const MAX_DATA_API_BODY: usize = 256 * 1024;
+/// 管理员会话令牌最短字节数. 令牌即 Cookie 值, 太短可被穷举.
+const MIN_ADMIN_TOKEN_BYTES: usize = 32;
+/// 登录失败后的固定等待, 拖慢在线暴力猜测 (不做按 IP 计数).
+const LOGIN_FAILURE_DELAY: Duration = Duration::from_secs(1);
 
 pub async fn app(public_dir: PathBuf) -> Router {
     let database = database::connect_from_env().await;
+    // k 启动时读一次, 之后只由 PUT /api/admin/settings 更新 —— 求解路径不碰库.
+    let rank_k = match database.as_ref() {
+        Some(pool) => admin::load_rank_interaction_k(pool).await,
+        None => None,
+    };
     app_with_state(
         public_dir,
         AppState {
             auth: AuthConfig::from_env(),
             database,
+            rank_k: Arc::new(RwLock::new(rank_k)),
         },
     )
 }
@@ -89,8 +101,10 @@ impl AuthConfig {
         }
     }
 
-    /// 启用管理员账号. 令牌与普通会话令牌相同时拒绝启用 —— 否则无法区分角色,
-    /// 普通用户的 Cookie 会直接拿到管理权限.
+    /// 启用管理员账号. 以下情况拒绝启用 (记错误日志, 管理端停用):
+    /// - 令牌与普通会话令牌相同: 无法区分角色, 普通用户的 Cookie 会直接拿到管理权限;
+    /// - 账号密码与普通账号完全相同: 普通凭据登录即成管理员;
+    /// - 令牌短于 [`MIN_ADMIN_TOKEN_BYTES`]: 可被穷举.
     pub fn with_admin(
         mut self,
         username: impl Into<String>,
@@ -102,11 +116,21 @@ impl AuthConfig {
             password: password.into(),
             session_token: session_token.into(),
         };
-        if admin.session_token == self.session_token {
-            tracing::error!("ADMIN_SESSION_TOKEN 与 AUTH_SESSION_TOKEN 相同, 管理端停用");
-            self.admin = None;
+        let refusal = if admin.session_token == self.session_token {
+            Some("ADMIN_SESSION_TOKEN 与 AUTH_SESSION_TOKEN 相同")
+        } else if admin.username == self.username && admin.password == self.password {
+            Some("管理员账号密码与普通账号相同")
+        } else if admin.session_token.len() < MIN_ADMIN_TOKEN_BYTES {
+            Some("ADMIN_SESSION_TOKEN 短于 32 字节")
         } else {
-            self.admin = Some(admin);
+            None
+        };
+        match refusal {
+            Some(reason) => {
+                tracing::error!("{reason}, 管理端停用");
+                self.admin = None;
+            }
+            None => self.admin = Some(admin),
         }
         self
     }
@@ -150,6 +174,24 @@ impl AuthConfig {
 struct AppState {
     auth: AuthConfig,
     database: Option<PgPool>,
+    /// 管理端设置的煤阶交互 k (内存缓存). 单实例部署; 多实例时其他实例要重启才生效.
+    rank_k: Arc<RwLock<Option<f64>>>,
+}
+
+impl AppState {
+    fn rank_k(&self) -> Option<f64> {
+        *self
+            .rank_k
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_rank_k(&self, k: Option<f64>) {
+        *self
+            .rank_k
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = k;
+    }
 }
 
 pub fn app_with_auth(public_dir: PathBuf, auth: AuthConfig) -> Router {
@@ -158,6 +200,7 @@ pub fn app_with_auth(public_dir: PathBuf, auth: AuthConfig) -> Router {
         AppState {
             auth,
             database: None,
+            rank_k: Arc::default(),
         },
     )
 }
@@ -262,19 +305,27 @@ async fn auth_session(State(state): State<AppState>, headers: HeaderMap) -> Json
 
 async fn login(State(state): State<AppState>, Json(input): Json<LoginRequest>) -> Response {
     let auth = &state.auth;
+    // 账号也按常数时间比较, 且两组凭据都完整比完再判 (`&` 不短路),
+    // 免得响应时间泄露哪个账号存在.
     let matches = |username: &str, password: &str| {
-        input.username == username && secret_eq(&input.password, password)
+        secret_eq(&input.username, username) & secret_eq(&input.password, password)
     };
-    let (token, body) = match &auth.admin {
-        Some(admin) if matches(&admin.username, &admin.password) => (
+    let admin_ok = auth
+        .admin
+        .as_ref()
+        .map(|admin| matches(&admin.username, &admin.password));
+    let user_ok = matches(&auth.username, &auth.password);
+    let (token, body) = match (&auth.admin, admin_ok) {
+        (Some(admin), Some(true)) => (
             &admin.session_token,
             r#"{"authenticated":true,"admin":true}"#,
         ),
-        _ if matches(&auth.username, &auth.password) => (
+        _ if user_ok => (
             &auth.session_token,
             r#"{"authenticated":true,"admin":false}"#,
         ),
         _ => {
+            tokio::time::sleep(LOGIN_FAILURE_DELAY).await;
             return (
                 StatusCode::UNAUTHORIZED,
                 [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
@@ -347,12 +398,9 @@ async fn solve(
         }
     };
 
-    // 管理端设了煤阶交互 k 时, 对没自带 rank_interaction 的请求注入; 没库/没设时原样求解.
-    let k = match state.database.as_ref() {
-        Some(pool) => admin::load_rank_interaction_k(pool).await,
-        None => None,
-    };
-    let input = admin::inject_rank_interaction(input, k);
+    // 管理端设了煤阶交互 k 时, 对没自带 rank_interaction 的请求注入; 没设时原样求解.
+    // k 取内存缓存, 不碰库.
+    let input = admin::inject_rank_interaction(input, state.rank_k());
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
@@ -656,14 +704,41 @@ fn unauthorized() -> Response {
 // ---------------------------------------------------------------------------
 
 /// 数据更新接口的鉴权: 管理员会话或有效 X-API-Key 二选一.
-/// 返回落库留痕用的持有者名字: 管理员为 `管理员:<账号>`, 密钥为密钥名字.
-async fn check_data_writer(headers: &HeaderMap, state: &AppState) -> Result<String, Box<Response>> {
+/// 返回落库留痕用的持有者名字 (管理员为 `管理员:<账号>`, 密钥为密钥名字),
+/// 以及是否走的是 Cookie 会话 (写接口据此要求 JSON Content-Type).
+async fn check_data_writer(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<(String, bool), Box<Response>> {
     if let (Some(Role::Admin), Some(admin)) =
         (session_role(headers, &state.auth), &state.auth.admin)
     {
-        return Ok(format!("管理员:{}", admin.username));
+        return Ok((format!("管理员:{}", admin.username), true));
     }
-    check_data_api_key(headers, state).await
+    check_data_api_key(headers, state)
+        .await
+        .map(|holder| (holder, false))
+}
+
+/// Cookie 鉴权的写接口必须带 `Content-Type: application/json`, 否则 415.
+/// 浏览器跨站"简单请求"发不出这个头, 多一道 CSRF 防线 (SameSite=Strict 之外).
+fn require_json_content_type(headers: &HeaderMap) -> Result<(), Box<Response>> {
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"));
+    if is_json {
+        return Ok(());
+    }
+    Err(Box::new(
+        (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+            r#"{"ok":false,"reason":"Content-Type 须为 application/json"}"#,
+        )
+            .into_response(),
+    ))
 }
 
 /// 校验 X-API-Key: 对来访明文做 SHA-256, 再查未销毁的密钥行.
@@ -823,7 +898,14 @@ async fn update_coal_data(
 ) -> Response {
     // 持有者名字由密钥推导, 不接受调用方自报 —— 出了坏数据要查得到人.
     let holder = match check_data_writer(&headers, &state).await {
-        Ok(holder) => holder,
+        Ok((holder, by_session)) => {
+            if by_session {
+                if let Err(response) = require_json_content_type(&headers) {
+                    return *response;
+                }
+            }
+            holder
+        }
         Err(response) => return *response,
     };
 
@@ -925,7 +1007,7 @@ mod tests {
             AuthConfig::new("tester", "secret", "test-session-token", false).with_admin(
                 "boss",
                 "admin-secret",
-                "admin-session-token",
+                "admin-session-token-0123456789abcdef",
             ),
         )
     }
@@ -983,7 +1065,7 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        assert!(cookie.contains("doudou_session=admin-session-token"));
+        assert!(cookie.contains("doudou_session=admin-session-token-0123456789abcdef"));
         assert!(cookie.contains("HttpOnly"));
         let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
         assert_eq!(body, json!({ "authenticated": true, "admin": true }));
@@ -1001,7 +1083,7 @@ mod tests {
                 json!({ "authenticated": true, "admin": false }),
             ),
             (
-                "admin-session-token",
+                "admin-session-token-0123456789abcdef",
                 json!({ "authenticated": true, "admin": true }),
             ),
             ("forged", json!({ "authenticated": false, "admin": false })),
@@ -1027,7 +1109,7 @@ mod tests {
             .oneshot(session_request(
                 "GET",
                 "/api/version",
-                "admin-session-token",
+                "admin-session-token-0123456789abcdef",
                 Body::empty(),
             ))
             .await
@@ -1074,7 +1156,7 @@ mod tests {
                 .oneshot(session_request(
                     method,
                     uri,
-                    "admin-session-token",
+                    "admin-session-token-0123456789abcdef",
                     Body::from(body),
                 ))
                 .await
@@ -1099,7 +1181,7 @@ mod tests {
                 .oneshot(session_request(
                     "PUT",
                     "/api/admin/settings",
-                    "admin-session-token",
+                    "admin-session-token-0123456789abcdef",
                     Body::from(body),
                 ))
                 .await
@@ -1113,22 +1195,163 @@ mod tests {
     async fn test_admin_token_collision_disables_admin() {
         let router = app_with_auth(
             PathBuf::from("missing-public"),
-            AuthConfig::new("tester", "secret", "same-token", false).with_admin(
+            AuthConfig::new(
+                "tester",
+                "secret",
+                "same-session-token-0123456789abcdef",
+                false,
+            )
+            .with_admin(
                 "boss",
                 "admin-secret",
-                "same-token",
+                "same-session-token-0123456789abcdef",
             ),
         );
         let response = router
             .oneshot(session_request(
                 "GET",
                 "/api/admin/settings",
-                "same-token",
+                "same-session-token-0123456789abcdef",
                 Body::empty(),
             ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// 账号密码与普通账号完全相同、或令牌太短时不启用管理端.
+    #[tokio::test]
+    async fn test_with_admin_refuses_weak_config() {
+        let long_token = "admin-session-token-0123456789abcdef";
+        for auth in [
+            AuthConfig::new("tester", "secret", "test-session-token", false)
+                .with_admin("tester", "secret", long_token),
+            AuthConfig::new("tester", "secret", "test-session-token", false).with_admin(
+                "boss",
+                "admin-secret",
+                "short-admin-token",
+            ),
+        ] {
+            assert!(auth.admin.is_none());
+        }
+
+        // 同账号同密码: 普通凭据登录只能得到普通会话
+        let router = app_with_auth(
+            PathBuf::from("missing-public"),
+            AuthConfig::new("tester", "secret", "test-session-token", false)
+                .with_admin("tester", "secret", long_token),
+        );
+        let response = login_as(router, "tester", "secret").await;
+        let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
+        assert_eq!(body, json!({ "authenticated": true, "admin": false }));
+
+        // 同账号不同密码是允许的
+        let auth = AuthConfig::new("tester", "secret", "test-session-token", false).with_admin(
+            "tester",
+            "admin-secret",
+            long_token,
+        );
+        assert!(auth.admin.is_some());
+    }
+
+    /// 登录失败固定等待约 1 秒, 拖慢暴力猜测.
+    #[tokio::test]
+    async fn test_failed_login_is_delayed() {
+        let started = std::time::Instant::now();
+        let response = login_as(test_app(), "tester", "wrong").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(started.elapsed() >= LOGIN_FAILURE_DELAY - Duration::from_millis(50));
+    }
+
+    const SOLVE_FIXTURE: &str = r#"{
+        "coals": [
+            {"name": "焦煤", "props": {"S": 0.5, "A": 9, "V": 24, "G": 85, "Y": 16, "petro": 0.1, "CSR": 66, "M": 8}, "fob": 1200, "frt": 0},
+            {"name": "瘦煤", "props": {"S": 0.5, "A": 9, "V": 14, "G": 40, "Y": 8, "petro": 0.1, "CSR": 55, "M": 8}, "fob": 700, "frt": 0}
+        ],
+        "specs": [{"indicator": "CSR", "direction": "Lower", "min": 60, "enforcement": "Hard", "enabled": true}],
+        "truncate_decimal": false
+    }"#;
+
+    async fn solve_with_cached_k(k: Option<f64>) -> Value {
+        let router = app_with_state(
+            PathBuf::from("missing-public"),
+            AppState {
+                auth: AuthConfig::new("tester", "secret", "test-session-token", false),
+                database: None,
+                rank_k: Arc::new(RwLock::new(k)),
+            },
+        );
+        let response = router
+            .oneshot(authenticated_request(
+                "POST",
+                "/api/solve",
+                Body::from(SOLVE_FIXTURE),
+            ))
+            .await
+            .unwrap();
+        serde_json::from_str(&response_text(response).await).unwrap()
+    }
+
+    /// 求解从内存缓存取 k (此处没有数据库): 有 k 时注入, 没有时不计交互.
+    #[tokio::test]
+    async fn test_solve_uses_cached_rank_k() {
+        let with_k = solve_with_cached_k(Some(66.0)).await;
+        assert_eq!(with_k["ok"], true);
+        assert!(with_k["csr_interaction_penalty"].as_f64().is_some());
+
+        let without = solve_with_cached_k(None).await;
+        assert_eq!(without["ok"], true);
+        assert!(without["csr_interaction_penalty"].is_null());
+    }
+
+    /// Cookie 鉴权的写接口缺 JSON Content-Type 一律 415 (鉴权之后、碰库之前).
+    #[tokio::test]
+    async fn test_admin_cookie_writes_require_json_content_type() {
+        for (method, uri, body) in [
+            ("POST", "/api/master/coals", r#"{"updates":[]}"#),
+            ("PUT", "/api/admin/settings", r#"{"rank_interaction_k":50}"#),
+        ] {
+            for content_type in [
+                None,
+                Some("text/plain"),
+                Some("application/x-www-form-urlencoded"),
+            ] {
+                let mut builder = Request::builder().method(method).uri(uri).header(
+                    header::COOKIE,
+                    "doudou_session=admin-session-token-0123456789abcdef",
+                );
+                if let Some(content_type) = content_type {
+                    builder = builder.header(header::CONTENT_TYPE, content_type);
+                }
+                let response = test_app()
+                    .oneshot(builder.body(Body::from(body)).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "{method} {uri} {content_type:?}"
+                );
+            }
+        }
+
+        // 带参数的 JSON 媒体类型照常放行
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/admin/settings")
+                    .header(
+                        header::COOKIE,
+                        "doudou_session=admin-session-token-0123456789abcdef",
+                    )
+                    .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+                    .body(Body::from(r#"{"rank_interaction_k":-1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     /// 没配管理员: 管理员凭据登录失败, 普通账号访问管理端 403.
@@ -1152,7 +1375,7 @@ mod tests {
             .oneshot(session_request(
                 "GET",
                 "/api/admin/settings",
-                "admin-session-token",
+                "admin-session-token-0123456789abcdef",
                 Body::empty(),
             ))
             .await
@@ -1167,7 +1390,7 @@ mod tests {
             .oneshot(session_request(
                 "POST",
                 "/api/master/coals",
-                "admin-session-token",
+                "admin-session-token-0123456789abcdef",
                 Body::from(r#"{"updates":[]}"#),
             ))
             .await
@@ -1182,7 +1405,7 @@ mod tests {
                 .oneshot(session_request(
                     method,
                     uri,
-                    "admin-session-token",
+                    "admin-session-token-0123456789abcdef",
                     Body::empty(),
                 ))
                 .await
@@ -1371,7 +1594,10 @@ mod tests {
                     Request::builder()
                         .method("POST")
                         .uri("/api/admin/keys")
-                        .header(header::COOKIE, "doudou_session=admin-session-token")
+                        .header(
+                            header::COOKIE,
+                            "doudou_session=admin-session-token-0123456789abcdef",
+                        )
                         .header(header::CONTENT_TYPE, "application/json")
                         .body(Body::from(body))
                         .unwrap(),
