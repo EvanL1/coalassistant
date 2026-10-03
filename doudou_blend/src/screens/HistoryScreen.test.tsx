@@ -43,7 +43,32 @@ const oldRecord: HistoryRecord = {
   g_measured: null,
   y_measured: null,
   m_measured: null,
+  cri_measured: null,
+  m40_measured: null,
+  m10_measured: null,
+  bulk_density: null,
+  coking_hours: null,
+  flue_temp: null,
 };
+
+/** 有混合指标的记录才开放回填. */
+const backfillRecord: HistoryRecord = {
+  ...oldRecord,
+  id: "2",
+  contract_name: "可回填",
+  mixed: { s: 0.8, a: 10, v: 24, g: 80, y: 16, m: 10 },
+};
+
+async function openBackfill(setMeasuredQuality = vi.fn(async () => {})) {
+  mocks.getBackend.mockResolvedValue({
+    listHistory: vi.fn(async () => [backfillRecord]),
+    clearHistory: vi.fn(),
+    setMeasuredQuality,
+  });
+  render(<HistoryScreen />);
+  fireEvent.click(await screen.findByRole("button", { name: "+ 录入实测化验" }));
+  return setMeasuredQuality;
+}
 
 beforeEach(() => {
   mocks.getBackend.mockReset();
@@ -91,5 +116,26 @@ describe("HistoryScreen 刷新顺序", () => {
     });
 
     expect(screen.queryByText("旧合同")).toBeNull();
+  });
+});
+
+describe("HistoryScreen 回填焦炭与炼焦条件", () => {
+  it("炼焦条件按各自量程保存, 不套 0~100", async () => {
+    const save = await openBackfill();
+    fireEvent.change(screen.getByLabelText("结焦时间"), { target: { value: "25" } });
+    fireEvent.change(screen.getByLabelText("炉温"), { target: { value: "1350" } });
+    fireEvent.change(screen.getByLabelText("焦CRI"), { target: { value: "24.5" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith("2", { coking_hours: 25, flue_temp: 1350, cri: 24.5 }),
+    );
+  });
+
+  it("超出量程不保存并提示", async () => {
+    const save = await openBackfill();
+    fireEvent.change(screen.getByLabelText("装煤密度"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await screen.findByText("装煤密度 量程应在 0.5~1.5 t/m³");
+    expect(save).not.toHaveBeenCalled();
   });
 });

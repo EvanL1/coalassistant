@@ -78,6 +78,26 @@ fn solve_internal(
     evaluators: &EvaluatorSet,
     diagnose: bool,
 ) -> BlendResult {
+    if request.rank_interaction.is_some() {
+        return crate::rank_interaction::solve(
+            request,
+            evaluators.csr.is_some(),
+            |plain, csr_shift, inner_diagnose| {
+                solve_core(plain, evaluators, diagnose && inner_diagnose, csr_shift)
+            },
+        );
+    }
+    solve_core(request, evaluators, diagnose, None)
+}
+
+/// `csr_shift`: 煤名 → 该煤 CSR 在公式里要扣的点数 (煤阶交互的线性化). 只改 CSR 公式,
+/// 不改煤的 props —— 输入校验、采购条款扣款与拒收线读的仍是煤的真实化验值.
+fn solve_core(
+    request: &BlendRequest,
+    evaluators: &EvaluatorSet,
+    diagnose: bool,
+    csr_shift: Option<&HashMap<String, f64>>,
+) -> BlendResult {
     if let Err(reason) = validate_request(request) {
         return BlendResult::infeasible(&reason, Vec::new());
     }
@@ -175,7 +195,14 @@ fn solve_internal(
         return BlendResult::infeasible("无可用煤", warnings);
     }
 
-    let formulas = build_formulas(&kept, evaluators);
+    let mut formulas = build_formulas(&kept, evaluators);
+    if let (Some(shift), Some(csr)) = (csr_shift, formulas.get_mut("CSR")) {
+        for (index, coal) in kept.iter().enumerate() {
+            let delta = shift.get(&coal.name).copied().unwrap_or(0.0);
+            csr.numerators[index] -= delta;
+            csr.proxy_coefficients[index] -= delta;
+        }
+    }
     if let Some(spec) = active_specs
         .iter()
         .find(|spec| {
@@ -1259,6 +1286,8 @@ fn assemble_result(
         quality_status: QualityStatus::Estimated,
         evaluation_iterations: 0,
         csr_stamp_estimate: None,
+        rank_variance: None,
+        csr_interaction_penalty: None,
     };
     let blend_value = |indicator: &str| {
         result
@@ -1838,6 +1867,7 @@ mod tests {
             total_quantity: Some(3_700.0),
             truncate_decimal: true,
             fixed_ratios: None,
+            rank_interaction: None,
         }
     }
 
@@ -1909,6 +1939,7 @@ mod tests {
             total_quantity: Some(3_700.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         });
 
         assert!(!result.ok, "灰分连拒收线 10 都够不到, 应当不可行");
@@ -2022,6 +2053,7 @@ mod tests {
         let request = BlendRequest {
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
             ..request
         };
         let result = solve_with_evaluators(&request, &trained_evaluators());
@@ -2089,6 +2121,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
 
@@ -2220,6 +2253,7 @@ mod tests {
                 total_quantity: Some(3_700.0),
                 truncate_decimal: truncate,
                 fixed_ratios: None,
+                rank_interaction: None,
             };
             let result = solve(&request);
             assert!(
@@ -2294,6 +2328,7 @@ mod tests {
                 total_quantity: None,
                 truncate_decimal: false,
                 fixed_ratios: None,
+                rank_interaction: None,
             })
             .ok
         };
@@ -2396,6 +2431,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
 
@@ -2436,6 +2472,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
 
@@ -2864,6 +2901,7 @@ mod measurements {
                             total_quantity: Some(3_700.0),
                             truncate_decimal: truncate,
                             fixed_ratios: None,
+                            rank_interaction: None,
                         };
                         let result = solve_with_evaluators(&request, models);
                         if !result.ok {

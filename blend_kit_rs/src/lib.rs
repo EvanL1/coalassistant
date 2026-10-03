@@ -11,6 +11,7 @@ mod penalty;
 pub mod petrography;
 pub mod predict;
 mod quality;
+mod rank_interaction;
 pub mod seed;
 pub use petrography::{Notch, Petrography};
 pub use predict::{CsrObservation, CsrPredictor, EvaluatorSet};
@@ -127,6 +128,7 @@ mod tests {
             total_quantity: Some(3700.0),
             truncate_decimal: true,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok, "expected feasible: {:?}", r.reason);
@@ -170,6 +172,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -195,6 +198,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -226,6 +230,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -255,6 +260,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -305,6 +311,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -382,6 +389,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve_with_evaluators(&req, &evaluators);
         assert!(r.ok, "{:?}", r.reason);
@@ -421,6 +429,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
 
         let result = solve_with_evaluators(&req, &evaluators);
@@ -448,6 +457,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -465,6 +475,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve_with_evaluators(&req, &evaluators);
         assert!(r.ok);
@@ -517,6 +528,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve_with_evaluators(&req, &evaluators);
         assert!(r.ok);
@@ -548,6 +560,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve_with_evaluators(&req, &evaluators);
         assert!(r.ok);
@@ -588,6 +601,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -625,6 +639,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -683,6 +698,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -708,6 +724,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(
@@ -733,6 +750,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -770,6 +788,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -812,6 +831,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -852,6 +872,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -889,6 +910,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: true, // 生产路径固定 true
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -929,6 +951,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         });
 
         assert!(!result.ok, "代理达标但精确 σ 超标, 收紧后应无解");
@@ -977,6 +1000,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: true,
             fixed_ratios: None,
+            rank_interaction: None,
         });
 
         assert!(!result.ok, "煤池最低灰 12.0, 够不到合同 10");
@@ -1017,6 +1041,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok, "{:?}", r.reason);
@@ -1052,6 +1077,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(!r.ok);
@@ -1087,6 +1113,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(!r.ok, "Hard 岩相违约不得返回配方");
@@ -1113,6 +1140,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let r = solve(&req);
         assert!(r.ok);
@@ -1130,6 +1158,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let mut input = serde_json::to_value(&req).unwrap();
         input["csr_observations"] = serde_json::to_value(perfect_csr_obs(8)).unwrap();
@@ -1162,6 +1191,7 @@ mod tests {
             total_quantity: Some(1000.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "存量请求应可解: {:?}", result.reason);
@@ -1322,6 +1352,7 @@ mod tests {
             total_quantity: Some(100.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "计价超界不应判不可行: {:?}", result.reason);
@@ -1383,6 +1414,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(!result.ok, "越过拒收线应不可行");
@@ -1415,6 +1447,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "应可解: {:?}", result.reason);
@@ -1456,6 +1489,7 @@ mod tests {
             total_quantity: Some(100.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "计价欠界不应判不可行: {:?}", result.reason);
@@ -1517,6 +1551,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(!result.ok, "低于拒收线应不可行");
@@ -1550,6 +1585,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "剔掉缺输入的煤后应可解: {:?}", result.reason);
@@ -1611,6 +1647,7 @@ mod tests {
             total_quantity: Some(100.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "两条计价约束应可解: {:?}", result.reason);
@@ -1686,6 +1723,7 @@ mod tests {
                 total_quantity: None,
                 truncate_decimal: false,
                 fixed_ratios: None,
+                rank_interaction: None,
             };
             let result = solve(&request);
             assert!(result.ok, "margin={margin:?} 时应可解: {:?}", result.reason);
@@ -1734,6 +1772,7 @@ mod tests {
                 total_quantity: None,
                 truncate_decimal: false,
                 fixed_ratios: None,
+                rank_interaction: None,
             };
             solve(&request).ok
         };
@@ -1774,6 +1813,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "计价解不应被复算误判不可行: {:?}", result.reason);
@@ -1808,6 +1848,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "零偏离计价解应可行: {:?}", result.reason);
@@ -1848,6 +1889,7 @@ mod tests {
                 total_quantity: None,
                 truncate_decimal: false,
                 fixed_ratios: None,
+                rank_interaction: None,
             };
             solve(&request).ok
         };
@@ -1890,6 +1932,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "应可解: {:?}", result.reason);
@@ -1952,6 +1995,7 @@ mod tests {
             total_quantity: Some(10.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "应可解: {:?}", result.reason);
@@ -2011,6 +2055,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "剩余煤应仍可解");
@@ -2046,6 +2091,7 @@ mod tests {
             total_quantity: Some(100.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "应可解: {:?}", result.reason);
@@ -2096,6 +2142,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "应可解: {:?}", result.reason);
@@ -2140,6 +2187,7 @@ mod tests {
             total_quantity: Some(100.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "两侧同开应可解: {:?}", result.reason);
@@ -2201,6 +2249,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "应可解: {:?}", result.reason);
@@ -2252,6 +2301,7 @@ mod tests {
             total_quantity: Some(123457.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "应可解: {:?}", result.reason);
@@ -2372,6 +2422,7 @@ mod tests {
             total_quantity: Some(200.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "应可解: {:?}", result.reason);
@@ -2455,6 +2506,7 @@ mod tests {
             total_quantity: Some(100.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "应可解: {:?}", result.reason);
@@ -2514,6 +2566,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
         assert!(result.ok, "缺化验值不应让煤不可用: {:?}", result.reason);

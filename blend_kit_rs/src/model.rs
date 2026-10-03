@@ -307,6 +307,18 @@ pub struct BlendRequest {
     /// None = 正常求最低成本配方.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_ratios: Option<HashMap<String, f64>>,
+    /// 煤阶交互罚项 (配煤不相容). None 或 k = 0 = 不启用, 结果与不传完全相同.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank_interaction: Option<RankInteraction>,
+}
+
+/// 煤阶交互: CSR配 = Σxᵢ·CSRᵢ − k·D, D = 配比加权的煤阶 (镜质组反射率 Ro) 方差.
+/// 两种煤煤阶差得越远、比例越接近对半, D 越大 —— 表达"单做各 65、双做降到 60".
+/// Ro 优先取煤岩数据的均值, 没有时由挥发换算 (见 [`crate::rank_interaction`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RankInteraction {
+    /// 交互强度 (CSR / %²). 须 ≥ 0; 文献无现成值, 要用本厂实测标定.
+    pub k: f64,
 }
 
 fn default_truncate() -> bool {
@@ -553,6 +565,12 @@ pub struct BlendResult {
     /// 挥发/G/Y 算出; 只展示, 不参与求解。缺任一输入或无解时为 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub csr_stamp_estimate: Option<f64>,
+    /// 启用煤阶交互时: 本配方的煤阶方差 D (%²). 未启用为 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank_variance: Option<f64>,
+    /// 启用煤阶交互时: CSR 因此扣掉的点数 k·D (体检里的 CSR 已扣过). 未启用为 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csr_interaction_penalty: Option<f64>,
 }
 
 impl BlendResult {
@@ -570,6 +588,8 @@ impl BlendResult {
             quality_status: QualityStatus::NeedsReview,
             evaluation_iterations: 0,
             csr_stamp_estimate: None,
+            rank_variance: None,
+            csr_interaction_penalty: None,
         }
     }
 

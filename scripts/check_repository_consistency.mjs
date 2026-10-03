@@ -124,6 +124,7 @@ const sharedStructs = [
   [rustModelSource, "AcceptanceRule", "AcceptanceRule"],
   [rustModelSource, "Spec", "Spec"],
   [rustModelSource, "BlendRequest", "BlendRequest"],
+  [rustModelSource, "RankInteraction", "RankInteraction"],
   [rustModelSource, "CostBreakdown", "CostBreakdown"],
   [rustModelSource, "OrderItem", "OrderItem"],
   [rustModelSource, "ModelSummary", "ModelSummary"],

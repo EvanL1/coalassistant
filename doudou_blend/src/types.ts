@@ -135,6 +135,13 @@ export interface BlendRequest {
   truncate_decimal?: boolean;
   /** 验算模式: 煤名 → 份数 (按总和归一). 给了就不求最优, 直接按此配比出结果. */
   fixed_ratios?: Record<string, number> | null;
+  /** 煤阶交互罚项 (配煤不相容). 不传或 k = 0 = 不启用. */
+  rank_interaction?: RankInteraction | null;
+}
+
+/** CSR配 = Σxᵢ·CSRᵢ − k·D, D = 配比加权的煤阶 (Ro) 方差. k ≥ 0, 须用本厂实测标定. */
+export interface RankInteraction {
+  k: number;
 }
 
 export interface CostBreakdown {
@@ -277,6 +284,10 @@ export interface BlendResult {
   evaluation_iterations?: number;
   /** 捣固炼焦 CSR 估算 (由体检里的挥发/G/Y 算出); 只展示, 不参与求解. */
   csr_stamp_estimate?: number | null;
+  /** 启用煤阶交互时: 本配方的煤阶方差 D (%²). */
+  rank_variance?: number | null;
+  /** 启用煤阶交互时: CSR 因此扣掉的点数 k·D (体检里的 CSR 已扣过). */
+  csr_interaction_penalty?: number | null;
 }
 
 /** 混合后 6 项指标 (CSR 回归自变量 X). */
@@ -298,6 +309,14 @@ export interface MeasuredQuality {
   y?: number | null;
   m?: number | null;
   csr?: number | null;
+  /** 焦炭反应性与冷态强度 (%), 选填. */
+  cri?: number | null;
+  m40?: number | null;
+  m10?: number | null;
+  /** 炼焦条件, 选填: 装煤密度 (t/m³)、结焦时间 (小时)、炉温 (℃). */
+  bulk_density?: number | null;
+  coking_hours?: number | null;
+  flue_temp?: number | null;
 }
 
 /** 历史方案 (跨后端统一形状). mixed/实测各列支撑「回填实测焦质」数据闭环. */
@@ -318,6 +337,13 @@ export interface HistoryRecord {
   g_measured: number | null;
   y_measured: number | null;
   m_measured: number | null;
+  /** 焦炭 CRI/M40/M10 与炼焦条件回填 (区分煤的原因和炉子的原因); null = 未回填. */
+  cri_measured: number | null;
+  m40_measured: number | null;
+  m10_measured: number | null;
+  bulk_density: number | null;
+  coking_hours: number | null;
+  flue_temp: number | null;
 }
 
 // ===== Master schema =====

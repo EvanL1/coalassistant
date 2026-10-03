@@ -40,7 +40,9 @@ Don't add typed cross-boundary APIs; extend the JSON request/result shapes inste
 transport details. History persists to PostgreSQL through the server and normalizes to a uniform
 `HistoryRecord` DTO (the TS adapter derives recipe + the 6 mixed indicators from the stored result; the Rust
 side stays dumb, storing an opaque blob + the `csr_measured` / `*_measured` columns — the backfill covers the
-full assay sheet CSR + S/A/V/G/Y/M, feeding both the CSR regression and the future G-correction fit).
+full assay sheet CSR + S/A/V/G/Y/M, feeding both the CSR regression and the future G-correction fit, plus
+optional coke CRI/M40/M10 and coking conditions — bulk density / coking hours / flue temp — to separate coal
+effects from oven effects).
 
 **Data flow inside the core** (`blend_kit_rs/src/`):
 `model.rs` (Coal/Spec/BlendRequest/BlendResult types, 8-indicator constant) →
@@ -48,6 +50,8 @@ full assay sheet CSR + S/A/V/G/Y/M, feeding both the CSR regression and the futu
 computes slack + `binding` flags) →
 result is post-processed into three business views: cost breakdown, physical orders, indicator check.
 `seed.rs` loads the embedded master DB + status state machine; `predict.rs` is optional CSR regression.
+`rank_interaction.rs` is the opt-in blend-incompatibility term (`BlendRequest.rank_interaction`: CSR − k·Var(Ro),
+linearized per round so the LP stays linear); absent or k = 0 must leave results byte-identical.
 
 **Frontend screens** (`doudou_blend/src/screens/`): 今日 `TodayScreen` (solve + cost/recipe/8-indicator view,
 real purchase-qty input, export orders, save-to-history, input-summary panel), 煤池 `CoalPoolScreen`
