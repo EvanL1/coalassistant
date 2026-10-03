@@ -47,6 +47,7 @@ fn request(
         total_quantity: None,
         truncate_decimal: false,
         fixed_ratios: fixed,
+        rank_interaction: None,
     }
 }
 

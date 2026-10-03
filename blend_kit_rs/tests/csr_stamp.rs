@@ -39,6 +39,7 @@ fn request(coals: Vec<Coal>, fixed: Option<HashMap<String, f64>>) -> BlendReques
         total_quantity: None,
         truncate_decimal: false,
         fixed_ratios: fixed,
+        rank_interaction: None,
     }
 }
 

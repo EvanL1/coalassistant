@@ -78,6 +78,11 @@ fn solve_internal(
     evaluators: &EvaluatorSet,
     diagnose: bool,
 ) -> BlendResult {
+    if request.rank_interaction.is_some() {
+        return crate::rank_interaction::solve(request, evaluators.csr.is_some(), |inner| {
+            solve_internal(inner, evaluators, diagnose)
+        });
+    }
     if let Err(reason) = validate_request(request) {
         return BlendResult::infeasible(&reason, Vec::new());
     }
@@ -1259,6 +1264,8 @@ fn assemble_result(
         quality_status: QualityStatus::Estimated,
         evaluation_iterations: 0,
         csr_stamp_estimate: None,
+        rank_variance: None,
+        csr_interaction_penalty: None,
     };
     let blend_value = |indicator: &str| {
         result
@@ -1838,6 +1845,7 @@ mod tests {
             total_quantity: Some(3_700.0),
             truncate_decimal: true,
             fixed_ratios: None,
+            rank_interaction: None,
         }
     }
 
@@ -1909,6 +1917,7 @@ mod tests {
             total_quantity: Some(3_700.0),
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         });
 
         assert!(!result.ok, "灰分连拒收线 10 都够不到, 应当不可行");
@@ -2022,6 +2031,7 @@ mod tests {
         let request = BlendRequest {
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
             ..request
         };
         let result = solve_with_evaluators(&request, &trained_evaluators());
@@ -2089,6 +2099,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
 
@@ -2220,6 +2231,7 @@ mod tests {
                 total_quantity: Some(3_700.0),
                 truncate_decimal: truncate,
                 fixed_ratios: None,
+                rank_interaction: None,
             };
             let result = solve(&request);
             assert!(
@@ -2294,6 +2306,7 @@ mod tests {
                 total_quantity: None,
                 truncate_decimal: false,
                 fixed_ratios: None,
+                rank_interaction: None,
             })
             .ok
         };
@@ -2396,6 +2409,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
 
@@ -2436,6 +2450,7 @@ mod tests {
             total_quantity: None,
             truncate_decimal: false,
             fixed_ratios: None,
+            rank_interaction: None,
         };
         let result = solve(&request);
 
@@ -2864,6 +2879,7 @@ mod measurements {
                             total_quantity: Some(3_700.0),
                             truncate_decimal: truncate,
                             fixed_ratios: None,
+                            rank_interaction: None,
                         };
                         let result = solve_with_evaluators(&request, models);
                         if !result.ok {
