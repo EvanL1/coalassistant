@@ -1,5 +1,6 @@
 [package]
 name = "blend_kit_server"
+default-run = "blend_kit_server"
 version = "0.1.1"
 edition = "2021"
 description = "豆哥配煤 - Railway Web API 与静态站点服务"
