@@ -18,6 +18,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+mod admin;
 mod api_key;
 mod coal_index;
 mod database;
@@ -53,6 +54,23 @@ pub struct AuthConfig {
     password: String,
     session_token: String,
     secure_cookie: bool,
+    /// 管理员账号. None = 管理端停用 (ADMIN_* 未配齐).
+    admin: Option<AdminAccount>,
+}
+
+/// 管理员账号: 普通账号的超集, 另可调参、维护煤库、管理密钥.
+#[derive(Clone)]
+struct AdminAccount {
+    username: String,
+    password: String,
+    session_token: String,
+}
+
+/// 会话角色. 管理员会话对普通接口同样有效.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    User,
+    Admin,
 }
 
 impl AuthConfig {
@@ -67,7 +85,30 @@ impl AuthConfig {
             password: password.into(),
             session_token: session_token.into(),
             secure_cookie,
+            admin: None,
         }
+    }
+
+    /// 启用管理员账号. 令牌与普通会话令牌相同时拒绝启用 —— 否则无法区分角色,
+    /// 普通用户的 Cookie 会直接拿到管理权限.
+    pub fn with_admin(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+        session_token: impl Into<String>,
+    ) -> Self {
+        let admin = AdminAccount {
+            username: username.into(),
+            password: password.into(),
+            session_token: session_token.into(),
+        };
+        if admin.session_token == self.session_token {
+            tracing::error!("ADMIN_SESSION_TOKEN 与 AUTH_SESSION_TOKEN 相同, 管理端停用");
+            self.admin = None;
+        } else {
+            self.admin = Some(admin);
+        }
+        self
     }
 
     pub fn from_env() -> Self {
@@ -81,12 +122,27 @@ impl AuthConfig {
             })
         };
 
-        Self::new(
+        let config = Self::new(
             read("AUTH_USERNAME", "doudou"),
             read("AUTH_PASSWORD", "123456"),
             read("AUTH_SESSION_TOKEN", "local-development-session"),
             on_railway,
-        )
+        );
+        // 管理员三项全部可选: 缺任一项即停用管理端, Railway 上也不 panic.
+        let optional = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        match (
+            optional("ADMIN_USERNAME"),
+            optional("ADMIN_PASSWORD"),
+            optional("ADMIN_SESSION_TOKEN"),
+        ) {
+            (Some(username), Some(password), Some(token)) => {
+                config.with_admin(username, password, token)
+            }
+            _ => {
+                tracing::info!("ADMIN_* 未配齐, 管理端停用");
+                config
+            }
+        }
     }
 }
 
@@ -120,16 +176,22 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         .route("/api/auth/logout", post(logout))
         .route("/api/solve", post(solve))
         .route("/api/master", get(master))
-        // 数据更新接口: 机器密钥 (X-API-Key), 与用户会话无关
+        // 数据更新接口: 机器密钥 (X-API-Key) 或管理员会话, 普通用户会话无权
         .route("/api/master/coals", post(update_coal_data))
         .route("/api/master/overrides", get(list_coal_overrides))
         .route(
             "/api/master/coals/{coal}/{field}",
             delete(delete_coal_override),
         )
-        // 管理端: 密钥的生成/列出/销毁 (走登录会话, 不是 X-API-Key)
+        // 管理端: 只认管理员会话 (不是 X-API-Key)
         .route("/api/admin/keys", get(list_api_keys).post(create_api_key))
         .route("/api/admin/keys/{id}", delete(revoke_api_key))
+        .route(
+            "/api/admin/settings",
+            get(admin::get_settings).put(admin::put_settings),
+        )
+        .route("/api/admin/calibration", get(admin::calibration))
+        .route("/api/admin/csr-model", get(admin::csr_model))
         .route("/api/version", get(version))
         .route("/api/storage", get(get_storage).put(put_storage))
         .route(
@@ -174,6 +236,7 @@ struct LoginRequest {
 #[derive(Serialize)]
 struct AuthStatus {
     authenticated: bool,
+    admin: bool,
 }
 
 /// 焦煤现货指数序列, 供今日屏参考估算. 公开(不敏感, 与 health 同级).
@@ -190,26 +253,40 @@ async fn coal_index_handler() -> Response {
 }
 
 async fn auth_session(State(state): State<AppState>, headers: HeaderMap) -> Json<AuthStatus> {
+    let role = session_role(&headers, &state.auth);
     Json(AuthStatus {
-        authenticated: is_authenticated(&headers, &state.auth),
+        authenticated: role.is_some(),
+        admin: role == Some(Role::Admin),
     })
 }
 
 async fn login(State(state): State<AppState>, Json(input): Json<LoginRequest>) -> Response {
     let auth = &state.auth;
-    if input.username != auth.username || !secret_eq(&input.password, &auth.password) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
-            r#"{"authenticated":false,"reason":"账号或密码错误"}"#,
-        )
-            .into_response();
-    }
+    let matches = |username: &str, password: &str| {
+        input.username == username && secret_eq(&input.password, password)
+    };
+    let (token, body) = match &auth.admin {
+        Some(admin) if matches(&admin.username, &admin.password) => (
+            &admin.session_token,
+            r#"{"authenticated":true,"admin":true}"#,
+        ),
+        _ if matches(&auth.username, &auth.password) => (
+            &auth.session_token,
+            r#"{"authenticated":true,"admin":false}"#,
+        ),
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+                r#"{"authenticated":false,"reason":"账号或密码错误"}"#,
+            )
+                .into_response();
+        }
+    };
 
     let secure = if auth.secure_cookie { "; Secure" } else { "" };
     let cookie = format!(
-        "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400{secure}",
-        auth.session_token
+        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400{secure}"
     );
     (
         StatusCode::OK,
@@ -217,7 +294,7 @@ async fn login(State(state): State<AppState>, Json(input): Json<LoginRequest>) -
             (header::CONTENT_TYPE, JSON_CONTENT_TYPE),
             (header::SET_COOKIE, cookie.as_str()),
         ],
-        r#"{"authenticated":true}"#,
+        body,
     )
         .into_response()
 }
@@ -270,10 +347,16 @@ async fn solve(
         }
     };
 
+    // 管理端设了煤阶交互 k 时, 对没自带 rank_interaction 的请求注入; 没库/没设时原样求解.
+    let k = match state.database.as_ref() {
+        Some(pool) => admin::load_rank_interaction_k(pool).await,
+        None => None,
+    };
+    let input = admin::inject_rank_interaction(input, k);
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
-        blend_kit::solve_json(input),
+        blend_kit::solve_json(&input),
     )
         .into_response()
 }
@@ -283,26 +366,27 @@ async fn master(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return unauthorized();
     }
 
-    // 基线 (编译期嵌入, 进 git) + 覆盖层 (PG, 由数据更新接口写入).
-    // 没连库或读失败时退回纯基线 —— 煤库能少几个补充指标, 但不能整个不可用.
+    (
+        [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+        merged_master_json(&state).await,
+    )
+        .into_response()
+}
+
+/// 基线 (编译期嵌入, 进 git) + 覆盖层 (PG, 由数据更新接口写入).
+/// 没连库或读失败时退回纯基线 —— 煤库能少几个补充指标, 但不能整个不可用.
+async fn merged_master_json(state: &AppState) -> std::borrow::Cow<'static, str> {
     if let Some(pool) = state.database.as_ref() {
         match database::list_coal_overrides(pool).await {
             Ok(overrides) if !overrides.is_empty() => match master_data::merge(&overrides) {
-                Ok(merged) => {
-                    return ([(header::CONTENT_TYPE, JSON_CONTENT_TYPE)], merged).into_response()
-                }
+                Ok(merged) => return merged.into(),
                 Err(error) => tracing::error!(%error, "煤库覆盖层合并失败, 退回基线"),
             },
             Ok(_) => {}
             Err(error) => tracing::error!(%error, "读取煤库覆盖层失败, 退回基线"),
         }
     }
-
-    (
-        [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
-        blend_kit::master_json(),
-    )
-        .into_response()
+    blend_kit::master_json().into()
 }
 
 async fn version(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -512,7 +596,11 @@ fn database_error(error: sqlx::Error) -> Response {
 }
 
 fn is_authenticated(headers: &HeaderMap, auth: &AuthConfig) -> bool {
-    headers
+    session_role(headers, auth).is_some()
+}
+
+fn session_role(headers: &HeaderMap, auth: &AuthConfig) -> Option<Role> {
+    let token = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
         .and_then(|cookies| {
@@ -520,8 +608,34 @@ fn is_authenticated(headers: &HeaderMap, auth: &AuthConfig) -> bool {
                 let (name, value) = cookie.trim().split_once('=')?;
                 (name == SESSION_COOKIE).then_some(value)
             })
-        })
-        .is_some_and(|token| secret_eq(token, &auth.session_token))
+        })?;
+    if auth
+        .admin
+        .as_ref()
+        .is_some_and(|admin| secret_eq(token, &admin.session_token))
+    {
+        return Some(Role::Admin);
+    }
+    secret_eq(token, &auth.session_token).then_some(Role::User)
+}
+
+/// 管理端守卫: 未登录 401, 普通账号 403. 成功时返回管理员账号 (留痕用).
+fn require_admin<'a>(
+    headers: &HeaderMap,
+    state: &'a AppState,
+) -> Result<&'a AdminAccount, Box<Response>> {
+    match (session_role(headers, &state.auth), &state.auth.admin) {
+        (Some(Role::Admin), Some(admin)) => Ok(admin),
+        (None, _) => Err(Box::new(unauthorized())),
+        _ => Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+                r#"{"ok":false,"reason":"需要管理员权限"}"#,
+            )
+                .into_response(),
+        )),
+    }
 }
 
 fn secret_eq(actual: &str, expected: &str) -> bool {
@@ -540,6 +654,17 @@ fn unauthorized() -> Response {
 // ---------------------------------------------------------------------------
 // 煤库数据更新接口 (机器密钥, 与用户会话完全独立)
 // ---------------------------------------------------------------------------
+
+/// 数据更新接口的鉴权: 管理员会话或有效 X-API-Key 二选一.
+/// 返回落库留痕用的持有者名字: 管理员为 `管理员:<账号>`, 密钥为密钥名字.
+async fn check_data_writer(headers: &HeaderMap, state: &AppState) -> Result<String, Box<Response>> {
+    if let (Some(Role::Admin), Some(admin)) =
+        (session_role(headers, &state.auth), &state.auth.admin)
+    {
+        return Ok(format!("管理员:{}", admin.username));
+    }
+    check_data_api_key(headers, state).await
+}
 
 /// 校验 X-API-Key: 对来访明文做 SHA-256, 再查未销毁的密钥行.
 /// 成功时返回该密钥的名字, 供落库留痕使用 (调用方伪造不了).
@@ -583,7 +708,7 @@ async fn check_data_api_key(
 // ---------------------------------------------------------------------------
 // 管理端: 密钥的生成 / 列出 / 销毁
 //
-// 这三个接口走**用户会话**(登录 Cookie), 不是 X-API-Key —— 管钥匙的不能是钥匙
+// 这三个接口走**管理员会话**(登录 Cookie), 不是 X-API-Key —— 管钥匙的不能是钥匙
 // 自己, 否则一把泄露的密钥就能给自己发新的。
 // ---------------------------------------------------------------------------
 
@@ -598,8 +723,8 @@ async fn create_api_key(
     headers: HeaderMap,
     Json(payload): Json<CreateKeyRequest>,
 ) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
+    if let Err(response) = require_admin(&headers, &state) {
+        return *response;
     }
     let name = payload.name.trim();
     if name.is_empty() || name.chars().count() > MAX_KEY_NAME_CHARS {
@@ -638,8 +763,8 @@ async fn create_api_key(
 
 /// GET /api/admin/keys —— 列出密钥 (只有名字/前缀/时间, 永不含明文或哈希).
 async fn list_api_keys(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
+    if let Err(response) = require_admin(&headers, &state) {
+        return *response;
     }
     let pool = match require_database(&state) {
         Ok(pool) => pool,
@@ -657,8 +782,8 @@ async fn revoke_api_key(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
+    if let Err(response) = require_admin(&headers, &state) {
+        return *response;
     }
     let pool = match require_database(&state) {
         Ok(pool) => pool,
@@ -697,7 +822,7 @@ async fn update_coal_data(
     request: Request<Body>,
 ) -> Response {
     // 持有者名字由密钥推导, 不接受调用方自报 —— 出了坏数据要查得到人.
-    let holder = match check_data_api_key(&headers, &state).await {
+    let holder = match check_data_writer(&headers, &state).await {
         Ok(holder) => holder,
         Err(response) => return *response,
     };
@@ -749,7 +874,7 @@ async fn update_coal_data(
 
 /// GET /api/master/overrides —— 查看当前覆盖层内容 (排查"这个值哪来的")。
 async fn list_coal_overrides(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = check_data_api_key(&headers, &state).await {
+    if let Err(response) = check_data_writer(&headers, &state).await {
         return *response;
     }
     let pool = match require_database(&state) {
@@ -768,7 +893,7 @@ async fn delete_coal_override(
     headers: HeaderMap,
     Path((coal, field)): Path<(String, String)>,
 ) -> Response {
-    if let Err(response) = check_data_api_key(&headers, &state).await {
+    if let Err(response) = check_data_writer(&headers, &state).await {
         return *response;
     }
     let pool = match require_database(&state) {
@@ -797,8 +922,277 @@ mod tests {
     fn test_app() -> Router {
         app_with_auth(
             PathBuf::from("missing-public"),
+            AuthConfig::new("tester", "secret", "test-session-token", false).with_admin(
+                "boss",
+                "admin-secret",
+                "admin-session-token",
+            ),
+        )
+    }
+
+    /// 未配置管理员的应用 (对应 ADMIN_* 缺失).
+    fn app_without_admin() -> Router {
+        app_with_auth(
+            PathBuf::from("missing-public"),
             AuthConfig::new("tester", "secret", "test-session-token", false),
         )
+    }
+
+    fn session_request(method: &str, uri: &str, token: &str, body: Body) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::COOKIE, format!("doudou_session={token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .unwrap()
+    }
+
+    async fn login_as(router: Router, username: &str, password: &str) -> Response {
+        router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "username": username, "password": password }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// 普通账号与管理员账号登录, 拿到各自的令牌与角色.
+    #[tokio::test]
+    async fn test_login_roles() {
+        let response = login_as(test_app(), "tester", "secret").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(cookie.contains("doudou_session=test-session-token"));
+        let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
+        assert_eq!(body, json!({ "authenticated": true, "admin": false }));
+
+        let response = login_as(test_app(), "boss", "admin-secret").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(cookie.contains("doudou_session=admin-session-token"));
+        assert!(cookie.contains("HttpOnly"));
+        let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
+        assert_eq!(body, json!({ "authenticated": true, "admin": true }));
+
+        // 管理员账号配普通密码不行
+        let response = login_as(test_app(), "boss", "secret").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_session_reports_role() {
+        for (token, expected) in [
+            (
+                "test-session-token",
+                json!({ "authenticated": true, "admin": false }),
+            ),
+            (
+                "admin-session-token",
+                json!({ "authenticated": true, "admin": true }),
+            ),
+            ("forged", json!({ "authenticated": false, "admin": false })),
+        ] {
+            let response = test_app()
+                .oneshot(session_request(
+                    "GET",
+                    "/api/auth/session",
+                    token,
+                    Body::empty(),
+                ))
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
+            assert_eq!(body, expected, "token={token}");
+        }
+    }
+
+    /// 管理员会话是超集: 普通接口照样能用.
+    #[tokio::test]
+    async fn test_admin_session_works_on_user_endpoints() {
+        let response = test_app()
+            .oneshot(session_request(
+                "GET",
+                "/api/version",
+                "admin-session-token",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// 管理端守卫: 未登录 401, 普通账号 403, 管理员放行 (没库时 503).
+    #[tokio::test]
+    async fn test_admin_guard_status_codes() {
+        let routes: [(&str, &str, &str); 6] = [
+            ("GET", "/api/admin/settings", ""),
+            ("PUT", "/api/admin/settings", r#"{"rank_interaction_k":50}"#),
+            ("GET", "/api/admin/calibration", ""),
+            ("GET", "/api/admin/csr-model", ""),
+            ("GET", "/api/admin/keys", ""),
+            ("DELETE", "/api/admin/keys/some-id", ""),
+        ];
+        for (method, uri, body) in routes {
+            let anonymous = test_app()
+                .oneshot(key_request(method, uri, None, Body::from(body)))
+                .await
+                .unwrap();
+            assert_eq!(
+                anonymous.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+
+            let user = test_app()
+                .oneshot(session_request(
+                    method,
+                    uri,
+                    "test-session-token",
+                    Body::from(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(user.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+            let text = response_text(user).await;
+            assert!(text.contains("需要管理员权限"), "{text}");
+
+            let admin = test_app()
+                .oneshot(session_request(
+                    method,
+                    uri,
+                    "admin-session-token",
+                    Body::from(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                admin.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{method} {uri}"
+            );
+        }
+    }
+
+    /// 设置校验在碰库之前: 非法 k 一律 400.
+    #[tokio::test]
+    async fn test_put_settings_rejects_invalid_k() {
+        for body in [
+            r#"{"rank_interaction_k":-1}"#,
+            r#"{"rank_interaction_k":"x"}"#,
+            "{}",
+        ] {
+            let response = test_app()
+                .oneshot(session_request(
+                    "PUT",
+                    "/api/admin/settings",
+                    "admin-session-token",
+                    Body::from(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "body={body}");
+        }
+    }
+
+    /// 管理员令牌与普通令牌相同时不启用管理端, 普通 Cookie 拿不到管理权限.
+    #[tokio::test]
+    async fn test_admin_token_collision_disables_admin() {
+        let router = app_with_auth(
+            PathBuf::from("missing-public"),
+            AuthConfig::new("tester", "secret", "same-token", false).with_admin(
+                "boss",
+                "admin-secret",
+                "same-token",
+            ),
+        );
+        let response = router
+            .oneshot(session_request(
+                "GET",
+                "/api/admin/settings",
+                "same-token",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// 没配管理员: 管理员凭据登录失败, 普通账号访问管理端 403.
+    #[tokio::test]
+    async fn test_admin_disabled_without_config() {
+        let response = login_as(app_without_admin(), "boss", "admin-secret").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_without_admin()
+            .oneshot(session_request(
+                "GET",
+                "/api/admin/settings",
+                "test-session-token",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app_without_admin()
+            .oneshot(session_request(
+                "GET",
+                "/api/admin/settings",
+                "admin-session-token",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// 管理员会话可代替 X-API-Key 写煤库: 鉴权通过后才轮到请求体校验 (422).
+    #[tokio::test]
+    async fn test_admin_session_passes_data_api_auth() {
+        let response = test_app()
+            .oneshot(session_request(
+                "POST",
+                "/api/master/coals",
+                "admin-session-token",
+                Body::from(r#"{"updates":[]}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        for (method, uri) in [
+            ("GET", "/api/master/overrides"),
+            ("DELETE", "/api/master/coals/临北/CSR"),
+        ] {
+            let response = test_app()
+                .oneshot(session_request(
+                    method,
+                    uri,
+                    "admin-session-token",
+                    Body::empty(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{method} {uri}"
+            );
+        }
     }
 
     fn authenticated_request(method: &str, uri: &str, body: Body) -> Request<Body> {
@@ -967,7 +1361,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// 已登录但名字非法时 422, 且在碰库之前就判掉.
+    /// 管理员已登录但名字非法时 422, 且在碰库之前就判掉.
     #[tokio::test]
     async fn test_create_key_rejects_bad_name() {
         for name in ["", "   ", &"名".repeat(MAX_KEY_NAME_CHARS + 1)] {
@@ -977,7 +1371,7 @@ mod tests {
                     Request::builder()
                         .method("POST")
                         .uri("/api/admin/keys")
-                        .header(header::COOKIE, "doudou_session=test-session-token")
+                        .header(header::COOKIE, "doudou_session=admin-session-token")
                         .header(header::CONTENT_TYPE, "application/json")
                         .body(Body::from(body))
                         .unwrap(),

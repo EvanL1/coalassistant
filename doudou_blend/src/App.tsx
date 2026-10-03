@@ -7,13 +7,15 @@ import { ContractScreen } from "./screens/ContractScreen";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { MeScreen } from "./screens/MeScreen";
 import { LoginScreen } from "./LoginScreen";
-import { isLoggedIn } from "./auth";
+import { getSession } from "./auth";
+import { AdminScreen } from "./screens/AdminScreen";
 import { IndexTicker } from "./IndexTicker";
 import { initializeCloudStorage } from "./cloudStorage";
 
 function App() {
   const [tab, setTab] = useState<TabId>("today");
   const [authed, setAuthed] = useState<boolean | null>(null);
+  const [admin, setAdmin] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
 
@@ -21,8 +23,10 @@ function App() {
   useEffect(() => {
     let active = true;
     const refresh = async () => {
-      const loggedIn = await isLoggedIn();
-      if (active) setAuthed(loggedIn);
+      const session = await getSession();
+      if (!active) return;
+      setAdmin(session.admin);
+      setAuthed(session.authenticated);
     };
     const onChange = () => void refresh();
     window.addEventListener("doudou:auth_changed", onChange);
@@ -36,7 +40,8 @@ function App() {
   useEffect(() => {
     let active = true;
     let stopSync: () => void = () => undefined;
-    if (!authed) {
+    // 管理员不进五屏应用, 没有偏好/合同要同步.
+    if (!authed || admin) {
       setStorageReady(false);
       setStorageError(null);
       return () => undefined;
@@ -61,7 +66,11 @@ function App() {
       active = false;
       stopSync();
     };
-  }, [authed]);
+  }, [authed, admin]);
+
+  if (authed && admin) {
+    return <AdminScreen />;
+  }
 
   if (authed == null || (authed && !storageReady)) {
     return (

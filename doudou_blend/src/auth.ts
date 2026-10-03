@@ -6,17 +6,29 @@ function notifyAuthChanged(): void {
   window.dispatchEvent(new CustomEvent("doudou:auth_changed"));
 }
 
-export async function isLoggedIn(): Promise<boolean> {
+export interface Session {
+  authenticated: boolean;
+  /** 管理员进后台, 不进五屏应用. 旧版服务端不返回此字段, 按 false 处理. */
+  admin: boolean;
+}
+
+const SIGNED_OUT: Session = { authenticated: false, admin: false };
+
+export async function getSession(): Promise<Session> {
   try {
     const response = await fetch("/api/auth/session", {
       credentials: "same-origin",
       cache: "no-store",
     });
-    if (!response.ok) return false;
-    const result = (await response.json()) as { authenticated?: unknown };
-    return result.authenticated === true;
+    if (!response.ok) return SIGNED_OUT;
+    const result = (await response.json()) as {
+      authenticated?: unknown;
+      admin?: unknown;
+    };
+    const authenticated = result.authenticated === true;
+    return { authenticated, admin: authenticated && result.admin === true };
   } catch {
-    return false;
+    return SIGNED_OUT;
   }
 }
 

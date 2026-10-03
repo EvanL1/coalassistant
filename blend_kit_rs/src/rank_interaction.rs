@@ -30,7 +30,7 @@ const SCAN_STEP: f64 = 0.02;
 const MAX_SCAN: usize = 24;
 
 /// 一种煤的煤阶: 有效煤岩数据的反射率均值优先, 否则由挥发换算.
-fn coal_rank(coal: &Coal) -> Option<f64> {
+pub fn coal_rank(coal: &Coal) -> Option<f64> {
     coal.petrography
         .as_ref()
         .filter(|data| data.is_valid())
@@ -191,6 +191,12 @@ fn blend_moments(result: &BlendResult, coals: &[Coal], ranks: &[f64]) -> (f64, f
         .zip(ranks)
         .filter_map(|(coal, rank)| result.recipe.get(&coal.name).map(|x| (*x, *rank)))
         .collect();
+    rank_moments(&parts)
+}
+
+/// 配比加权的煤阶均值与方差 D. `parts` 为 (配比, 煤阶), 配比按总和归一;
+/// 总配比不为正时返回 (0, 0).
+pub fn rank_moments(parts: &[(f64, f64)]) -> (f64, f64) {
     let total: f64 = parts.iter().map(|(x, _)| x).sum();
     if total <= 0.0 {
         return (0.0, 0.0);
@@ -202,4 +208,186 @@ fn blend_moments(result: &BlendResult, coals: &[Coal], ranks: &[f64]) -> (f64, f
         .sum::<f64>()
         / total;
     (mean, variance)
+}
+
+/// 推荐启用拟合 k 的最少样本数.
+pub const MIN_CALIBRATION_SAMPLES: usize = 8;
+/// 低于它视为 D 没有离散度, 斜率不可辨识. D 的量级约 1e-3~1e-1 (Ro 方差).
+const MIN_D_SPREAD: f64 = 1e-12;
+
+/// 由历史实测反推的 k: 残差 r = 线性 CSR − 实测 CSR 对 D 做最小二乘 r = a + k·D.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KFit {
+    pub n: usize,
+    /// 样本少于 3 或 D 无离散度时为 None (下同).
+    pub k: Option<f64>,
+    pub intercept: Option<f64>,
+    pub k_std_error: Option<f64>,
+    /// 无样本时为 None.
+    pub d_min: Option<f64>,
+    pub d_max: Option<f64>,
+}
+
+impl KFit {
+    /// 是否建议启用, 以及中文理由. 要求样本够、k 为正且显著 (k − 2·se > 0).
+    pub fn recommendation(&self) -> (bool, String) {
+        if self.n < MIN_CALIBRATION_SAMPLES {
+            return (
+                false,
+                format!(
+                    "样本不足: 有效样本 {} 条, 至少需要 {MIN_CALIBRATION_SAMPLES} 条",
+                    self.n
+                ),
+            );
+        }
+        let (Some(k), Some(se)) = (self.k, self.k_std_error) else {
+            return (
+                false,
+                "D 离散度太小: 历史配方的煤阶方差几乎相同, 无法拟合 k".into(),
+            );
+        };
+        if k <= 0.0 || k - 2.0 * se <= 0.0 {
+            return (
+                false,
+                format!("k 不显著大于 0: k = {k:.2}, 标准误 {se:.2}, 要求 k − 2·标准误 > 0"),
+            );
+        }
+        (
+            true,
+            format!(
+                "建议启用: k = {k:.2} (标准误 {se:.2}), 基于 {} 条样本",
+                self.n
+            ),
+        )
+    }
+}
+
+/// 普通最小二乘拟合 r = a + k·D. `samples` 为 (D, r).
+pub fn fit_k(samples: &[(f64, f64)]) -> KFit {
+    let n = samples.len();
+    let d_min = samples.iter().map(|(d, _)| *d).reduce(f64::min);
+    let d_max = samples.iter().map(|(d, _)| *d).reduce(f64::max);
+    let unfitted = KFit {
+        n,
+        k: None,
+        intercept: None,
+        k_std_error: None,
+        d_min,
+        d_max,
+    };
+    if n < 3 {
+        return unfitted;
+    }
+    let count = n as f64;
+    let mean_d = samples.iter().map(|(d, _)| d).sum::<f64>() / count;
+    let mean_r = samples.iter().map(|(_, r)| r).sum::<f64>() / count;
+    let sxx: f64 = samples.iter().map(|(d, _)| (d - mean_d).powi(2)).sum();
+    if sxx <= MIN_D_SPREAD {
+        return unfitted;
+    }
+    let sxy: f64 = samples
+        .iter()
+        .map(|(d, r)| (d - mean_d) * (r - mean_r))
+        .sum();
+    let k = sxy / sxx;
+    let intercept = mean_r - k * mean_d;
+    let ssr: f64 = samples
+        .iter()
+        .map(|(d, r)| (r - intercept - k * d).powi(2))
+        .sum();
+    let k_std_error = (ssr / (count - 2.0) / sxx).sqrt();
+    KFit {
+        k: Some(k),
+        intercept: Some(intercept),
+        k_std_error: Some(k_std_error),
+        ..unfitted
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rank_moments_normalizes_ratios() {
+        let (mean, variance) = rank_moments(&[(60.0, 1.0), (40.0, 1.5)]);
+        assert!((mean - 1.2).abs() < 1e-12);
+        assert!((variance - 0.06).abs() < 1e-12);
+        assert_eq!(rank_moments(&[]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn test_coal_rank_falls_back_to_vdaf() {
+        let coal = crate::coal_from_tuple(
+            "x",
+            (0.5, 10.0, 25.0, 80.0, 15.0, 0.1, 60.0, 8.0, 1000.0, 100.0),
+        );
+        let rank = coal_rank(&coal).unwrap();
+        assert!((rank - (RO_INTERCEPT - RO_PER_VDAF * 25.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_fit_k_recovers_exact_line() {
+        let samples: Vec<(f64, f64)> = (0..10)
+            .map(|i| {
+                let d = 0.01 * i as f64;
+                (d, 1.5 + 40.0 * d)
+            })
+            .collect();
+        let fit = fit_k(&samples);
+        assert_eq!(fit.n, 10);
+        assert!((fit.k.unwrap() - 40.0).abs() < 1e-9);
+        assert!((fit.intercept.unwrap() - 1.5).abs() < 1e-9);
+        assert!(fit.k_std_error.unwrap() < 1e-6);
+        assert_eq!(fit.d_min, Some(0.0));
+        assert!((fit.d_max.unwrap() - 0.09).abs() < 1e-12);
+        assert!(fit.recommendation().0);
+    }
+
+    #[test]
+    fn test_fit_k_standard_error_matches_hand_calculation() {
+        // D = 0,1,2,3; r = 0,2,1,3 → k = 0.8, a = 0.3, SSR = 1.8, se = √(0.9/5)
+        let fit = fit_k(&[(0.0, 0.0), (1.0, 2.0), (2.0, 1.0), (3.0, 3.0)]);
+        assert!((fit.k.unwrap() - 0.8).abs() < 1e-12);
+        assert!((fit.intercept.unwrap() - 0.3).abs() < 1e-12);
+        assert!((fit.k_std_error.unwrap() - (0.9f64 / 5.0).sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_fit_k_needs_three_samples_and_d_spread() {
+        let few = fit_k(&[(0.01, 1.0), (0.02, 2.0)]);
+        assert_eq!(few.n, 2);
+        assert!(few.k.is_none() && few.intercept.is_none() && few.k_std_error.is_none());
+        assert_eq!(few.d_min, Some(0.01));
+
+        let flat = fit_k(&[(0.03, 1.0), (0.03, 2.0), (0.03, 3.0)]);
+        assert!(flat.k.is_none());
+
+        let empty = fit_k(&[]);
+        assert_eq!((empty.d_min, empty.d_max), (None, None));
+    }
+
+    #[test]
+    fn test_recommendation_reasons() {
+        let few = fit_k(&[(0.0, 0.0), (0.01, 0.4), (0.02, 0.8)]);
+        let (ok, reason) = few.recommendation();
+        assert!(!ok && reason.contains("样本不足"));
+
+        let flat = fit_k(&[(0.03, 1.0); 9]);
+        let (ok, reason) = flat.recommendation();
+        assert!(!ok && reason.contains("离散度"));
+
+        // 负斜率: 煤阶越分散 CSR 反而越高, 不该推荐
+        let negative: Vec<(f64, f64)> = (0..9)
+            .map(|i| (0.01 * i as f64, -30.0 * 0.01 * i as f64))
+            .collect();
+        let (ok, reason) = fit_k(&negative).recommendation();
+        assert!(!ok && reason.contains("不显著"));
+
+        // 噪声淹没斜率
+        let noisy: Vec<(f64, f64)> = (0..9)
+            .map(|i| (0.01 * i as f64, if i % 2 == 0 { 5.0 } else { -5.0 }))
+            .collect();
+        assert!(!fit_k(&noisy).recommendation().0);
+    }
 }

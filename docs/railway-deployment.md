@@ -12,10 +12,18 @@
 - `DATABASE_URL`：Supabase Session pooler 连接串，使用 5432 端口并启用
   `sslmode=require`。不要把连接串提交到 Git。
 
-数据更新密钥**不走环境变量**——登录后在「我的」页面生成、命名、销毁，存在数据库里。
+后台管理员账号（可选，三个都设了才启用后台；缺任一后台关闭，普通登录不受影响）：
+
+- `ADMIN_USERNAME`：后台账号，不要与 `AUTH_USERNAME` 相同。
+- `ADMIN_PASSWORD`：后台密码。
+- `ADMIN_SESSION_TOKEN`：至少 32 字节的随机会话令牌，不要与 `AUTH_SESSION_TOKEN` 相同。
+
+用后台账号在同一个登录页登录即进入后台：煤阶交互 k、CSR 模型状态、煤库数据维护、API 密钥。
+
+数据更新密钥**不走环境变量**——用后台账号登录后生成、命名、销毁，存在数据库里。
 详见 `docs/coal-data-api.md`。
 
-Railway 自动注入 `PORT`，服务监听 `0.0.0.0:$PORT`。`railway.json`
+Railway 自动注入 `PORT`，服务监听 `0.0.0.0:$PORT`。`.railway/railway.ts`
 将 `/api/health` 配置为部署健康检查；服务启动时自动执行
 `blend_kit_server/migrations/` 中的数据库迁移。
 
