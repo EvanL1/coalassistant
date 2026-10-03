@@ -94,7 +94,14 @@ cargo fmt
 cargo test --locked
 cargo clippy --release -- -D warnings
 cargo run                                      # needs AUTH_* + DATABASE_URL env (see docs/railway-deployment.md)
+cargo run --release --bin doudou -- --profile admin login <账号>   # 线上命令行, 见下
 ```
+
+**线上命令行 `doudou`** (`blend_kit_server/src/bin/doudou.rs`): 登录线上服务, 走 `/api/*`, 与网页同一套数据
+(煤库覆盖值、后台设的 k、历史)。`--profile` 切换账号 (普通用户 / 管理员), 档案存 `~/.config/doudou/profiles.json`
+(600, 只存会话 cookie)。密码读 `DOUDOU_PASSWORD` 或终端输入。命令: `login/logout/whoami/profiles`、`solve/eval`、
+`master`、`history [measured <id>]`、`admin settings [--k|--off]|calibration|csr-model|keys|overrides`、`api <METHOD> <路径>`。
+`blend` 只在本机用内置 master 离线算; 要和用户看到的一致, 用 `doudou`。
 
 **WASM package** (standalone — not needed for the app):
 ```bash
@@ -141,7 +148,7 @@ npm run check:data   # master 数据自检
 ## Agent 环境 (E2B)
 
 根目录 `Dockerfile` 是唯一的镜像定义: Railway 部署用它, 最终镜像里同时带 `/usr/local/bin/blend`
-命令行, 所以这个镜像本身就是 agent 环境。E2B 不支持多阶段 Dockerfile, 模板要从构建好的镜像创建
+(离线) 与 `/usr/local/bin/doudou` (线上) 命令行, 所以这个镜像本身就是 agent 环境。E2B 不支持多阶段 Dockerfile, 模板要从构建好的镜像创建
 (fromImage), 模板定义不放在本仓库。master 编进二进制, 改了 `coal_master.json` 要重建镜像。
 
 ## Conventions

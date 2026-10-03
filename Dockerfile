@@ -22,6 +22,7 @@ RUN groupadd --system app \
 WORKDIR /app
 COPY --from=server-builder /app/blend_kit_server/target/release/blend_kit_server /usr/local/bin/blend_kit_server
 COPY --from=server-builder /app/blend_kit_rs/target/release/blend /usr/local/bin/blend
+COPY --from=server-builder /app/blend_kit_server/target/release/doudou /usr/local/bin/doudou
 COPY --from=frontend /app/doudou_blend/dist/ /app/public/
 
 ENV PORT=3000
