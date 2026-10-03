@@ -28,6 +28,10 @@ export default defineRailway(() => {
       AUTH_USERNAME: preserve(),
       AUTH_PASSWORD: preserve(),
       AUTH_SESSION_TOKEN: preserve(),
+      // 后台管理员账号; 三个都设了才启用后台, 缺任一则后台关闭 (不影响普通登录).
+      ADMIN_USERNAME: preserve(),
+      ADMIN_PASSWORD: preserve(),
+      ADMIN_SESSION_TOKEN: preserve(),
       DATABASE_URL: preserve(),
       SUPABASE_SINGAPORE_DATABASE_URL: preserve(),
       SUPABASE_TOKYO_DATABASE_URL: preserve(),

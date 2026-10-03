@@ -15,6 +15,7 @@ mod rank_interaction;
 pub mod seed;
 pub use petrography::{Notch, Petrography};
 pub use predict::{CsrObservation, CsrPredictor, EvaluatorSet};
+pub use rank_interaction::{coal_rank, fit_k, rank_moments, KFit, MIN_CALIBRATION_SAMPLES};
 pub use seed::{CoalMaster, CoalMasterEntry, Confidence, DefaultContract, MasterStatus};
 
 pub use model::*;
