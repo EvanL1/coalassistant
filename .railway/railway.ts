@@ -23,6 +23,9 @@ export default defineRailway(() => {
       // 重启策略取 Railway 默认的 ON_FAILURE (失败时重启)。不写 restartPolicyType:
       // 默认值在线上存为空, 显式写上会让 plan 每次都报一条 null → ON_FAILURE 的假差异.
       restartPolicyMaxRetries: 3,
+      // 无流量时休眠, 有请求再唤醒: 计算只在请求那一刻发生, 常驻内存不计费.
+      // 代价是休眠后的第一次访问要等几秒唤醒 (Rust 服务启动快, 主要是连数据库).
+      sleepApplication: true,
     },
     env: {
       AUTH_USERNAME: preserve(),
