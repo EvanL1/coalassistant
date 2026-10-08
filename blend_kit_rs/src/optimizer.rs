@@ -67,7 +67,10 @@ pub fn solve(request: &BlendRequest) -> BlendResult {
 ///
 /// `ok` 只表示是否得到配方；可信度由 `quality_status` 表示。
 pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) -> BlendResult {
-    solve_internal(request, evaluators, true)
+    let mut result = solve_internal(request, evaluators, true);
+    // 价格因子只做评估, 不进 LP: 拿到结果 (含无解) 后统一挂上.
+    crate::price_factor::attach(request, &mut result);
+    result
 }
 
 /// `diagnose = false` 的那一路是给 [`relax_target`] 的试解用的: 它要拿真流程验证
@@ -1288,6 +1291,9 @@ fn assemble_result(
         csr_stamp_estimate: None,
         rank_variance: None,
         csr_interaction_penalty: None,
+        coal_values: Vec::new(),
+        market_price: None,
+        market_price_from_group: false,
     };
     let blend_value = |indicator: &str| {
         result
@@ -1868,6 +1874,7 @@ mod tests {
             truncate_decimal: true,
             fixed_ratios: None,
             rank_interaction: None,
+            price_factor: None,
         }
     }
 
@@ -1940,6 +1947,7 @@ mod tests {
             truncate_decimal: false,
             fixed_ratios: None,
             rank_interaction: None,
+            price_factor: None,
         });
 
         assert!(!result.ok, "灰分连拒收线 10 都够不到, 应当不可行");
@@ -2054,6 +2062,7 @@ mod tests {
             truncate_decimal: false,
             fixed_ratios: None,
             rank_interaction: None,
+            price_factor: None,
             ..request
         };
         let result = solve_with_evaluators(&request, &trained_evaluators());
@@ -2122,6 +2131,7 @@ mod tests {
             truncate_decimal: false,
             fixed_ratios: None,
             rank_interaction: None,
+            price_factor: None,
         };
         let result = solve(&request);
 
@@ -2254,6 +2264,7 @@ mod tests {
                 truncate_decimal: truncate,
                 fixed_ratios: None,
                 rank_interaction: None,
+                price_factor: None,
             };
             let result = solve(&request);
             assert!(
@@ -2329,6 +2340,7 @@ mod tests {
                 truncate_decimal: false,
                 fixed_ratios: None,
                 rank_interaction: None,
+                price_factor: None,
             })
             .ok
         };
@@ -2432,6 +2444,7 @@ mod tests {
             truncate_decimal: false,
             fixed_ratios: None,
             rank_interaction: None,
+            price_factor: None,
         };
         let result = solve(&request);
 
@@ -2473,6 +2486,7 @@ mod tests {
             truncate_decimal: false,
             fixed_ratios: None,
             rank_interaction: None,
+            price_factor: None,
         };
         let result = solve(&request);
 
@@ -2902,6 +2916,7 @@ mod measurements {
                             truncate_decimal: truncate,
                             fixed_ratios: None,
                             rank_interaction: None,
+                            price_factor: None,
                         };
                         let result = solve_with_evaluators(&request, models);
                         if !result.ok {

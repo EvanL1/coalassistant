@@ -137,11 +137,58 @@ export interface BlendRequest {
   fixed_ratios?: Record<string, number> | null;
   /** 煤阶交互罚项 (配煤不相容). 不传或 k = 0 = 不启用. */
   rank_interaction?: RankInteraction | null;
+  /** 价格因子 (按质量估应值价). 只做评估, 不进 LP. */
+  price_factor?: PriceFactor | null;
 }
 
 /** CSR配 = Σxᵢ·CSRᵢ − k·D, D = 配比加权的煤阶 (Ro) 方差. k ≥ 0, 须用本厂实测标定. */
 export interface RankInteraction {
   k: number;
+}
+
+/** 单条升贴水规则. 费率: 点 每 1 个指标单位 (标准品 = 1000 点). direction 只用 Upper/Lower. */
+export interface PriceAdjust {
+  indicator: string;
+  direction: Direction;
+  base: number;
+  premium_rate: number;
+  discount_rate: number;
+  clamp?: [number, number] | null;
+  linear_range?: [number, number] | null;
+  enabled?: boolean;
+}
+
+export interface PriceFactor {
+  adjusts: PriceAdjust[];
+  /** 市场公开价: 标准品 (1000 点) 对应的元/吨; 缺省 = 由请求煤池反推. */
+  market_price?: number | null;
+}
+
+/** master 里的价格因子系数表, 多一段出处说明. */
+export interface MasterPriceFactor extends PriceFactor {
+  description?: string;
+}
+
+export interface PricePart {
+  indicator: string;
+  amount: number;
+}
+
+/** 单种煤的价格评估 (只用出厂价, 不含运费). gap > 0 偏贵, < 0 划算. */
+export interface CoalValue {
+  name: string;
+  fob: number;
+  /** 质量升贴水合计 (点). */
+  adjustment: number;
+  /** 质量指数 = 1000 + 升贴水; 标准品 = 1000 点. */
+  points: number;
+  /** 应值 = 市场价/1000 × 质量指数 (元/吨). */
+  fair: number;
+  gap: number;
+  ratio: number;
+  parts: PricePart[];
+  missing: string[];
+  extrapolated: string[];
 }
 
 export interface CostBreakdown {
@@ -288,6 +335,11 @@ export interface BlendResult {
   rank_variance?: number | null;
   /** 启用煤阶交互时: CSR 因此扣掉的点数 k·D (体检里的 CSR 已扣过). */
   csr_interaction_penalty?: number | null;
+  /** 价格因子评估; 未配置或旧历史结果为空/缺失. */
+  coal_values?: CoalValue[];
+  /** 标准品 1000 点对应的市场价 (元/吨). */
+  market_price?: number | null;
+  market_price_from_group?: boolean;
 }
 
 /** 混合后 6 项指标 (CSR 回归自变量 X). */
@@ -387,5 +439,7 @@ export interface CoalMaster {
   /** 词表声明; 录入界面从这里取煤种/形态选项, 不在前端另写一份. */
   schema?: MasterSchema | null;
   default_contract: DefaultContract;
+  /** 价格因子默认系数表; 求解时原样带进请求. */
+  price_factor?: MasterPriceFactor | null;
   coals: MasterCoalEntry[];
 }

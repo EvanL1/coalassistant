@@ -842,6 +842,7 @@ mod tests {
             truncate_decimal: false,
             fixed_ratios: None,
             rank_interaction: None,
+            price_factor: None,
         }
     }
 
@@ -1077,6 +1078,7 @@ mod tests {
             truncate_decimal: false,
             fixed_ratios: None,
             rank_interaction: None,
+            price_factor: None,
         }
     }
 

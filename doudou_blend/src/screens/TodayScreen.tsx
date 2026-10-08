@@ -53,6 +53,7 @@ import {
   getUserCoals,
   setQuantity,
 } from "../storage";
+import { CoalValueCard } from "./CoalValueCard";
 import { CostCard } from "./CostCard";
 import { InfeasiblePanel } from "./InfeasiblePanel";
 
@@ -342,6 +343,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         specs,
         total_quantity: totalQuantity,
         truncate_decimal: true,
+        // 价格因子系数表来自 master (数据不是代码); 只做煤价评估, 不影响配方.
+        ...(master.price_factor ? { price_factor: master.price_factor } : {}),
       };
 
       const json = await backend.solveJson(JSON.stringify(request));
@@ -895,6 +898,9 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           )}
         </>
       )}
+
+      {/* 煤价对比与配方无关, 有解无解都显示 (没有 coal_values 时组件不渲染). */}
+      <CoalValueCard result={result} drifted={(price?.driftedCount ?? 0) > 0} />
 
       {result.warnings.length > 0 && (
         <div

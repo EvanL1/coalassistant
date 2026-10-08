@@ -57,6 +57,7 @@ fn main() {
         truncate_decimal: true,
         fixed_ratios: None,
         rank_interaction: None,
+        price_factor: None,
     };
 
     println!("===== 豆哥配煤 Rust 核心 =====");

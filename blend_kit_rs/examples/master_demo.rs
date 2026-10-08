@@ -69,6 +69,7 @@ fn main() {
         truncate_decimal: true,
         fixed_ratios: None,
         rank_interaction: None,
+        price_factor: None,
     };
     let r = solve(&req);
 

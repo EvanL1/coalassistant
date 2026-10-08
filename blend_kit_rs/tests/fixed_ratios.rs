@@ -48,6 +48,7 @@ fn request(
         truncate_decimal: false,
         fixed_ratios: fixed,
         rank_interaction: None,
+        price_factor: None,
     }
 }
 
