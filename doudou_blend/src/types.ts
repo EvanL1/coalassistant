@@ -190,6 +190,8 @@ export interface CoalValue {
   /** 没报价为 null. */
   gap: number | null;
   ratio: number | null;
+  /** 配煤价值: 本次煤池与合同下的盈亏平衡到厂价 (元/吨); 到厂价低于它就会入选. */
+  blend_value?: number | null;
   parts: PricePart[];
   missing: string[];
   extrapolated: string[];

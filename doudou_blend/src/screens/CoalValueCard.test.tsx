@@ -141,6 +141,26 @@ describe("CoalValueCard 口径与标签", () => {
     expect(screen.getByText(/未录出厂价的煤只给估算价/)).toBeTruthy();
   });
 
+  it("有配煤价值时多一列并在脚注说明含义; 都没有时不出这一列", () => {
+    render(
+      <CoalValueCard
+        result={result({
+          coal_values: [
+            value("新星", 2100, 2000, { blend_value: 2163.4 }),
+            value("无价煤", 0, 2400, { fob: null, gap: null, ratio: null }),
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("配煤价值 (到厂)")).toBeTruthy();
+    expect(screen.getByText("2163")).toBeTruthy();
+    expect(screen.getByText(/到厂价低于配煤价值就会被选进配方/)).toBeTruthy();
+    cleanup();
+
+    render(<CoalValueCard result={result({ coal_values: values })} />);
+    expect(screen.queryByText("配煤价值 (到厂)")).toBeNull();
+  });
+
   it("取整后持平用中性色, 不按正负号着色", () => {
     render(<CoalValueCard result={result({ coal_values: values })} />);
     for (const cellEl of screen.getAllByText("持平")) {

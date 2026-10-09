@@ -151,6 +151,90 @@ fn test_extra_coals_scored_but_not_blended() {
     assert!((fair - 2.0 * extra["points"].as_f64().unwrap()).abs() < 1e-9);
 }
 
+fn ratio(result: &Value, name: &str) -> f64 {
+    result["recipe"][name].as_f64().unwrap_or(0.0)
+}
+
+fn blend_value(result: &Value, name: &str) -> f64 {
+    result["coal_values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == name)
+        .unwrap_or_else(|| panic!("coal_values 里没有 {name}"))["blend_value"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{name} 没有 blend_value"))
+}
+
+/// 配煤价值 = 盈亏平衡到厂价: 没入选的煤降到它以下就入选, 高于它仍不入选.
+#[test]
+fn test_blend_value_is_break_even_for_unselected_coal() {
+    let base = request(1.5, Some(default_factor()));
+    let result = run(&base);
+    let names = ["荣欣", "新星", "北沟", "浮精"];
+    let out = *names
+        .iter()
+        .find(|name| ratio(&result, name) < 1e-6)
+        .expect("fixture 里应有没入选的煤");
+    let value = blend_value(&result, out);
+    let index = names.iter().position(|name| *name == out).unwrap();
+    for (delta, should_enter) in [(-5.0, true), (5.0, false)] {
+        let mut req = base.clone();
+        req["coals"][index]["fob"] = json!(value + delta);
+        let probe = run(&req);
+        assert_eq!(
+            ratio(&probe, out) > 1e-6,
+            should_enter,
+            "{out} 价 {} (配煤价值 {value:.2}): 配方 {}",
+            value + delta,
+            probe["recipe"]
+        );
+    }
+}
+
+/// 已入选的煤, 配煤价值就是它现在的到厂价 (再贵一点仍可能入选, 那要做敏感度分析, 不在此).
+#[test]
+fn test_blend_value_of_selected_coal_equals_its_price() {
+    let result = run(&request(1.5, Some(default_factor())));
+    let coals = coals();
+    for coal in coals.as_array().unwrap() {
+        let name = coal["name"].as_str().unwrap();
+        if ratio(&result, name) > 1e-3 {
+            let cif = coal["fob"].as_f64().unwrap() + coal["frt"].as_f64().unwrap();
+            assert!((blend_value(&result, name) - cif).abs() < 0.5, "{name}");
+        }
+    }
+}
+
+/// 没报价的 extra 煤也有配煤价值, 且它就是盈亏平衡价: 按它减 5 元放进煤池就入选.
+#[test]
+fn test_extra_coal_blend_value_is_break_even() {
+    let extra = json!({
+        "name": "无价煤", "fob": 0.0, "frt": 0.0,
+        "props": {"S": 1.0, "A": 9.0, "V": 24.0, "G": 90.0, "Y": 20.0, "petro": 0.1, "CSR": 66.0, "M": 10.0}
+    });
+    let mut factor = default_factor();
+    factor["extra_coals"] = json!([extra.clone()]);
+    let result = run(&request(1.5, Some(factor)));
+    assert!(ratio(&result, "无价煤") == 0.0, "extra 煤不得进配方");
+    let value = blend_value(&result, "无价煤");
+    assert!(value > 0.0);
+    for (delta, should_enter) in [(-5.0, true), (5.0, false)] {
+        let mut req = request(1.5, None);
+        let mut priced = extra.clone();
+        priced["fob"] = json!(value + delta);
+        req["coals"].as_array_mut().unwrap().push(priced);
+        let probe = run(&req);
+        assert_eq!(
+            ratio(&probe, "无价煤") > 1e-6,
+            should_enter,
+            "价 {} (配煤价值 {value:.2}): 配方 {}",
+            value + delta,
+            probe["recipe"]
+        );
+    }
+}
+
 #[test]
 fn test_invalid_price_factor_does_not_fail_solve() {
     let mut factor = default_factor();

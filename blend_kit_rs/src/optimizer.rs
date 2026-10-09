@@ -127,9 +127,15 @@ fn solve_core(
     }
     let active_specs: Vec<&Spec> = request.specs.iter().filter(|spec| spec.enabled).collect();
     let mut coals = request.coals.clone();
+    // 价格因子里只评估、不进 LP 的煤: 只用来算配煤价值, 与煤池同样预处理.
+    let mut extras: Vec<Coal> = request
+        .price_factor
+        .as_ref()
+        .map(|factor| factor.extra_coals.clone())
+        .unwrap_or_default();
 
     // 有 μ/σ 或直方图时，用单煤真实 σ 补齐 LP 代理字段。
-    for coal in &mut coals {
+    for coal in coals.iter_mut().chain(extras.iter_mut()) {
         if !coal.has("petro") {
             if let Some((_, std_dev)) = coal.petrography.as_ref().and_then(Petrography::mean_std) {
                 coal.props.insert("petro".into(), std_dev);
@@ -197,6 +203,11 @@ fn solve_core(
     if kept.is_empty() {
         return BlendResult::infeasible("无可用煤", warnings);
     }
+    // 缺 Hard/Priced 所需指标的 extra 煤建不出约束列, 算不出配煤价值, 静默跳过.
+    let extras: Vec<&Coal> = extras
+        .iter()
+        .filter(|coal| required.iter().all(|indicator| coal.has(indicator)))
+        .collect();
 
     let mut formulas = build_formulas(&kept, evaluators);
     if let (Some(shift), Some(csr)) = (csr_shift, formulas.get_mut("CSR")) {
@@ -268,6 +279,7 @@ fn solve_core(
             petro_proxy_lower,
             petro_proxy_upper,
             warnings.clone(),
+            &extras,
         ) else {
             return if let Some(previous) = fallback {
                 if petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard) {
@@ -1040,6 +1052,7 @@ fn solve_once(
     petro_proxy_lower: Option<f64>,
     petro_proxy_upper: Option<f64>,
     warnings: Vec<String>,
+    extras: &[&Coal],
 ) -> Option<(BlendResult, Vec<f64>)> {
     let count = coals.len();
     let (problem, blocks) = build_lp(
@@ -1052,10 +1065,10 @@ fn solve_once(
         petro_proxy_upper,
         None,
     )?;
-    let (solution, _) = problem.solve()?;
+    let (solution, objective) = problem.solve()?;
     let ratios = solution[..count].to_vec();
     let penalty_by_indicator = read_back_penalties(&blocks, &solution);
-    let result = assemble_result(
+    let mut result = assemble_result(
         coals,
         specs,
         request,
@@ -1078,7 +1091,97 @@ fn solve_once(
     if hard_failed {
         return None;
     }
+    // 配煤价值只给煤价对比卡用; 不带价格因子时不多解一次 LP, 结果与以前逐字节一致.
+    if request.price_factor.is_some() {
+        result.blend_values = blend_values(
+            &LpContext {
+                specs,
+                request,
+                models,
+                petro_proxy_lower,
+                petro_proxy_upper,
+            },
+            coals,
+            extras,
+            formulas,
+            objective,
+        );
+    }
     Some((result, ratios))
+}
+
+/// 建 LP 需要的、与煤池无关的那几样输入.
+struct LpContext<'a> {
+    specs: &'a [&'a Spec],
+    request: &'a BlendRequest,
+    models: &'a EvaluatorSet,
+    petro_proxy_lower: Option<f64>,
+    petro_proxy_upper: Option<f64>,
+}
+
+/// 配煤价值 = 每种煤的盈亏平衡到厂价: 列 j 检验数为 0 时的成本 c_j* = −(z₀ + Σ a_rj·z_r).
+///
+/// 只评估的 extra 煤也要算, 所以在"入 LP 的煤 + extra 煤"上重建同一个 LP (同一个
+/// `build_lp`, 不另写一套行), 再加 x_extra ≤ 0 把 extra 列钉死在 0: 最优解与本轮完全
+/// 相同, 对偶仍对应本轮配方, 而 extra 列也有了自己的约束系数. 钉死行的对偶不计入.
+///
+/// 入 LP 煤的列沿用本轮公式 (含煤阶交互对 CSR 的平移); extra 煤不平移 —— 它没进配方,
+/// 平移量本就按配方算, 这里只是近似. 扩展后最优值对不上本轮就整体放弃, 宁缺毋错.
+fn blend_values(
+    context: &LpContext,
+    coals: &[&Coal],
+    extras: &[&Coal],
+    formulas: &HashMap<String, MetricFormula>,
+    objective: f64,
+) -> HashMap<String, f64> {
+    let union: Vec<&Coal> = coals.iter().chain(extras).copied().collect();
+    let mut union_formulas = build_formulas(&union, context.models);
+    let count = coals.len();
+    for (indicator, own) in formulas {
+        if let Some(target) = union_formulas.get_mut(indicator) {
+            target.numerators[..count].copy_from_slice(&own.numerators);
+            target.denominators[..count].copy_from_slice(&own.denominators);
+            target.proxy_coefficients[..count].copy_from_slice(&own.proxy_coefficients);
+        }
+    }
+    let Some((mut problem, _)) = build_lp(
+        &union,
+        context.specs,
+        context.request,
+        &union_formulas,
+        context.models,
+        context.petro_proxy_lower,
+        context.petro_proxy_upper,
+        None,
+    ) else {
+        return HashMap::new();
+    };
+    let priced_rows = problem.a_ub.len();
+    for column in count..union.len() {
+        let mut row = vec![0.0; problem.n];
+        row[column] = 1.0;
+        problem.a_ub.push(row);
+        problem.b_ub.push(0.0);
+    }
+    let Some((_, union_objective, duals)) = problem.solve_with_duals(&problem.c) else {
+        return HashMap::new();
+    };
+    if (union_objective - objective).abs() > FEASIBILITY_TOLERANCE * 10.0 * (1.0 + objective.abs())
+    {
+        return HashMap::new();
+    }
+    union
+        .iter()
+        .enumerate()
+        .map(|(column, coal)| {
+            let rows: f64 = problem.a_ub[..priced_rows]
+                .iter()
+                .zip(&duals[1..])
+                .map(|(row, dual)| row.get(column).copied().unwrap_or(0.0) * dual)
+                .sum();
+            (coal.name.clone(), -(duals[0] + rows))
+        })
+        .collect()
 }
 
 /// 配比 → 成本 / 订单 / 8 项体检. 求最优 ([`solve_once`]) 与验算 ([`evaluate_fixed`])
@@ -1294,6 +1397,7 @@ fn assemble_result(
         coal_values: Vec::new(),
         market_price: None,
         market_price_from_group: false,
+        blend_values: HashMap::new(),
     };
     let blend_value = |indicator: &str| {
         result
@@ -1552,6 +1656,13 @@ impl LpProblem {
 
     /// 同一组约束换一个目标向量求解. 行不复制, 诊断的每次探测都走这里.
     fn solve_with(&self, c: &[f64]) -> Option<(Vec<f64>, f64)> {
+        self.solve_with_duals(c)
+            .map(|(solution, objective, _)| (solution, objective))
+    }
+
+    /// 同 [`Self::solve_with`], 另带回 Clarabel 对偶变量 z (行序: Σx=1, a_ub 各行, x≥0 各行).
+    /// Clarabel 的 KKT 为 c + Aᵀz = 0, 故列 j 的检验数 = c_j + z₀ + Σ a_rj·z_r.
+    fn solve_with_duals(&self, c: &[f64]) -> Option<(Vec<f64>, f64, Vec<f64>)> {
         debug_assert!(
             self.ratio_count <= self.n
                 && c.len() == self.n
@@ -1606,6 +1717,7 @@ impl LpProblem {
             return None;
         }
         let mut solution = solver.solution.x.clone();
+        let duals = solver.solution.z.clone();
         let raw_sum: f64 = solution[..self.ratio_count].iter().sum();
         // 非负性同样受档位列不归一化之累: 最优解 d=0 时内点法从下方逼近, 会落在
         // -1e-8 量级. 下面立刻 max(0.0) 夹回, 故放宽到 FEASIBILITY_TOLERANCE 是安全的;
@@ -1649,7 +1761,7 @@ impl LpProblem {
             .zip(&solution)
             .map(|(coefficient, value)| coefficient * value)
             .sum();
-        valid.then_some((solution, objective))
+        valid.then_some((solution, objective, duals))
     }
 }
 

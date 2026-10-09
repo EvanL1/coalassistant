@@ -113,6 +113,7 @@ fn adjust_coal(coal: &Coal, rules: &[&PriceAdjust]) -> CoalValue {
         fair: 0.0,
         gap: None,
         ratio: None,
+        blend_value: None,
         parts: Vec::new(),
         missing: Vec::new(),
         extrapolated: Vec::new(),
@@ -194,6 +195,9 @@ pub(crate) fn attach(request: &BlendRequest, result: &mut BlendResult) {
     match evaluate(&coals, factor) {
         Ok(eval) => {
             result.coal_values = eval.coal_values;
+            for value in &mut result.coal_values {
+                value.blend_value = result.blend_values.get(&value.name).copied();
+            }
             result.market_price = eval.market;
             result.market_price_from_group = eval.market_from_group;
         }

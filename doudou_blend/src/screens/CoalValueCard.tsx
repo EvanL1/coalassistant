@@ -26,7 +26,13 @@ function gapColor(gap: number): string {
   return gap > 0 ? "var(--c-danger, #b91c1c)" : "var(--c-success, #15803d)";
 }
 
-function CoalValueRow({ value }: { value: CoalValue }) {
+function CoalValueRow({
+  value,
+  showBlendValue,
+}: {
+  value: CoalValue;
+  showBlendValue: boolean;
+}) {
   const missing = value.missing.map(label);
   return (
     <tr>
@@ -54,6 +60,11 @@ function CoalValueRow({ value }: { value: CoalValue }) {
       ) : (
         <td style={{ ...cell, color: "var(--c-text-3)" }}>—</td>
       )}
+      {showBlendValue && (
+        <td style={cell}>
+          {value.blend_value != null ? value.blend_value.toFixed(0) : "—"}
+        </td>
+      )}
     </tr>
   );
 }
@@ -76,6 +87,7 @@ export function CoalValueCard({
     (a, b) => b.points - a.points,
   );
   const pricedCount = values.filter((value) => value.fob != null).length;
+  const showBlendValue = values.some((value) => value.blend_value != null);
   if (values.length === 0) return null;
   const market = result.market_price;
   return (
@@ -91,11 +103,18 @@ export function CoalValueCard({
             <th style={{ ...cell, fontWeight: "normal" }}>质量指数</th>
             <th style={{ ...cell, fontWeight: "normal" }}>按质量应值</th>
             <th style={{ ...cell, fontWeight: "normal" }}>差额</th>
+            {showBlendValue && (
+              <th style={{ ...cell, fontWeight: "normal" }}>配煤价值 (到厂)</th>
+            )}
           </tr>
         </thead>
         <tbody>
           {values.map((value) => (
-            <CoalValueRow key={value.name} value={value} />
+            <CoalValueRow
+              key={value.name}
+              value={value}
+              showBlendValue={showBlendValue}
+            />
           ))}
         </tbody>
       </table>
@@ -110,6 +129,12 @@ export function CoalValueCard({
         {drifted && " · 有煤用旧报价推算, 按推算后的出厂价对比"} ·
         未录出厂价的煤只给估算价 · 单位 元/吨
       </p>
+      {showBlendValue && (
+        <p style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 4 }}>
+          配煤价值按本次合同与煤池算: 到厂价低于配煤价值就会被选进配方,
+          已入选的煤即其现价; 估算价看市场, 配煤价值看你这一炉.
+        </p>
+      )}
     </div>
   );
 }
