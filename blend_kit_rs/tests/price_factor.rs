@@ -129,6 +129,28 @@ fn test_price_factor_does_not_change_solution() {
     }
 }
 
+/// extra_coals: 没报价、不进 LP 的煤也打分给估算价; 配方与不带时完全相同.
+#[test]
+fn test_extra_coals_scored_but_not_blended() {
+    let mut factor = default_factor();
+    factor["market_price"] = json!(2000.0);
+    // 质量远好于池中所有煤; 若误进 LP (价格 0) 必然被选中.
+    factor["extra_coals"] = json!([{
+        "name": "无价好煤", "fob": 0.0, "frt": 0.0,
+        "props": {"S": 0.5, "A": 7.0, "V": 24.0, "G": 95.0, "Y": 25.0, "petro": 0.1, "CSR": 75.0, "M": 9.0}
+    }]);
+    let plain = run(&request(1.5, None));
+    let result = run(&request(1.5, Some(factor)));
+    assert_eq!(result["recipe"], plain["recipe"]);
+    let values = result["coal_values"].as_array().unwrap();
+    assert_eq!(values.len(), 5);
+    let extra = values.iter().find(|v| v["name"] == "无价好煤").unwrap();
+    assert!(extra["fob"].is_null() && extra["gap"].is_null() && extra["ratio"].is_null());
+    assert!(extra["points"].as_f64().unwrap() > 1000.0);
+    let fair = extra["fair"].as_f64().unwrap();
+    assert!((fair - 2.0 * extra["points"].as_f64().unwrap()).abs() < 1e-9);
+}
+
 #[test]
 fn test_invalid_price_factor_does_not_fail_solve() {
     let mut factor = default_factor();

@@ -754,6 +754,30 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     expect("price_factor" in plain).toBe(false);
   });
 
+  it("没报价的煤只进 price_factor.extra_coals, 不进求解煤池", async () => {
+    mocks.loadMaster.mockResolvedValue({
+      ...master,
+      coals: [
+        ...master.coals,
+        { name: "无价煤", status: "verified", props: { S: 0.8 }, fob: null, frt: 50 },
+      ],
+      price_factor: priceFactor,
+    });
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+    const sent = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
+    expect(sent.coals.map((c: { name: string }) => c.name)).toEqual(["测试煤"]);
+    expect(sent.price_factor.extra_coals).toEqual([
+      { name: "无价煤", props: { S: 0.8 }, fob: 0, frt: 0 },
+    ]);
+    expect("description" in sent.price_factor).toBe(true);
+  });
+
   it("结果带 coal_values 时显示煤价对比卡, 不带时不显示", async () => {
     const result = makeResult(1_000, 3_700);
     result.coal_values = coalValues;

@@ -357,7 +357,7 @@ pub struct PriceAdjust {
 }
 
 /// 价格因子配置.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PriceFactor {
     #[serde(default)]
     pub adjusts: Vec<PriceAdjust>,
@@ -365,6 +365,9 @@ pub struct PriceFactor {
     /// None = 由请求煤池反推: 市场价 = 1000 × mean(报价 / 质量指数).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub market_price: Option<f64>,
+    /// 只评估、不进 LP 的煤 (如没录报价的煤): 照样打分给估算价, 不参与配方.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_coals: Vec<Coal>,
 }
 
 /// 单项升贴水金额.
@@ -379,18 +382,18 @@ pub struct PricePart {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CoalValue {
     pub name: String,
-    /// 报价 (出厂价).
-    pub fob: f64,
+    /// 报价 (出厂价). None = 没报价, 只有估算价.
+    pub fob: Option<f64>,
     /// 质量升贴水合计 (点).
     pub adjustment: f64,
     /// 质量指数 = 1000 + 升贴水; 标准品 = 1000 点.
     pub points: f64,
     /// 按质量应值 = 市场价/1000 × 质量指数 (元/吨).
     pub fair: f64,
-    /// 差额 = fob − fair; >0 偏贵, <0 划算.
-    pub gap: f64,
-    /// fob / fair; fair ≤ 0 时记 0.
-    pub ratio: f64,
+    /// 差额 = fob − fair; >0 偏贵, <0 划算. 没报价为 None.
+    pub gap: Option<f64>,
+    /// fob / fair; fair ≤ 0 时记 0. 没报价为 None.
+    pub ratio: Option<f64>,
     #[serde(default)]
     pub parts: Vec<PricePart>,
     /// 缺该指标而跳过的规则.

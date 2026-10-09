@@ -301,6 +301,22 @@ export function toBlendCoal(
   };
 }
 
+/**
+ * 只做煤价评估 (价格因子 extra_coals) 的煤: 启用了但缺报价/运费, 进不了 LP,
+ * 照样按质量打分给估算价. fob 为 0 表示没报价 (有报价但缺运费的仍带上报价).
+ */
+export function toPriceOnlyCoal(coal: ResolvedCoal): Coal | null {
+  if (coal.readiness !== "missing_fob" && coal.readiness !== "missing_frt") {
+    return null;
+  }
+  return {
+    name: coal.name,
+    props: { ...coal.props },
+    fob: coal.fob_drifted ?? coal.fob ?? 0,
+    frt: 0,
+  };
+}
+
 /** 本次求解所用价格的可信度摘要. 无论是否发生推算都会返回. */
 export interface PriceStatus {
   /** 参与求解的煤里最旧的报价日; null = 无法判定 */

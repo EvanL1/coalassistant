@@ -19,6 +19,7 @@ import {
   resolveCoalPool,
   summarizePriceStatus,
   toBlendCoal,
+  toPriceOnlyCoal,
 } from "../domain/resolvedCoal";
 import {
   extractOrphanedGuarantees,
@@ -344,7 +345,17 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         total_quantity: totalQuantity,
         truncate_decimal: true,
         // 价格因子系数表来自 master (数据不是代码); 只做煤价评估, 不影响配方.
-        ...(master.price_factor ? { price_factor: master.price_factor } : {}),
+        // 没报价的煤进不了 LP, 放进 extra_coals 只打分给估算价.
+        ...(master.price_factor
+          ? {
+              price_factor: {
+                ...master.price_factor,
+                extra_coals: pool
+                  .map(toPriceOnlyCoal)
+                  .filter((coal) => coal != null),
+              },
+            }
+          : {}),
       };
 
       const json = await backend.solveJson(JSON.stringify(request));

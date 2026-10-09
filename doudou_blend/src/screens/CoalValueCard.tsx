@@ -44,12 +44,16 @@ function CoalValueRow({ value }: { value: CoalValue }) {
           <span style={tag}>{`缺 ${missing.join("、")}`}</span>
         )}
       </td>
-      <td style={cell}>{value.fob.toFixed(0)}</td>
+      <td style={cell}>{value.fob != null ? value.fob.toFixed(0) : "—"}</td>
       <td style={cell}>{value.points.toFixed(0)}</td>
       <td style={cell}>{value.fair.toFixed(0)}</td>
-      <td style={{ ...cell, color: gapColor(value.gap) }}>
-        {gapText(value.gap)}
-      </td>
+      {value.gap != null ? (
+        <td style={{ ...cell, color: gapColor(value.gap) }}>
+          {gapText(value.gap)}
+        </td>
+      ) : (
+        <td style={{ ...cell, color: "var(--c-text-3)" }}>—</td>
+      )}
     </tr>
   );
 }
@@ -67,7 +71,11 @@ export function CoalValueCard({
   result: BlendResult;
   drifted?: boolean;
 }) {
-  const values = result.coal_values ?? [];
+  // 按质量指数从高到低排, 好煤在上.
+  const values = [...(result.coal_values ?? [])].sort(
+    (a, b) => b.points - a.points,
+  );
+  const pricedCount = values.filter((value) => value.fob != null).length;
   if (values.length === 0) return null;
   const market = result.market_price;
   return (
@@ -94,11 +102,13 @@ export function CoalValueCard({
       <p style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 8 }}>
         {market != null &&
           `市场价 ${market.toFixed(0)} 元/吨 = 标准品 1000 点 (${
-            result.market_price_from_group ? "由本次煤池反推" : "指定"
+            result.market_price_from_group
+              ? `由 ${pricedCount} 种有报价的煤反推`
+              : "指定"
           }) · `}
         只用出厂价, 不含运费
         {drifted && " · 有煤用旧报价推算, 按推算后的出厂价对比"} ·
-        未录出厂价的煤不参与对比 · 单位 元/吨
+        未录出厂价的煤只给估算价 · 单位 元/吨
       </p>
     </div>
   );

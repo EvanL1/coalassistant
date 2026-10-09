@@ -71,7 +71,7 @@ describe("CoalValueCard", () => {
     expect(screen.getByText("1027")).toBeTruthy();
     expect(screen.getByText("划算 12")).toBeTruthy();
     expect(
-      screen.getByText(/市场价 2000 元\/吨 = 标准品 1000 点 \(由本次煤池反推\)/),
+      screen.getByText(/市场价 2000 元\/吨 = 标准品 1000 点 \(由 2 种有报价的煤反推\)/),
     ).toBeTruthy();
     expect(screen.getByText(/只用出厂价, 不含运费/)).toBeTruthy();
   });
@@ -112,10 +112,33 @@ describe("CoalValueCard 口径与标签", () => {
     expect(screen.getByText(/按推算后的出厂价对比/)).toBeTruthy();
   });
 
-  it("无推算时不出推算说明; 脚注说明未录出厂价的煤不参与", () => {
+  it("无推算时不出推算说明", () => {
     render(<CoalValueCard result={result({ coal_values: values })} />);
     expect(screen.queryByText(/按推算后的出厂价对比/)).toBeNull();
-    expect(screen.getByText(/未录出厂价的煤不参与对比/)).toBeTruthy();
+  });
+
+  it("没报价的煤出厂价与差额显示 —, 照样给估算价; 按质量指数从高到低排", () => {
+    render(
+      <CoalValueCard
+        result={result({
+          coal_values: [
+            value("新星", 2100, 2000),
+            value("无价煤", 0, 2400, { fob: null, gap: null, ratio: null }),
+          ],
+          market_price: 2000,
+          market_price_from_group: true,
+        })}
+      />,
+    );
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(rows.map((row) => row.firstElementChild?.textContent)).toEqual([
+      "无价煤",
+      "新星",
+    ]);
+    expect(rows[0].textContent).toContain("2400");
+    expect(screen.getAllByText("—")).toHaveLength(2);
+    expect(screen.getByText(/由 1 种有报价的煤反推/)).toBeTruthy();
+    expect(screen.getByText(/未录出厂价的煤只给估算价/)).toBeTruthy();
   });
 
   it("取整后持平用中性色, 不按正负号着色", () => {

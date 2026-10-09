@@ -162,6 +162,8 @@ export interface PriceFactor {
   adjusts: PriceAdjust[];
   /** 市场公开价: 标准品 (1000 点) 对应的元/吨; 缺省 = 由请求煤池反推. */
   market_price?: number | null;
+  /** 只评估、不进 LP 的煤 (如没录报价的煤): 照样打分给估算价, 不参与配方. */
+  extra_coals?: Coal[];
 }
 
 /** master 里的价格因子系数表, 多一段出处说明. */
@@ -177,15 +179,17 @@ export interface PricePart {
 /** 单种煤的价格评估 (只用出厂价, 不含运费). gap > 0 偏贵, < 0 划算. */
 export interface CoalValue {
   name: string;
-  fob: number;
+  /** 出厂价; null = 没报价, 只有估算价. */
+  fob: number | null;
   /** 质量升贴水合计 (点). */
   adjustment: number;
   /** 质量指数 = 1000 + 升贴水; 标准品 = 1000 点. */
   points: number;
   /** 应值 = 市场价/1000 × 质量指数 (元/吨). */
   fair: number;
-  gap: number;
-  ratio: number;
+  /** 没报价为 null. */
+  gap: number | null;
+  ratio: number | null;
   parts: PricePart[];
   missing: string[];
   extrapolated: string[];
