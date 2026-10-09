@@ -379,6 +379,26 @@ pub(crate) fn formula_for(indicator: &str, coals: &[&Coal]) -> Option<MetricForm
     Some(MetricFormula::linear(proxy, method, verified))
 }
 
+/// 单煤边界校验: 煤名非空、价格与指标为非负有限数、指标已知、采购条款合法.
+/// 煤池与价格因子的 extra_coals 共用, 重名由调用方按各自范围判.
+pub(crate) fn validate_coal(coal: &Coal) -> Result<(), String> {
+    if coal.name.trim().is_empty() {
+        return Err("煤名不能为空".into());
+    }
+    if !coal.fob.is_finite() || !coal.frt.is_finite() || coal.fob < 0.0 || coal.frt < 0.0 {
+        return Err(format!("{} 的价格必须是非负有限数", coal.name));
+    }
+    if coal.props.iter().any(|(indicator, value)| {
+        !INDICATORS.contains(&indicator.as_str()) || !value.is_finite() || *value < 0.0
+    }) {
+        return Err(format!("{} 含未知指标、负值或非法数值", coal.name));
+    }
+    if let Some(terms) = &coal.purchase_terms {
+        validate_purchase_terms(&coal.name, terms)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_request(request: &BlendRequest) -> Result<(), String> {
     if request.coals.is_empty() {
         return Err("煤池不能为空".into());
@@ -392,22 +412,9 @@ pub(crate) fn validate_request(request: &BlendRequest) -> Result<(), String> {
 
     let mut names = std::collections::HashSet::new();
     for coal in &request.coals {
-        if coal.name.trim().is_empty() {
-            return Err("煤名不能为空".into());
-        }
+        validate_coal(coal)?;
         if !names.insert(coal.name.as_str()) {
             return Err(format!("煤名重复: {}", coal.name));
-        }
-        if !coal.fob.is_finite() || !coal.frt.is_finite() || coal.fob < 0.0 || coal.frt < 0.0 {
-            return Err(format!("{} 的价格必须是非负有限数", coal.name));
-        }
-        if coal.props.iter().any(|(indicator, value)| {
-            !INDICATORS.contains(&indicator.as_str()) || !value.is_finite() || *value < 0.0
-        }) {
-            return Err(format!("{} 含未知指标、负值或非法数值", coal.name));
-        }
-        if let Some(terms) = &coal.purchase_terms {
-            validate_purchase_terms(&coal.name, terms)?;
         }
     }
 

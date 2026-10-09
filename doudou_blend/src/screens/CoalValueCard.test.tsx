@@ -155,6 +155,7 @@ describe("CoalValueCard 口径与标签", () => {
     expect(screen.getByText("配煤价值 (到厂)")).toBeTruthy();
     expect(screen.getByText("2163")).toBeTruthy();
     expect(screen.getByText(/到厂价低于配煤价值就会被选进配方/)).toBeTruthy();
+    expect(screen.getByText(/只按少量掺入算/)).toBeTruthy();
     cleanup();
 
     render(<CoalValueCard result={result({ coal_values: values })} />);

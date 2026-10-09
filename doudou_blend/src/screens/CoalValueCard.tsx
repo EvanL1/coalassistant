@@ -132,7 +132,8 @@ export function CoalValueCard({
       {showBlendValue && (
         <p style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 4 }}>
           配煤价值按本次合同与煤池算: 到厂价低于配煤价值就会被选进配方,
-          已入选的煤即其现价; 估算价看市场, 配煤价值看你这一炉.
+          已入选的煤即其现价; 只按少量掺入算, 买多了价值会下降. 估算价看市场,
+          配煤价值看你这一炉.
         </p>
       )}
     </div>

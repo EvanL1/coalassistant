@@ -128,9 +128,11 @@ fn solve_core(
     let active_specs: Vec<&Spec> = request.specs.iter().filter(|spec| spec.enabled).collect();
     let mut coals = request.coals.clone();
     // 价格因子里只评估、不进 LP 的煤: 只用来算配煤价值, 与煤池同样预处理.
+    // 校验不过就不用 (price_factor::attach 会告警), 配方不受影响.
     let mut extras: Vec<Coal> = request
         .price_factor
         .as_ref()
+        .filter(|_| crate::price_factor::validate_extra_coals(request).is_ok())
         .map(|factor| factor.extra_coals.clone())
         .unwrap_or_default();
 
@@ -1127,6 +1129,9 @@ struct LpContext<'a> {
 ///
 /// 入 LP 煤的列沿用本轮公式 (含煤阶交互对 CSR 的平移); extra 煤不平移 —— 它没进配方,
 /// 平移量本就按配方算, 这里只是近似. 扩展后最优值对不上本轮就整体放弃, 宁缺毋错.
+///
+/// 这是**边际**价值 (少量掺入时成立), 买多了约束松开, 每吨价值会下降. 对偶退化时
+/// (如没有约束卡住, 所有煤都等于最便宜那种的价) 对偶解不唯一, 内点法给的是解集中部的一个.
 fn blend_values(
     context: &LpContext,
     coals: &[&Coal],

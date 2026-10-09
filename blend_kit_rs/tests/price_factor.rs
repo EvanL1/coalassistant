@@ -235,6 +235,39 @@ fn test_extra_coal_blend_value_is_break_even() {
     }
 }
 
+/// extra_coals 与煤池同一套边界校验: 重名 (含与煤池重名) 或非法数值 → 只告警、不做煤价对比,
+/// 配方照常 (与价格因子配置无效同一约定).
+#[test]
+fn test_invalid_extra_coals_warn_without_breaking_solve() {
+    let good = |name: &str| {
+        json!({"name": name, "fob": 0.0, "frt": 0.0,
+               "props": {"S": 1.0, "A": 9.0, "V": 24.0, "G": 90.0, "Y": 20.0, "petro": 0.1, "CSR": 66.0, "M": 10.0}})
+    };
+    let mut negative = good("负值煤");
+    negative["props"]["S"] = json!(-3.0);
+    let plain = run(&request(1.5, None));
+    for (case, extras) in [
+        ("与煤池重名", json!([good("新星")])),
+        ("extra 之间重名", json!([good("甲"), good("甲")])),
+        ("负指标", json!([negative])),
+        ("空煤名", json!([good(" ")])),
+    ] {
+        let mut factor = default_factor();
+        factor["extra_coals"] = extras;
+        let result = run(&request(1.5, Some(factor)));
+        assert_eq!(result["ok"], true, "{case}");
+        assert_eq!(result["recipe"], plain["recipe"], "{case}");
+        assert_eq!(result["coal_values"], json!([]), "{case}");
+        let warnings = result["warnings"].as_array().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("价格因子")),
+            "{case}: {warnings:?}"
+        );
+    }
+}
+
 #[test]
 fn test_invalid_price_factor_does_not_fail_solve() {
     let mut factor = default_factor();

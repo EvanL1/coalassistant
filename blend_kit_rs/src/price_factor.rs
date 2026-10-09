@@ -15,10 +15,13 @@
 //!
 //! 为什么用点而不是元: 升贴水随行情按比例缩放 —— 市场价翻倍, 好煤坏煤的价差跟着翻倍,
 //! 系数表不用改。1000 是贩煤人直觉里的整数基准 ("这煤 1050 点" = 比标准品好 5%)。
+use std::collections::HashSet;
+
 use crate::model::{
     BlendRequest, BlendResult, Coal, CoalValue, Direction, PriceAdjust, PriceFactor, PricePart,
     INDICATORS,
 };
+use crate::quality::validate_coal;
 
 /// 一次价格因子评估的结果.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -180,11 +183,33 @@ pub fn evaluate(coals: &[Coal], factor: &PriceFactor) -> Result<PriceEvaluation,
     })
 }
 
+/// extra_coals 的边界校验: 与煤池同一套单煤规则, 且煤名在 煤池 ∪ extra_coals 内唯一
+/// (配煤价值按煤名对回, 重名会张冠李戴). 不带价格因子视为通过.
+pub(crate) fn validate_extra_coals(request: &BlendRequest) -> Result<(), String> {
+    let Some(factor) = &request.price_factor else {
+        return Ok(());
+    };
+    let mut names: HashSet<&str> = request.coals.iter().map(|c| c.name.as_str()).collect();
+    for coal in &factor.extra_coals {
+        validate_coal(coal)?;
+        if !names.insert(coal.name.as_str()) {
+            return Err(format!("煤名重复: {}", coal.name));
+        }
+    }
+    Ok(())
+}
+
 /// 把评估结果挂到求解结果上 (有解无解都挂). 配置无效只加一条 warning, 不影响求解.
 pub(crate) fn attach(request: &BlendRequest, result: &mut BlendResult) {
     let Some(factor) = &request.price_factor else {
         return;
     };
+    if let Err(e) = validate_extra_coals(request) {
+        result
+            .warnings
+            .push(format!("价格因子配置无效, 未做煤价对比: {e}"));
+        return;
+    }
     // 评估对象 = 进 LP 的煤 + 只评估的 extra_coals (按此顺序).
     let coals: Vec<Coal> = request
         .coals
