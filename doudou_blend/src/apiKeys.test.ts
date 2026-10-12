@@ -50,8 +50,23 @@ describe("数据更新密钥管理", () => {
       credentials: "same-origin",
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "  张三  " }),
+      body: JSON.stringify({ name: "  张三  ", scope: "data" }),
     });
+  });
+
+  it("生成手机 Agent 用的密钥时带上 mcp 用途", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      jsonResponse({
+        ok: true,
+        plaintext: "dk_x",
+        key: { id: "1", name: "李四-手机", scope: "mcp", key_prefix: "dk_x",
+               created_at: "2026-10-12T00:00:00Z", last_used_at: null, revoked_at: null },
+      }),
+    );
+    await createApiKey("李四-手机", "mcp");
+    expect(vi.mocked(fetch).mock.calls[0][1]?.body).toBe(
+      JSON.stringify({ name: "李四-手机", scope: "mcp" }),
+    );
   });
 
   it("服务端返回的列表里不应含明文或哈希字段", async () => {

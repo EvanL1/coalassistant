@@ -103,6 +103,11 @@ cargo run --release --bin doudou -- --profile admin login <账号>   # 线上命
 `master`、`history [measured <id>]`、`admin settings [--k|--off]|calibration|csr-model|keys|overrides`、`api <METHOD> <路径>`。
 `blend` 只在本机用内置 master 离线算; 要和用户看到的一致, 用 `doudou`。
 
+**MCP 入口 `/mcp`** (手机 Agent, 如 Kimi): 无状态 JSON-RPC, 工具 `today_blend` / `check_ratios` / `find_coal` /
+`get_contract`。鉴权用后台生成的 **mcp 用途**密钥 (`data_api_keys.scope`, 只读+求解, 写不了煤库; data 用途的写煤库密钥
+进不来)。求解请求由 `src/today.rs` 按线上保存的合同与煤池组装 —— 规则对照前端 `domain/resolvedCoal.ts`,
+改了前端的煤池规则要同步改这里。接入说明见 `docs/mcp-agent.md`。
+
 **WASM package** (standalone — not needed for the app):
 ```bash
 cd blend_kit_wasm

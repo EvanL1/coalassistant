@@ -25,6 +25,8 @@ mod api_key;
 mod coal_index;
 mod database;
 mod master_data;
+mod mcp;
+mod today;
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const TEXT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
@@ -244,6 +246,9 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         .route("/api/history/count", get(count_history))
         .route("/api/history/import", post(import_history))
         .route("/api/history/{id}/measured", patch(set_measured_quality))
+        // MCP (手机 Agent): mcp 用途密钥, 只读 + 求解
+        .route("/mcp", post(mcp_post).get(mcp_get))
+        .route("/mcp/{key}", post(mcp_post_with_key).get(mcp_get))
         .fallback_service(static_files)
         .with_state(state)
         .layer(CompressionLayer::new())
@@ -770,7 +775,7 @@ async fn check_data_api_key(
 
     let pool = require_database(state)?;
     let hash = api_key::hash_key(presented);
-    match database::authenticate_api_key(pool, &hash).await {
+    match database::authenticate_api_key(pool, &hash, "data").await {
         Ok(Some(name)) => Ok(name),
         Ok(None) => Err(unauthorized()),
         Err(error) => {
@@ -790,6 +795,13 @@ async fn check_data_api_key(
 #[derive(Debug, Deserialize)]
 struct CreateKeyRequest {
     name: String,
+    /// 用途: data (写煤库, 默认) 或 mcp (手机 Agent 只读 + 求解).
+    #[serde(default = "default_key_scope")]
+    scope: String,
+}
+
+fn default_key_scope() -> String {
+    "data".into()
 }
 
 /// POST /api/admin/keys —— 生成一把新密钥. 明文只在这一次响应里出现.
@@ -812,15 +824,30 @@ async fn create_api_key(
         )
             .into_response();
     }
+    if !matches!(payload.scope.as_str(), "data" | "mcp") {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "ok": false, "reason": "scope 只能是 data 或 mcp" })),
+        )
+            .into_response();
+    }
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
     };
 
     let generated = api_key::generate();
-    match database::create_api_key(pool, name, &generated.hash, &generated.prefix).await {
+    match database::create_api_key(
+        pool,
+        name,
+        &payload.scope,
+        &generated.hash,
+        &generated.prefix,
+    )
+    .await
+    {
         Ok(row) => {
-            tracing::info!(name, "已生成数据更新密钥");
+            tracing::info!(name, scope = %payload.scope, "已生成密钥");
             (
                 StatusCode::CREATED,
                 Json(json!({
@@ -991,6 +1018,116 @@ async fn delete_coal_override(
         Ok(removed) => Json(json!({ "ok": true, "removed": removed })).into_response(),
         Err(error) => database_error(error),
     }
+}
+
+// ---------------------------------------------------------------------------
+// MCP 入口 (手机 Agent): 用途为 mcp 的密钥, 只读 + 求解, 写不了煤库
+// ---------------------------------------------------------------------------
+
+/// 从请求头取 MCP 密钥: `Authorization: Bearer <key>` 或 `X-API-Key`.
+fn mcp_key_from_headers(headers: &HeaderMap) -> String {
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim);
+    let api_key = headers
+        .get(DATA_API_KEY_HEADER)
+        .and_then(|value| value.to_str().ok());
+    bearer.or(api_key).unwrap_or_default().to_string()
+}
+
+/// POST /mcp —— 密钥放在请求头里.
+async fn mcp_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    mcp_serve(&state, &mcp_key_from_headers(&headers), &body).await
+}
+
+/// POST /mcp/{key} —— 给只能填一个地址、设不了请求头的客户端. 生产日志级别为 info,
+/// 请求路径不进日志; 密钥泄露时在管理端销毁即可.
+async fn mcp_post_with_key(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    mcp_serve(&state, &key, &body).await
+}
+
+/// GET /mcp —— 本服务不开 SSE 推送流, 按规范回 405.
+async fn mcp_get() -> Response {
+    (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")]).into_response()
+}
+
+async fn mcp_serve(state: &AppState, presented: &str, body: &[u8]) -> Response {
+    let unauthorized = || {
+        tracing::warn!("MCP 密钥校验失败");
+        (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+            r#"{"ok":false,"reason":"MCP 密钥无效或已销毁 (须为管理端生成的 mcp 用途密钥)"}"#,
+        )
+            .into_response()
+    };
+    if presented.is_empty() {
+        return unauthorized();
+    }
+    let pool = match require_database(state) {
+        Ok(pool) => pool,
+        Err(response) => return *response,
+    };
+    match database::authenticate_api_key(pool, &api_key::hash_key(presented), "mcp").await {
+        Ok(Some(_)) => {}
+        Ok(None) => return unauthorized(),
+        Err(error) => return database_error(error),
+    }
+
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Json(json!({
+            "jsonrpc": "2.0", "id": null,
+            "error": { "code": -32700, "message": "请求体不是合法 JSON" }
+        }))
+        .into_response();
+    };
+    let (messages, batch) = match parsed {
+        serde_json::Value::Array(list) => (list, true),
+        single => (vec![single], false),
+    };
+    let context = if messages.iter().any(mcp::needs_context) {
+        match load_mcp_context(state, pool).await {
+            Ok(context) => Some(context),
+            Err(error) => return database_error(error),
+        }
+    } else {
+        None
+    };
+    let mut replies: Vec<serde_json::Value> = messages
+        .iter()
+        .filter_map(|message| mcp::handle(message, context.as_ref()))
+        .collect();
+    match (replies.is_empty(), batch) {
+        // 全是通知: 规范要求 202, 不带内容
+        (true, _) => StatusCode::ACCEPTED.into_response(),
+        (false, true) => Json(serde_json::Value::Array(replies)).into_response(),
+        (false, false) => Json(replies.remove(0)).into_response(),
+    }
+}
+
+/// 求解要用的线上数据: 合并后的煤库、网页账号保存的合同与煤池、现货指数最新值、煤阶交互 k.
+async fn load_mcp_context(state: &AppState, pool: &PgPool) -> Result<mcp::Context, sqlx::Error> {
+    let master = serde_json::from_str(&merged_master_json(state).await).unwrap_or_default();
+    let storage = database::load_storage(pool, &state.auth.username).await?;
+    let market_price = coal_index::get_spot_series()
+        .await
+        .and_then(|points| points.last().map(|point| point.price));
+    Ok(mcp::Context {
+        master,
+        storage,
+        market_price,
+        rank_k: state.rank_k(),
+    })
 }
 
 #[cfg(test)]
@@ -1446,6 +1583,36 @@ mod tests {
     // 密钥现在存在数据库里 (管理端生成/销毁), 所以"密钥有效"这条路径需要真库,
     // 留给部署后的手工验证。以下用例覆盖的是**不需要库也必须成立**的部分:
     // 缺密钥、会话冒充、畸形请求体不得绕过鉴权。
+
+    /// MCP: 没带密钥 401 (碰库之前); 网页会话 Cookie 不算; GET 不开推送流, 回 405.
+    #[tokio::test]
+    async fn test_mcp_requires_key_and_rejects_get() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let response = test_app()
+            .oneshot(key_request("POST", "/mcp", None, Body::from(body)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header(header::COOKIE, "doudou_session=test-session-token")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = test_app()
+            .oneshot(Request::builder().uri("/mcp").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
 
     /// 没带 X-API-Key 一律 401, 且必须发生在碰库之前.
     #[tokio::test]

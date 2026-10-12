@@ -232,7 +232,7 @@ describe("AdminScreen 页面", () => {
   it("包含 API 密钥卡片与退出按钮", async () => {
     render(<AdminScreen />);
     expect(screen.getByText("豆哥配煤 · 后台")).toBeTruthy();
-    await screen.findByText("数据更新密钥");
+    await screen.findByText("API 密钥");
 
     fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
     expect(mocks.logout).toHaveBeenCalledTimes(1);
