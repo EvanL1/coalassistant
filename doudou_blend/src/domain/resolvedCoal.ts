@@ -102,7 +102,10 @@ export function resolveCoal(
   invalidOverride ||= safePref?.invalid_data === true;
 
   let requestedEnabled = base.status === "verified";
-  if (safePref?.enabled != null) {
+  // 已停用 (archived) 是煤矿本身的状态, 一票否决: 用户偏好里的启用拉不回来.
+  if (base.status === "archived") {
+    requestedEnabled = false;
+  } else if (safePref?.enabled != null) {
     if (typeof safePref.enabled === "boolean") {
       requestedEnabled = safePref.enabled;
     } else {
