@@ -83,61 +83,61 @@
   "coals": [
     {
       "name": "临北", "region": "山西吕梁", "coal_type": "焦煤", "form": "精煤",
-      "status": "verified",
+      "status": "active",
       "props": {
         "S": 2.0, "A": 6.0, "V": 22, "G": 93,
         "Y": 17, "petro": 0.08, "CSR": 70, "M": 11
       },
-      "fob": 1425, "frt": 25,
+      "frt": 25,
       "confidence": {
         "S": "high", "A": "high", "V": "high", "G": "high",
         "Y": "medium", "petro": "low", "CSR": "high", "M": "medium",
-        "fob": "high", "frt": "high"
+        "frt": "high"
       },
-      "note": "用户主力煤. 最新出厂价 1425."
+      "note": "用户主力煤."
     },
     {
       "name": "古交浮精", "region": "山西古交", "coal_type": "焦煤", "form": "浮选精煤",
-      "status": "verified",
+      "status": "active",
       "props": {
         "S": 1.1, "A": 13.5, "V": 21, "G": 80,
         "Y": 10, "petro": 0.07, "CSR": 50, "M": 23
       },
-      "fob": 970, "frt": 35,
+      "frt": 35,
       "confidence": {
         "S": "high", "A": "high", "V": "high", "G": "high",
         "Y": "medium", "petro": "low", "CSR": "high", "M": "high",
-        "fob": "high", "frt": "high"
+        "frt": "high"
       },
       "note": "古交的浮选精煤. 区别于原 '古交' (煤泥, 已 archived). M=23 高水分."
     },
     {
       "name": "豹子沟", "region": "山西", "coal_type": "焦煤", "form": "精煤",
-      "status": "verified",
+      "status": "active",
       "props": {
         "S": 3.8, "A": 11.0, "V": 24, "G": 92,
         "Y": 19, "petro": 0.13, "CSR": 64, "M": 11
       },
-      "fob": 1280, "frt": 50,
+      "frt": 50,
       "confidence": {
         "S": "high", "A": "high", "V": "high", "G": "high",
         "Y": "high", "petro": "low", "CSR": "low", "M": "medium",
-        "fob": "high", "frt": "high"
+        "frt": "high"
       },
       "note": "用户主力煤. CSR 是估值, Y 已确认."
     },
     {
       "name": "大佛寺", "region": "山西", "coal_type": "焦煤", "form": "精煤",
-      "status": "verified",
+      "status": "active",
       "props": {
         "S": 3.0, "A": 8.5, "V": 18, "G": 75,
         "Y": 12, "petro": 0.11, "CSR": 58, "M": 11
       },
-      "fob": 1150, "frt": 15,
+      "frt": 15,
       "confidence": {
         "S": "high", "A": "high", "V": "high", "G": "high",
         "Y": "medium", "petro": "low", "CSR": "low", "M": "medium",
-        "fob": "high", "frt": "high",
+        "frt": "high",
         "CSR": "spec"
       },
       "note": "用户主力煤. CSR/Y 是估值."
