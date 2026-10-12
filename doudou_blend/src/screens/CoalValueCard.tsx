@@ -26,7 +26,13 @@ function gapColor(gap: number): string {
   return gap > 0 ? "var(--c-danger, #b91c1c)" : "var(--c-success, #15803d)";
 }
 
-function CoalValueRow({ value }: { value: CoalValue }) {
+function CoalValueRow({
+  value,
+  showBlendValue,
+}: {
+  value: CoalValue;
+  showBlendValue: boolean;
+}) {
   const missing = value.missing.map(label);
   return (
     <tr>
@@ -44,12 +50,21 @@ function CoalValueRow({ value }: { value: CoalValue }) {
           <span style={tag}>{`缺 ${missing.join("、")}`}</span>
         )}
       </td>
-      <td style={cell}>{value.fob.toFixed(0)}</td>
+      <td style={cell}>{value.fob != null ? value.fob.toFixed(0) : "—"}</td>
       <td style={cell}>{value.points.toFixed(0)}</td>
       <td style={cell}>{value.fair.toFixed(0)}</td>
-      <td style={{ ...cell, color: gapColor(value.gap) }}>
-        {gapText(value.gap)}
-      </td>
+      {value.gap != null ? (
+        <td style={{ ...cell, color: gapColor(value.gap) }}>
+          {gapText(value.gap)}
+        </td>
+      ) : (
+        <td style={{ ...cell, color: "var(--c-text-3)" }}>—</td>
+      )}
+      {showBlendValue && (
+        <td style={cell}>
+          {value.blend_value != null ? value.blend_value.toFixed(0) : "—"}
+        </td>
+      )}
     </tr>
   );
 }
@@ -67,7 +82,12 @@ export function CoalValueCard({
   result: BlendResult;
   drifted?: boolean;
 }) {
-  const values = result.coal_values ?? [];
+  // 按质量指数从高到低排, 好煤在上.
+  const values = [...(result.coal_values ?? [])].sort(
+    (a, b) => b.points - a.points,
+  );
+  const pricedCount = values.filter((value) => value.fob != null).length;
+  const showBlendValue = values.some((value) => value.blend_value != null);
   if (values.length === 0) return null;
   const market = result.market_price;
   return (
@@ -83,23 +103,39 @@ export function CoalValueCard({
             <th style={{ ...cell, fontWeight: "normal" }}>质量指数</th>
             <th style={{ ...cell, fontWeight: "normal" }}>按质量应值</th>
             <th style={{ ...cell, fontWeight: "normal" }}>差额</th>
+            {showBlendValue && (
+              <th style={{ ...cell, fontWeight: "normal" }}>配煤价值 (到厂)</th>
+            )}
           </tr>
         </thead>
         <tbody>
           {values.map((value) => (
-            <CoalValueRow key={value.name} value={value} />
+            <CoalValueRow
+              key={value.name}
+              value={value}
+              showBlendValue={showBlendValue}
+            />
           ))}
         </tbody>
       </table>
       <p style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 8 }}>
         {market != null &&
           `市场价 ${market.toFixed(0)} 元/吨 = 标准品 1000 点 (${
-            result.market_price_from_group ? "由本次煤池反推" : "指定"
+            result.market_price_from_group
+              ? `由 ${pricedCount} 种有报价的煤反推`
+              : "指定"
           }) · `}
         只用出厂价, 不含运费
         {drifted && " · 有煤用旧报价推算, 按推算后的出厂价对比"} ·
-        未录出厂价的煤不参与对比 · 单位 元/吨
+        未录出厂价的煤只给估算价 · 单位 元/吨
       </p>
+      {showBlendValue && (
+        <p style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 4 }}>
+          配煤价值按本次合同与煤池算: 到厂价低于配煤价值就会被选进配方,
+          已入选的煤即其现价; 只按少量掺入算, 买多了价值会下降. 估算价看市场,
+          配煤价值看你这一炉.
+        </p>
+      )}
     </div>
   );
 }

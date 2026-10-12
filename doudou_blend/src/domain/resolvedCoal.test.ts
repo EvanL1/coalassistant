@@ -6,6 +6,7 @@ import {
   resolveCoalPool,
   summarizePriceStatus,
   toBlendCoal,
+  toPriceOnlyCoal,
 } from "./resolvedCoal";
 
 const masterCoal: MasterCoalEntry = {
@@ -81,6 +82,19 @@ describe("resolveCoal", () => {
     expect(resolved.fob).toBe(1_000);
     expect(resolved.frt).toBe(100);
     expect(resolved.hasOverrides).toBe(false);
+  });
+
+  it("已停用 (archived) 的煤一票否决, 用户偏好里的启用也拉不回来", () => {
+    const resolved = resolveCoal(
+      { ...masterCoal, status: "archived", fob: null },
+      { enabled: true },
+      "master",
+    );
+
+    expect(resolved.effectiveEnabled).toBe(false);
+    expect(resolved.readiness).toBe("disabled");
+    expect(toBlendCoal(resolved)).toBeNull();
+    expect(toPriceOnlyCoal(resolved)).toBeNull();
   });
 
   it("隐藏状态一票否决，不进入求解", () => {

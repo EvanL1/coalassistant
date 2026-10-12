@@ -462,6 +462,8 @@ pub fn count_response(count: i64) -> Value {
 pub struct ApiKeyRow {
     pub id: String,
     pub name: String,
+    /// 用途: data = 写煤库, mcp = 只读 + 求解.
+    pub scope: String,
     pub key_prefix: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
@@ -472,19 +474,21 @@ pub struct ApiKeyRow {
 pub async fn create_api_key(
     pool: &PgPool,
     name: &str,
+    scope: &str,
     hash: &str,
     prefix: &str,
 ) -> Result<ApiKeyRow, sqlx::Error> {
     let id = Uuid::new_v4().to_string();
     let row = sqlx::query(
         r#"
-        INSERT INTO data_api_keys (id, name, key_hash, key_prefix)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, name, key_prefix, created_at, last_used_at, revoked_at
+        INSERT INTO data_api_keys (id, name, scope, key_hash, key_prefix)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, name, scope, key_prefix, created_at, last_used_at, revoked_at
         "#,
     )
     .bind(id)
     .bind(name)
+    .bind(scope)
     .bind(hash)
     .bind(prefix)
     .fetch_one(pool)
@@ -496,7 +500,7 @@ pub async fn create_api_key(
 pub async fn list_api_keys(pool: &PgPool) -> Result<Vec<ApiKeyRow>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT id, name, key_prefix, created_at, last_used_at, revoked_at
+        SELECT id, name, scope, key_prefix, created_at, last_used_at, revoked_at
         FROM data_api_keys
         ORDER BY revoked_at IS NOT NULL, created_at DESC
         "#,
@@ -529,15 +533,17 @@ pub async fn revoke_api_key(pool: &PgPool, id: &str) -> Result<u64, sqlx::Error>
 pub async fn authenticate_api_key(
     pool: &PgPool,
     hash: &str,
+    scope: &str,
 ) -> Result<Option<String>, sqlx::Error> {
     let row = sqlx::query(
         r#"
         UPDATE data_api_keys SET last_used_at = NOW()
-        WHERE key_hash = $1 AND revoked_at IS NULL
+        WHERE key_hash = $1 AND scope = $2 AND revoked_at IS NULL
         RETURNING name
         "#,
     )
     .bind(hash)
+    .bind(scope)
     .fetch_optional(pool)
     .await?;
     row.map(|row| row.try_get("name")).transpose()
@@ -551,6 +557,7 @@ fn api_key_row(row: sqlx::postgres::PgRow) -> Result<ApiKeyRow, sqlx::Error> {
     Ok(ApiKeyRow {
         id,
         name: row.try_get("name")?,
+        scope: row.try_get("scope")?,
         key_prefix: row.try_get("key_prefix")?,
         created_at: created_at.to_rfc3339(),
         last_used_at: last_used_at.map(|t| t.to_rfc3339()),

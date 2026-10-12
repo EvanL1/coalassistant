@@ -20,12 +20,14 @@ const mocks = vi.hoisted(() => ({
   setQuantity: vi.fn(),
   writeText: vi.fn(),
   fetchCoalIndexRatioSince: vi.fn(),
+  fetchLatestCoalIndex: vi.fn(),
   quantity: { value: 3_700 },
   coalPrefs: { value: {} as CoalPrefs },
 }));
 
 vi.mock("../coal_index", () => ({
   fetchCoalIndexRatioSince: mocks.fetchCoalIndexRatioSince,
+  fetchLatestCoalIndex: mocks.fetchLatestCoalIndex,
 }));
 
 vi.mock("../backend", () => ({
@@ -125,6 +127,8 @@ beforeEach(() => {
   mocks.writeText.mockResolvedValue(undefined);
   mocks.fetchCoalIndexRatioSince.mockReset();
   mocks.fetchCoalIndexRatioSince.mockResolvedValue(null);
+  mocks.fetchLatestCoalIndex.mockReset();
+  mocks.fetchLatestCoalIndex.mockResolvedValue(null);
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: { writeText: mocks.writeText },
@@ -752,6 +756,71 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     await screen.findByText("今日配方");
     const plain = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
     expect("price_factor" in plain).toBe(false);
+  });
+
+  it("没报价的煤只进 price_factor.extra_coals, 不进求解煤池", async () => {
+    mocks.loadMaster.mockResolvedValue({
+      ...master,
+      coals: [
+        ...master.coals,
+        { name: "无价煤", status: "verified", props: { S: 0.8 }, fob: null, frt: 50 },
+      ],
+      price_factor: priceFactor,
+    });
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+    const sent = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
+    expect(sent.coals.map((c: { name: string }) => c.name)).toEqual(["测试煤"]);
+    expect(sent.price_factor.extra_coals).toEqual([
+      { name: "无价煤", props: { S: 0.8 }, fob: 0, frt: 0 },
+    ]);
+    expect("description" in sent.price_factor).toBe(true);
+  });
+
+  it("全池无报价也求解: 打开 estimate_unpriced, 市场价取现货指数最新值", async () => {
+    mocks.fetchLatestCoalIndex.mockResolvedValue(1907);
+    // active 煤默认不启用; 线上用户是在煤池里逐个启用的.
+    mocks.coalPrefs.value = { 无价煤: { enabled: true } };
+    mocks.loadMaster.mockResolvedValue({
+      ...master,
+      coals: [
+        { name: "无价煤", status: "active", props: { S: 0.8 }, fob: null, frt: 50 },
+      ],
+      price_factor: priceFactor,
+    });
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+    const sent = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
+    expect(sent.coals).toEqual([]);
+    expect(sent.price_factor.estimate_unpriced).toBe(true);
+    expect(sent.price_factor.market_price).toBe(1907);
+    expect(sent.price_factor.extra_coals.map((c: { name: string }) => c.name)).toEqual([
+      "无价煤",
+    ]);
+  });
+
+  it("全池无报价且没有价格因子时, 仍提示无可求解的煤", async () => {
+    mocks.loadMaster.mockResolvedValue({
+      ...master,
+      coals: [
+        { name: "无价煤", status: "active", props: { S: 0.8 }, fob: null, frt: 50 },
+      ],
+    });
+    const backend = { solveJson: vi.fn(), saveHistory: vi.fn() };
+    mocks.getBackend.mockResolvedValue(backend);
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    expect(await screen.findByText(/没有可参与求解的煤/)).toBeTruthy();
+    expect(backend.solveJson).not.toHaveBeenCalled();
   });
 
   it("结果带 coal_values 时显示煤价对比卡, 不带时不显示", async () => {

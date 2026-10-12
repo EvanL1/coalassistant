@@ -102,7 +102,10 @@ export function resolveCoal(
   invalidOverride ||= safePref?.invalid_data === true;
 
   let requestedEnabled = base.status === "verified";
-  if (safePref?.enabled != null) {
+  // 已停用 (archived) 是煤矿本身的状态, 一票否决: 用户偏好里的启用拉不回来.
+  if (base.status === "archived") {
+    requestedEnabled = false;
+  } else if (safePref?.enabled != null) {
     if (typeof safePref.enabled === "boolean") {
       requestedEnabled = safePref.enabled;
     } else {
@@ -298,6 +301,22 @@ export function toBlendCoal(
     fob: coal.fob_drifted ?? coal.fob,
     frt: coal.frt,
     purchase_terms: purchaseTerms ?? undefined,
+  };
+}
+
+/**
+ * 只做煤价评估 (价格因子 extra_coals) 的煤: 启用了但缺报价/运费, 进不了 LP,
+ * 照样按质量打分给估算价. fob 为 0 表示没报价 (有报价但缺运费的仍带上报价).
+ */
+export function toPriceOnlyCoal(coal: ResolvedCoal): Coal | null {
+  if (coal.readiness !== "missing_fob" && coal.readiness !== "missing_frt") {
+    return null;
+  }
+  return {
+    name: coal.name,
+    props: { ...coal.props },
+    fob: coal.fob_drifted ?? coal.fob ?? 0,
+    frt: 0,
   };
 }
 

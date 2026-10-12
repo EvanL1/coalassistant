@@ -110,6 +110,16 @@ async function fetchSeries(): Promise<CoalIndexPoint[] | null> {
 }
 
 /**
+ * 焦煤现货指数最新一期的点位 (元/吨), 当估算价的市场价 (标准品 1000 点) 用.
+ * 拿不到数据返回 null.
+ */
+export async function fetchLatestCoalIndex(): Promise<number | null> {
+  const points = await fetchSeries();
+  if (points == null || points.length === 0) return null;
+  return points[points.length - 1].price;
+}
+
+/**
  * 焦煤现货指数自 `date` 起的涨跌比例, 供今日屏参考估算.
  * 拿不到数据(源站不可用)返回 null, 界面就不显示这条参考.
  */

@@ -1,7 +1,8 @@
 /**
- * 管理端 - 数据更新密钥.
+ * 管理端 - API 密钥.
  *
- * 生成 / 命名 / 销毁给外部协作者用的 API 密钥。
+ * 生成 / 命名 / 销毁两种用途的密钥: data 给协作者写煤库指标, mcp 给手机 Agent
+ * (Kimi 等) 经 /mcp 只读 + 求解。
  * 服务端只存哈希, 明文仅在创建响应里出现一次, 所以这里必须当场让用户复制,
  * 并把"只显示这一次"讲清楚 —— 关掉就再也拿不回来了.
  */
@@ -11,17 +12,26 @@ import {
   listApiKeys,
   revokeApiKey,
   type ApiKey,
+  type KeyScope,
 } from "../apiKeys";
+
+const SCOPE_LABEL: Record<KeyScope, string> = {
+  data: "写煤库",
+  mcp: "手机 Agent",
+};
 
 export function ApiKeyCard() {
   const [keys, setKeys] = useState<ApiKey[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
+  const [scope, setScope] = useState<KeyScope>("mcp");
   const [creating, setCreating] = useState(false);
   /** 刚生成的明文, 只在本次会话内存活, 不写任何存储. */
-  const [freshKey, setFreshKey] = useState<{ name: string; plaintext: string } | null>(
-    null,
-  );
+  const [freshKey, setFreshKey] = useState<{
+    name: string;
+    scope: KeyScope;
+    plaintext: string;
+  } | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -50,8 +60,8 @@ export function ApiKeyCard() {
     setCreating(true);
     setError(null);
     try {
-      const { plaintext } = await createApiKey(trimmed);
-      setFreshKey({ name: trimmed, plaintext });
+      const { plaintext } = await createApiKey(trimmed, scope);
+      setFreshKey({ name: trimmed, scope, plaintext });
       setCopied(false);
       setName("");
       await refresh();
@@ -78,9 +88,9 @@ export function ApiKeyCard() {
 
   return (
     <div className="card">
-      <div className="card-title">数据更新密钥</div>
+      <div className="card-title">API 密钥</div>
       <p style={{ fontSize: 11, color: "var(--c-text-3)", margin: "0 0 12px" }}>
-        给协作者写煤库指标用。一人一把，销毁后立即失效，不影响其他人。
+        「手机 Agent」给同事在 Kimi 等 App 里调配煤 (只读 + 求解, 改不了数据)；「写煤库」给协作者补煤库指标。一人一把, 销毁后立即失效, 不影响其他人。
       </p>
 
       {/* 新生成的明文: 只显示这一次 */}
@@ -130,6 +140,18 @@ export function ApiKeyCard() {
               我已保存
             </button>
           </div>
+          {freshKey.scope === "mcp" && (
+            <div style={{ fontSize: 11, marginTop: 8, lineHeight: 1.6 }}>
+              在 Kimi 等 App 添加 MCP 服务, 二选一:
+              <br />· 地址 <code>{window.location.origin}/mcp</code>, 请求头{" "}
+              <code>Authorization: Bearer 上面的密钥</code>
+              <br />· 只能填一个地址时用{" "}
+              <code style={{ wordBreak: "break-all" }}>
+                {window.location.origin}/mcp/{freshKey.plaintext}
+              </code>
+              (这个地址本身就是密钥, 别外传)
+            </div>
+          )}
           <div style={{ fontSize: 10, color: "var(--c-text-3)", marginTop: 6 }}>
             服务端只存哈希，关掉后无法再取回。丢了就销毁重建。
           </div>
@@ -137,17 +159,35 @@ export function ApiKeyCard() {
       )}
 
       {/* 新建 */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        <select
+          aria-label="密钥用途"
+          value={scope}
+          onChange={(e) => setScope(e.target.value as KeyScope)}
+          style={{
+            height: 36,
+            padding: "0 8px",
+            fontSize: 13,
+            borderRadius: 8,
+            border: "1px solid var(--c-border, rgba(0,0,0,.15))",
+            background: "transparent",
+            color: "inherit",
+          }}
+        >
+          <option value="mcp">手机 Agent (只读+求解)</option>
+          <option value="data">写煤库</option>
+        </select>
         <input
           value={name}
           maxLength={64}
-          placeholder="给这把钥匙起个名字, 如: 张三-调研"
+          placeholder="名字, 如: 李四-手机"
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") void handleCreate();
           }}
           style={{
             flex: 1,
+            minWidth: 140,
             height: 36,
             padding: "0 10px",
             fontSize: 13,
@@ -218,6 +258,9 @@ function KeyRow({ item, onRevoke }: { item: ApiKey; onRevoke?: () => void }) {
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 500 }}>
           {item.name}
+          <span style={{ fontSize: 10, color: "var(--c-text-3)", marginLeft: 6 }}>
+            {SCOPE_LABEL[item.scope ?? "data"]}
+          </span>
           {revoked && (
             <span style={{ fontSize: 10, color: "var(--c-text-3)", marginLeft: 6 }}>
               已销毁

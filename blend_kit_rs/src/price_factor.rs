@@ -15,10 +15,13 @@
 //!
 //! 为什么用点而不是元: 升贴水随行情按比例缩放 —— 市场价翻倍, 好煤坏煤的价差跟着翻倍,
 //! 系数表不用改。1000 是贩煤人直觉里的整数基准 ("这煤 1050 点" = 比标准品好 5%)。
+use std::collections::HashSet;
+
 use crate::model::{
     BlendRequest, BlendResult, Coal, CoalValue, Direction, PriceAdjust, PriceFactor, PricePart,
     INDICATORS,
 };
+use crate::quality::validate_coal;
 
 /// 一次价格因子评估的结果.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -103,16 +106,17 @@ fn adjust_amount(rule: &PriceAdjust, raw: f64) -> f64 {
     }
 }
 
-/// 单种煤的升贴水明细; fair/gap/ratio 待 P0 定下后再填.
+/// 单种煤的升贴水明细; fair/gap/ratio 待市场价定下后再填. fob ≤ 0 视为没报价.
 fn adjust_coal(coal: &Coal, rules: &[&PriceAdjust]) -> CoalValue {
     let mut value = CoalValue {
         name: coal.name.clone(),
-        fob: coal.fob,
+        fob: (coal.fob > 0.0).then_some(coal.fob),
         adjustment: 0.0,
         points: POINTS_BASE,
         fair: 0.0,
-        gap: 0.0,
-        ratio: 0.0,
+        gap: None,
+        ratio: None,
+        blend_value: None,
         parts: Vec::new(),
         missing: Vec::new(),
         extrapolated: Vec::new(),
@@ -143,19 +147,15 @@ fn adjust_coal(coal: &Coal, rules: &[&PriceAdjust]) -> CoalValue {
 pub fn evaluate(coals: &[Coal], factor: &PriceFactor) -> Result<PriceEvaluation, String> {
     validate(factor)?;
     let rules: Vec<&PriceAdjust> = factor.adjusts.iter().filter(|r| r.enabled).collect();
-    let values: Vec<CoalValue> = coals
-        .iter()
-        .filter(|c| c.fob > 0.0)
-        .map(|c| adjust_coal(c, &rules))
-        .collect();
+    let values: Vec<CoalValue> = coals.iter().map(|c| adjust_coal(c, &rules)).collect();
     let (market, market_from_group) = match factor.market_price {
         Some(p) => (p, false),
         None => {
-            // 质量指数 ≤ 0 的煤 (极端劣质外推) 没有有意义的"报价/指数", 不参与反推.
+            // 只用有报价的煤反推; 质量指数 ≤ 0 的煤 (极端劣质外推) 没有有意义的"报价/指数".
             let ratios: Vec<f64> = values
                 .iter()
                 .filter(|v| v.points > 0.0)
-                .map(|v| v.fob / v.points)
+                .filter_map(|v| v.fob.map(|fob| fob / v.points))
                 .collect();
             if ratios.is_empty() {
                 return Ok(PriceEvaluation::default());
@@ -169,9 +169,10 @@ pub fn evaluate(coals: &[Coal], factor: &PriceFactor) -> Result<PriceEvaluation,
     let coal_values = values
         .into_iter()
         .map(|mut v| {
-            v.fair = market / POINTS_BASE * v.points;
-            v.gap = v.fob - v.fair;
-            v.ratio = if v.fair > 0.0 { v.fob / v.fair } else { 0.0 };
+            let fair = market / POINTS_BASE * v.points;
+            v.fair = fair;
+            v.gap = v.fob.map(|fob| fob - fair);
+            v.ratio = v.fob.map(|fob| if fair > 0.0 { fob / fair } else { 0.0 });
             v
         })
         .collect();
@@ -182,14 +183,104 @@ pub fn evaluate(coals: &[Coal], factor: &PriceFactor) -> Result<PriceEvaluation,
     })
 }
 
+/// extra_coals 的边界校验: 与煤池同一套单煤规则, 且煤名在 煤池 ∪ extra_coals 内唯一
+/// (配煤价值按煤名对回, 重名会张冠李戴). 不带价格因子视为通过.
+pub(crate) fn validate_extra_coals(request: &BlendRequest) -> Result<(), String> {
+    let Some(factor) = &request.price_factor else {
+        return Ok(());
+    };
+    let mut names: HashSet<&str> = request.coals.iter().map(|c| c.name.as_str()).collect();
+    for coal in &factor.extra_coals {
+        validate_coal(coal)?;
+        if !names.insert(coal.name.as_str()) {
+            return Err(format!("煤名重复: {}", coal.name));
+        }
+    }
+    Ok(())
+}
+
+/// 估算价求解: `estimate_unpriced` 打开时, 把 extra_coals 按估算价 (fob = 应值) 并入煤池,
+/// 返回改写后的请求和一条说明. `Ok(None)` = 不需要改写 (未开开关, 或配置无效 —— 后者由
+/// [`attach`] 统一告警); `Err` = 要估却估不出 (没有市场价, 也没有可反推的报价).
+///
+/// 只改求解用的请求; 煤价对比仍按原请求评估, 所以这些煤在对比卡里照旧是"无报价".
+pub(crate) fn with_estimated_prices(
+    request: &BlendRequest,
+) -> Result<Option<(BlendRequest, String)>, String> {
+    let Some(factor) = request
+        .price_factor
+        .as_ref()
+        .filter(|factor| factor.estimate_unpriced && !factor.extra_coals.is_empty())
+    else {
+        return Ok(None);
+    };
+    if validate_extra_coals(request).is_err() {
+        return Ok(None);
+    }
+    let all: Vec<Coal> = request
+        .coals
+        .iter()
+        .chain(&factor.extra_coals)
+        .cloned()
+        .collect();
+    let Ok(eval) = evaluate(&all, factor) else {
+        return Ok(None);
+    };
+    let Some(market) = eval.market else {
+        return Err("无报价的煤要按估算价求解, 但没有市场价 (也没有可反推的报价), 估不出价".into());
+    };
+    let mut priced = request.clone();
+    let mut count = 0;
+    for coal in &factor.extra_coals {
+        // 自带出厂价 (只是缺运费) 的照原价进; 没报价的才按估算价.
+        if coal.fob > 0.0 {
+            priced.coals.push(coal.clone());
+            continue;
+        }
+        // 质量指数 ≤ 0 (极端劣质外推) 估不出有意义的价, 不进煤池.
+        if let Some(value) = eval
+            .coal_values
+            .iter()
+            .find(|value| value.name == coal.name && value.fair > 0.0)
+        {
+            priced.coals.push(Coal {
+                fob: value.fair,
+                ..coal.clone()
+            });
+            count += 1;
+        }
+    }
+    if let Some(factor) = priced.price_factor.as_mut() {
+        factor.extra_coals.clear();
+    }
+    let note = format!("{count} 种煤无报价, 按估算价求解 (标准品 1000 点 = {market:.0} 元/吨)");
+    Ok(Some((priced, note)))
+}
+
 /// 把评估结果挂到求解结果上 (有解无解都挂). 配置无效只加一条 warning, 不影响求解.
 pub(crate) fn attach(request: &BlendRequest, result: &mut BlendResult) {
     let Some(factor) = &request.price_factor else {
         return;
     };
-    match evaluate(&request.coals, factor) {
+    if let Err(e) = validate_extra_coals(request) {
+        result
+            .warnings
+            .push(format!("价格因子配置无效, 未做煤价对比: {e}"));
+        return;
+    }
+    // 评估对象 = 进 LP 的煤 + 只评估的 extra_coals (按此顺序).
+    let coals: Vec<Coal> = request
+        .coals
+        .iter()
+        .chain(&factor.extra_coals)
+        .cloned()
+        .collect();
+    match evaluate(&coals, factor) {
         Ok(eval) => {
             result.coal_values = eval.coal_values;
+            for value in &mut result.coal_values {
+                value.blend_value = result.blend_values.get(&value.name).copied();
+            }
             result.market_price = eval.market;
             result.market_price_from_group = eval.market_from_group;
         }
@@ -263,6 +354,8 @@ mod tests {
         PriceFactor {
             adjusts: vec![s, a, g, y, c],
             market_price: None,
+            extra_coals: Vec::new(),
+            estimate_unpriced: false,
         }
     }
 
@@ -331,8 +424,9 @@ mod tests {
         ] {
             let v = value(&eval, name);
             close(v.fair, fair, &format!("{name} 应值"));
-            close(v.gap, v.fob - fair, &format!("{name} 差额"));
-            close(v.ratio, v.fob / fair, &format!("{name} 比值"));
+            let fob = v.fob.unwrap();
+            close(v.gap.unwrap(), fob - fair, &format!("{name} 差额"));
+            close(v.ratio.unwrap(), fob / fair, &format!("{name} 比值"));
         }
     }
 
@@ -359,8 +453,12 @@ mod tests {
         let expected =
             1000.0 * (2500.0 / 1172.8 + 2100.0 / 943.5 + 2200.0 / 999.4 + 2000.0 / 951.0) / 4.0;
         close(eval.market.unwrap(), expected, "反推市场价");
-        let mean_ratio: f64 =
-            eval.coal_values.iter().map(|v| v.ratio).sum::<f64>() / eval.coal_values.len() as f64;
+        let mean_ratio: f64 = eval
+            .coal_values
+            .iter()
+            .map(|v| v.ratio.unwrap())
+            .sum::<f64>()
+            / eval.coal_values.len() as f64;
         close(mean_ratio, 1.0, "平均 报价/应值");
     }
 
@@ -390,6 +488,8 @@ mod tests {
         let factor = PriceFactor {
             adjusts: default_rules(false).adjusts.into_iter().take(1).collect(),
             market_price: Some(2000.0),
+            extra_coals: Vec::new(),
+            estimate_unpriced: false,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -412,6 +512,8 @@ mod tests {
         let factor = PriceFactor {
             adjusts: vec![default_rules(false).adjusts[2].clone()],
             market_price: Some(2000.0),
+            extra_coals: Vec::new(),
+            estimate_unpriced: false,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -432,14 +534,32 @@ mod tests {
         close(v.points, 1172.8 - 24.0, "缺 Y 的质量指数");
     }
 
+    /// 没报价 (fob ≤ 0) 的煤照样打分、给估算价, 只是没有差额; 市场价只用有报价的煤反推.
     #[test]
-    fn test_non_positive_fob_excluded() {
+    fn test_unpriced_coal_scored_without_gap() {
         let mut coals = four_coals();
         coals[3].fob = 0.0;
         let eval = evaluate(&coals, &default_rules(true)).unwrap();
-        assert_eq!(eval.coal_values.len(), 3);
-        let expected = 1000.0 * (2500.0 / 1172.8 + 2100.0 / 943.5 + 2200.0 / 999.4) / 3.0;
-        close(eval.market.unwrap(), expected, "只用前三种反推");
+        assert_eq!(eval.coal_values.len(), 4);
+        let market = 1000.0 * (2500.0 / 1172.8 + 2100.0 / 943.5 + 2200.0 / 999.4) / 3.0;
+        close(eval.market.unwrap(), market, "只用前三种反推");
+        let v = value(&eval, "浮精");
+        assert_eq!((v.fob, v.gap, v.ratio), (None, None, None));
+        close(v.points, 951.0, "浮精 质量指数");
+        close(v.fair, market / 1000.0 * 951.0, "浮精 估算价");
+    }
+
+    /// 全都没报价但指定了市场价: 全部给估算价.
+    #[test]
+    fn test_no_priced_coal_with_market_scores_all() {
+        let mut coals = four_coals();
+        for c in &mut coals {
+            c.fob = 0.0;
+        }
+        let eval = evaluate(&coals, &with_market(true, 2000.0)).unwrap();
+        assert_eq!(eval.coal_values.len(), 4);
+        close(value(&eval, "荣欣").fair, 2345.6, "荣欣 估算价");
+        assert!(eval.coal_values.iter().all(|v| v.gap.is_none()));
     }
 
     #[test]
@@ -476,6 +596,8 @@ mod tests {
             &PriceFactor {
                 adjusts: vec![rule("X", Direction::Upper, 1.0, 1.0, 1.0)],
                 market_price: None,
+                extra_coals: Vec::new(),
+                estimate_unpriced: false,
             }
         )
         .is_err());

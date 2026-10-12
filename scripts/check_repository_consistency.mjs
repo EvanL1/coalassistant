@@ -42,9 +42,14 @@ function extractRustStructFields(source, structName) {
     new RegExp(`pub\\s+struct\\s+${structName}\\s*\\{`),
     `Rust struct ${structName}`,
   );
-  return [...block.matchAll(/^\s*pub\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/gm)].map(
-    (fieldMatch) => fieldMatch[1],
-  );
+  // 带 #[serde(skip)] 的字段不上 JSON, 只在 Rust 内部传值, TypeScript 侧本就没有.
+  return [
+    ...block.matchAll(
+      /^((?:[ \t]*#\[[^\n]*\][ \t]*\n)*)[ \t]*pub\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/gm,
+    ),
+  ]
+    .filter((fieldMatch) => !fieldMatch[1].includes("#[serde(skip)]"))
+    .map((fieldMatch) => fieldMatch[2]);
 }
 
 function extractTypescriptInterfaceFields(source, interfaceName) {

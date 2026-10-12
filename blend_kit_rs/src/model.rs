@@ -357,7 +357,7 @@ pub struct PriceAdjust {
 }
 
 /// 价格因子配置.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PriceFactor {
     #[serde(default)]
     pub adjusts: Vec<PriceAdjust>,
@@ -365,6 +365,13 @@ pub struct PriceFactor {
     /// None = 由请求煤池反推: 市场价 = 1000 × mean(报价 / 质量指数).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub market_price: Option<f64>,
+    /// 只评估、不进 LP 的煤 (如没录报价的煤): 照样打分给估算价, 不参与配方.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_coals: Vec<Coal>,
+    /// 无报价也求解: extra_coals 按估算价 (fob = 市场价/1000 × 质量指数) 并入煤池进 LP.
+    /// 默认 false = extra_coals 只评估不进配方, 结果与不传完全相同.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub estimate_unpriced: bool,
 }
 
 /// 单项升贴水金额.
@@ -379,18 +386,18 @@ pub struct PricePart {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CoalValue {
     pub name: String,
-    /// 报价 (出厂价).
-    pub fob: f64,
+    /// 报价 (出厂价). None = 没报价, 只有估算价.
+    pub fob: Option<f64>,
     /// 质量升贴水合计 (点).
     pub adjustment: f64,
     /// 质量指数 = 1000 + 升贴水; 标准品 = 1000 点.
     pub points: f64,
     /// 按质量应值 = 市场价/1000 × 质量指数 (元/吨).
     pub fair: f64,
-    /// 差额 = fob − fair; >0 偏贵, <0 划算.
-    pub gap: f64,
-    /// fob / fair; fair ≤ 0 时记 0.
-    pub ratio: f64,
+    /// 差额 = fob − fair; >0 偏贵, <0 划算. 没报价为 None.
+    pub gap: Option<f64>,
+    /// fob / fair; fair ≤ 0 时记 0. 没报价为 None.
+    pub ratio: Option<f64>,
     #[serde(default)]
     pub parts: Vec<PricePart>,
     /// 缺该指标而跳过的规则.
@@ -399,6 +406,10 @@ pub struct CoalValue {
     /// 原始值落在线性区间外 (外推) 的指标.
     #[serde(default)]
     pub extrapolated: Vec<String>,
+    /// 配煤价值: 本次煤池与合同下的盈亏平衡到厂价 (元/吨) —— 到厂价低于它就会入选,
+    /// 已入选的煤即其现价. 由 LP 对偶算出, 只算边际 (一点点加入时) 的价值. 算不出为 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend_value: Option<f64>,
 }
 
 // ============================================================================
@@ -657,6 +668,9 @@ pub struct BlendResult {
     /// 市场价是否由煤池反推 (false = 请求指定).
     #[serde(default)]
     pub market_price_from_group: bool,
+    /// 配煤价值 (盈亏平衡到厂价, 元/吨), 煤名 → 值. 只在内部从求解传给价格因子评估, 不序列化.
+    #[serde(skip)]
+    pub blend_values: HashMap<String, f64>,
 }
 
 impl BlendResult {
@@ -679,6 +693,7 @@ impl BlendResult {
             coal_values: Vec::new(),
             market_price: None,
             market_price_from_group: false,
+            blend_values: HashMap::new(),
         }
     }
 

@@ -129,6 +129,231 @@ fn test_price_factor_does_not_change_solution() {
     }
 }
 
+/// extra_coals: 没报价、不进 LP 的煤也打分给估算价; 配方与不带时完全相同.
+#[test]
+fn test_extra_coals_scored_but_not_blended() {
+    let mut factor = default_factor();
+    factor["market_price"] = json!(2000.0);
+    // 质量远好于池中所有煤; 若误进 LP (价格 0) 必然被选中.
+    factor["extra_coals"] = json!([{
+        "name": "无价好煤", "fob": 0.0, "frt": 0.0,
+        "props": {"S": 0.5, "A": 7.0, "V": 24.0, "G": 95.0, "Y": 25.0, "petro": 0.1, "CSR": 75.0, "M": 9.0}
+    }]);
+    let plain = run(&request(1.5, None));
+    let result = run(&request(1.5, Some(factor)));
+    assert_eq!(result["recipe"], plain["recipe"]);
+    let values = result["coal_values"].as_array().unwrap();
+    assert_eq!(values.len(), 5);
+    let extra = values.iter().find(|v| v["name"] == "无价好煤").unwrap();
+    assert!(extra["fob"].is_null() && extra["gap"].is_null() && extra["ratio"].is_null());
+    assert!(extra["points"].as_f64().unwrap() > 1000.0);
+    let fair = extra["fair"].as_f64().unwrap();
+    assert!((fair - 2.0 * extra["points"].as_f64().unwrap()).abs() < 1e-9);
+}
+
+fn ratio(result: &Value, name: &str) -> f64 {
+    result["recipe"][name].as_f64().unwrap_or(0.0)
+}
+
+fn blend_value(result: &Value, name: &str) -> f64 {
+    result["coal_values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == name)
+        .unwrap_or_else(|| panic!("coal_values 里没有 {name}"))["blend_value"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{name} 没有 blend_value"))
+}
+
+/// 配煤价值 = 盈亏平衡到厂价: 没入选的煤降到它以下就入选, 高于它仍不入选.
+#[test]
+fn test_blend_value_is_break_even_for_unselected_coal() {
+    let base = request(1.5, Some(default_factor()));
+    let result = run(&base);
+    let names = ["荣欣", "新星", "北沟", "浮精"];
+    let out = *names
+        .iter()
+        .find(|name| ratio(&result, name) < 1e-6)
+        .expect("fixture 里应有没入选的煤");
+    let value = blend_value(&result, out);
+    let index = names.iter().position(|name| *name == out).unwrap();
+    for (delta, should_enter) in [(-5.0, true), (5.0, false)] {
+        let mut req = base.clone();
+        req["coals"][index]["fob"] = json!(value + delta);
+        let probe = run(&req);
+        assert_eq!(
+            ratio(&probe, out) > 1e-6,
+            should_enter,
+            "{out} 价 {} (配煤价值 {value:.2}): 配方 {}",
+            value + delta,
+            probe["recipe"]
+        );
+    }
+}
+
+/// 已入选的煤, 配煤价值就是它现在的到厂价 (再贵一点仍可能入选, 那要做敏感度分析, 不在此).
+#[test]
+fn test_blend_value_of_selected_coal_equals_its_price() {
+    let result = run(&request(1.5, Some(default_factor())));
+    let coals = coals();
+    for coal in coals.as_array().unwrap() {
+        let name = coal["name"].as_str().unwrap();
+        if ratio(&result, name) > 1e-3 {
+            let cif = coal["fob"].as_f64().unwrap() + coal["frt"].as_f64().unwrap();
+            assert!((blend_value(&result, name) - cif).abs() < 0.5, "{name}");
+        }
+    }
+}
+
+/// 没报价的 extra 煤也有配煤价值, 且它就是盈亏平衡价: 按它减 5 元放进煤池就入选.
+#[test]
+fn test_extra_coal_blend_value_is_break_even() {
+    let extra = json!({
+        "name": "无价煤", "fob": 0.0, "frt": 0.0,
+        "props": {"S": 1.0, "A": 9.0, "V": 24.0, "G": 90.0, "Y": 20.0, "petro": 0.1, "CSR": 66.0, "M": 10.0}
+    });
+    let mut factor = default_factor();
+    factor["extra_coals"] = json!([extra.clone()]);
+    let result = run(&request(1.5, Some(factor)));
+    assert!(ratio(&result, "无价煤") == 0.0, "extra 煤不得进配方");
+    let value = blend_value(&result, "无价煤");
+    assert!(value > 0.0);
+    for (delta, should_enter) in [(-5.0, true), (5.0, false)] {
+        let mut req = request(1.5, None);
+        let mut priced = extra.clone();
+        priced["fob"] = json!(value + delta);
+        req["coals"].as_array_mut().unwrap().push(priced);
+        let probe = run(&req);
+        assert_eq!(
+            ratio(&probe, "无价煤") > 1e-6,
+            should_enter,
+            "价 {} (配煤价值 {value:.2}): 配方 {}",
+            value + delta,
+            probe["recipe"]
+        );
+    }
+}
+
+/// extra_coals 与煤池同一套边界校验: 重名 (含与煤池重名) 或非法数值 → 只告警、不做煤价对比,
+/// 配方照常 (与价格因子配置无效同一约定).
+#[test]
+fn test_invalid_extra_coals_warn_without_breaking_solve() {
+    let good = |name: &str| {
+        json!({"name": name, "fob": 0.0, "frt": 0.0,
+               "props": {"S": 1.0, "A": 9.0, "V": 24.0, "G": 90.0, "Y": 20.0, "petro": 0.1, "CSR": 66.0, "M": 10.0}})
+    };
+    let mut negative = good("负值煤");
+    negative["props"]["S"] = json!(-3.0);
+    let plain = run(&request(1.5, None));
+    for (case, extras) in [
+        ("与煤池重名", json!([good("新星")])),
+        ("extra 之间重名", json!([good("甲"), good("甲")])),
+        ("负指标", json!([negative])),
+        ("空煤名", json!([good(" ")])),
+    ] {
+        let mut factor = default_factor();
+        factor["extra_coals"] = extras;
+        let result = run(&request(1.5, Some(factor)));
+        assert_eq!(result["ok"], true, "{case}");
+        assert_eq!(result["recipe"], plain["recipe"], "{case}");
+        assert_eq!(result["coal_values"], json!([]), "{case}");
+        let warnings = result["warnings"].as_array().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("价格因子")),
+            "{case}: {warnings:?}"
+        );
+    }
+}
+
+/// fixture 的 4 种煤, 报价清零 (fob = 0 即"无报价").
+fn unpriced() -> Value {
+    let mut coals = coals();
+    for coal in coals.as_array_mut().unwrap() {
+        coal["fob"] = json!(0.0);
+    }
+    coals
+}
+
+/// estimate_unpriced: 煤池里没有报价的煤 (extra_coals) 按估算价 (市场价/1000 × 质量指数) 进 LP.
+/// 煤池可以全空 —— 全部按估算价求解; 成本就是估算价按配比加权.
+#[test]
+fn test_estimate_unpriced_solves_with_estimated_prices() {
+    let mut factor = default_factor();
+    factor["market_price"] = json!(2000.0);
+    factor["estimate_unpriced"] = json!(true);
+    factor["extra_coals"] = unpriced(); // 4 种煤全部无报价
+    let mut req = request(1.5, Some(factor));
+    req["coals"] = json!([]);
+    let result = run(&req);
+    assert_eq!(result["ok"], true, "{:?}", result["reason"]);
+    // 质量指数 1172.8 / 943.5 / 999.4 / 951 → 估算价 ×2.
+    let fair = |name: &str| match name {
+        "荣欣" => 2345.6,
+        "新星" => 1887.0,
+        "北沟" => 1998.8,
+        "浮精" => 1902.0,
+        _ => unreachable!(),
+    };
+    let recipe = result["recipe"].as_object().unwrap();
+    assert!(!recipe.is_empty());
+    let expected: f64 = recipe
+        .iter()
+        .map(|(name, ratio)| fair(name) * ratio.as_f64().unwrap())
+        .sum();
+    let cost = result["cost"]["fob_per_ton"].as_f64().unwrap();
+    assert!(
+        (cost - expected).abs() < 0.5,
+        "成本 {cost} vs 估算加权 {expected}"
+    );
+    // 估算出的煤在煤价对比里仍记为"无报价", 但有配煤价值.
+    for value in result["coal_values"].as_array().unwrap() {
+        assert!(value["fob"].is_null(), "{value}");
+        assert!(value["blend_value"].is_number(), "{value}");
+    }
+    let warnings = result["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("按估算价求解")),
+        "{warnings:?}"
+    );
+}
+
+/// 没有市场价、也没有可反推的报价: 估不出价, 说清原因, 不静默.
+#[test]
+fn test_estimate_unpriced_without_market_explains() {
+    let mut factor = default_factor();
+    factor["estimate_unpriced"] = json!(true);
+    factor["extra_coals"] = unpriced();
+    let mut req = request(1.5, Some(factor));
+    req["coals"] = json!([]);
+    let result = run(&req);
+    assert_eq!(result["ok"], false);
+    let warnings = result["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("市场价")),
+        "{warnings:?}"
+    );
+}
+
+/// 不开开关: extra 煤照旧只评估, 不进配方.
+#[test]
+fn test_estimate_unpriced_off_keeps_extras_out() {
+    let mut factor = default_factor();
+    factor["market_price"] = json!(2000.0);
+    factor["extra_coals"] = json!([{
+        "name": "无价好煤", "fob": 0.0, "frt": 0.0,
+        "props": {"S": 0.5, "A": 7.0, "V": 24.0, "G": 95.0, "Y": 25.0, "petro": 0.1, "CSR": 75.0, "M": 9.0}
+    }]);
+    let result = run(&request(1.5, Some(factor)));
+    assert!(result["recipe"].get("无价好煤").is_none());
+}
+
 #[test]
 fn test_invalid_price_factor_does_not_fail_solve() {
     let mut factor = default_factor();
