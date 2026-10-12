@@ -368,6 +368,10 @@ pub struct PriceFactor {
     /// 只评估、不进 LP 的煤 (如没录报价的煤): 照样打分给估算价, 不参与配方.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_coals: Vec<Coal>,
+    /// 无报价也求解: extra_coals 按估算价 (fob = 市场价/1000 × 质量指数) 并入煤池进 LP.
+    /// 默认 false = extra_coals 只评估不进配方, 结果与不传完全相同.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub estimate_unpriced: bool,
 }
 
 /// 单项升贴水金额.

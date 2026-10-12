@@ -164,6 +164,8 @@ export interface PriceFactor {
   market_price?: number | null;
   /** 只评估、不进 LP 的煤 (如没录报价的煤): 照样打分给估算价, 不参与配方. */
   extra_coals?: Coal[];
+  /** 无报价也求解: extra_coals 按估算价并入煤池进 LP. */
+  estimate_unpriced?: boolean;
 }
 
 /** master 里的价格因子系数表, 多一段出处说明. */

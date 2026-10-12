@@ -28,7 +28,7 @@ import {
 } from "../domain/purchaseTerms";
 import { hasCostAdjustments } from "../domain/costBreakdown";
 import { buildPriceAnchor } from "../domain/priceDrift";
-import { fetchCoalIndexRatioSince } from "../coal_index";
+import { fetchCoalIndexRatioSince, fetchLatestCoalIndex } from "../coal_index";
 import {
   isSnapshotActionable,
   LatestRequestTracker,
@@ -323,8 +323,12 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       const coals = pool
         .map((resolved) => toBlendCoal(resolved, termsByCoal.get(resolved.name)))
         .filter((coal) => coal != null);
+      // 没报价的煤: 有价格因子时按估算价求解 (市场价取现货指数), 没有就只能缺席.
+      const unpriced = master.price_factor
+        ? pool.map(toPriceOnlyCoal).filter((coal) => coal != null)
+        : [];
 
-      if (coals.length === 0) {
+      if (coals.length === 0 && unpriced.length === 0) {
         tracker.accept(requestId, () => {
           setState({
             status: "error",
@@ -339,20 +343,26 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         ? "用户自定义合同"
         : master.default_contract.name;
 
+      // 标准品 1000 点的市场价取现货指数最新一期; 拿不到时由核心按煤池报价反推 (若有).
+      const marketPrice = master.price_factor
+        ? await fetchLatestCoalIndex()
+        : null;
+      if (!tracker.isCurrent(requestId)) return;
+
       const request: BlendRequest = {
         coals,
         specs,
         total_quantity: totalQuantity,
         truncate_decimal: true,
-        // 价格因子系数表来自 master (数据不是代码); 只做煤价评估, 不影响配方.
-        // 没报价的煤进不了 LP, 放进 extra_coals 只打分给估算价.
+        // 价格因子系数表来自 master (数据不是代码). 没报价的煤放进 extra_coals,
+        // estimate_unpriced 让核心按估算价把它们并入煤池求解.
         ...(master.price_factor
           ? {
               price_factor: {
                 ...master.price_factor,
-                extra_coals: pool
-                  .map(toPriceOnlyCoal)
-                  .filter((coal) => coal != null),
+                ...(marketPrice != null ? { market_price: marketPrice } : {}),
+                extra_coals: unpriced,
+                estimate_unpriced: true,
               },
             }
           : {}),

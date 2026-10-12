@@ -67,7 +67,14 @@ pub fn solve(request: &BlendRequest) -> BlendResult {
 ///
 /// `ok` 只表示是否得到配方；可信度由 `quality_status` 表示。
 pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) -> BlendResult {
-    let mut result = solve_internal(request, evaluators, true);
+    // 无报价的煤按估算价并入煤池 (价格因子 estimate_unpriced); 煤价对比仍按原请求评估.
+    let (priced, note) = match crate::price_factor::with_estimated_prices(request) {
+        Ok(Some((priced, note))) => (Some(priced), Some(note)),
+        Ok(None) => (None, None),
+        Err(reason) => (None, Some(reason)),
+    };
+    let mut result = solve_internal(priced.as_ref().unwrap_or(request), evaluators, true);
+    result.warnings.extend(note);
     // 价格因子只做评估, 不进 LP: 拿到结果 (含无解) 后统一挂上.
     crate::price_factor::attach(request, &mut result);
     result

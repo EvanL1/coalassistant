@@ -199,6 +199,64 @@ pub(crate) fn validate_extra_coals(request: &BlendRequest) -> Result<(), String>
     Ok(())
 }
 
+/// 估算价求解: `estimate_unpriced` 打开时, 把 extra_coals 按估算价 (fob = 应值) 并入煤池,
+/// 返回改写后的请求和一条说明. `Ok(None)` = 不需要改写 (未开开关, 或配置无效 —— 后者由
+/// [`attach`] 统一告警); `Err` = 要估却估不出 (没有市场价, 也没有可反推的报价).
+///
+/// 只改求解用的请求; 煤价对比仍按原请求评估, 所以这些煤在对比卡里照旧是"无报价".
+pub(crate) fn with_estimated_prices(
+    request: &BlendRequest,
+) -> Result<Option<(BlendRequest, String)>, String> {
+    let Some(factor) = request
+        .price_factor
+        .as_ref()
+        .filter(|factor| factor.estimate_unpriced && !factor.extra_coals.is_empty())
+    else {
+        return Ok(None);
+    };
+    if validate_extra_coals(request).is_err() {
+        return Ok(None);
+    }
+    let all: Vec<Coal> = request
+        .coals
+        .iter()
+        .chain(&factor.extra_coals)
+        .cloned()
+        .collect();
+    let Ok(eval) = evaluate(&all, factor) else {
+        return Ok(None);
+    };
+    let Some(market) = eval.market else {
+        return Err("无报价的煤要按估算价求解, 但没有市场价 (也没有可反推的报价), 估不出价".into());
+    };
+    let mut priced = request.clone();
+    let mut count = 0;
+    for coal in &factor.extra_coals {
+        // 自带出厂价 (只是缺运费) 的照原价进; 没报价的才按估算价.
+        if coal.fob > 0.0 {
+            priced.coals.push(coal.clone());
+            continue;
+        }
+        // 质量指数 ≤ 0 (极端劣质外推) 估不出有意义的价, 不进煤池.
+        if let Some(value) = eval
+            .coal_values
+            .iter()
+            .find(|value| value.name == coal.name && value.fair > 0.0)
+        {
+            priced.coals.push(Coal {
+                fob: value.fair,
+                ..coal.clone()
+            });
+            count += 1;
+        }
+    }
+    if let Some(factor) = priced.price_factor.as_mut() {
+        factor.extra_coals.clear();
+    }
+    let note = format!("{count} 种煤无报价, 按估算价求解 (标准品 1000 点 = {market:.0} 元/吨)");
+    Ok(Some((priced, note)))
+}
+
 /// 把评估结果挂到求解结果上 (有解无解都挂). 配置无效只加一条 warning, 不影响求解.
 pub(crate) fn attach(request: &BlendRequest, result: &mut BlendResult) {
     let Some(factor) = &request.price_factor else {
@@ -297,6 +355,7 @@ mod tests {
             adjusts: vec![s, a, g, y, c],
             market_price: None,
             extra_coals: Vec::new(),
+            estimate_unpriced: false,
         }
     }
 
@@ -430,6 +489,7 @@ mod tests {
             adjusts: default_rules(false).adjusts.into_iter().take(1).collect(),
             market_price: Some(2000.0),
             extra_coals: Vec::new(),
+            estimate_unpriced: false,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -453,6 +513,7 @@ mod tests {
             adjusts: vec![default_rules(false).adjusts[2].clone()],
             market_price: Some(2000.0),
             extra_coals: Vec::new(),
+            estimate_unpriced: false,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -536,6 +597,7 @@ mod tests {
                 adjusts: vec![rule("X", Direction::Upper, 1.0, 1.0, 1.0)],
                 market_price: None,
                 extra_coals: Vec::new(),
+                estimate_unpriced: false,
             }
         )
         .is_err());
