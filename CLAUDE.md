@@ -52,6 +52,11 @@ result is post-processed into three business views: cost breakdown, physical ord
 `seed.rs` loads the embedded master DB + status state machine; `predict.rs` is optional CSR regression.
 `rank_interaction.rs` is the opt-in blend-incompatibility term (`BlendRequest.rank_interaction`: CSR − k·Var(Ro),
 linearized per round so the LP stays linear); absent or k = 0 must leave results byte-identical.
+`robustness.rs` is the opt-in price-robustness analysis (`BlendRequest.price_robustness`): prices are mostly
+estimates and the LP optimum is flat, so it re-solves with perturbed prices to report per-coal flip thresholds (how
+many 元 before ≥10% of tonnage moves, vs. that coal's price uncertainty from `price_factor.uncertainty`, keyed by
+`Coal.coal_type`) and a "robust recipe" (risk premium λ·uncertainty, within a cost tolerance). Absent must leave
+results byte-identical.
 
 **Frontend screens** (`doudou_blend/src/screens/`): 今日 `TodayScreen` (solve + cost/recipe/8-indicator view,
 real purchase-qty input, export orders, save-to-history, input-summary panel), 煤池 `CoalPoolScreen`

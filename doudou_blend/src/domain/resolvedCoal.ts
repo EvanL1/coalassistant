@@ -301,6 +301,7 @@ export function toBlendCoal(
     fob: coal.fob_drifted ?? coal.fob,
     frt: coal.frt,
     purchase_terms: purchaseTerms ?? undefined,
+    coal_type: coal.coal_type ?? undefined,
   };
 }
 
@@ -317,6 +318,7 @@ export function toPriceOnlyCoal(coal: ResolvedCoal): Coal | null {
     props: { ...coal.props },
     fob: coal.fob_drifted ?? coal.fob ?? 0,
     frt: 0,
+    coal_type: coal.coal_type ?? undefined,
   };
 }
 

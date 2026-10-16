@@ -405,11 +405,16 @@ async fn solve(
 
     // 管理端设了煤阶交互 k 时, 对没自带 rank_interaction 的请求注入; 没设时原样求解.
     // k 取内存缓存, 不碰库.
-    let input = admin::inject_rank_interaction(input, state.rank_k());
+    let input = admin::inject_rank_interaction(input, state.rank_k()).into_owned();
+    // 求解是纯 CPU 计算 (带价格稳健性分析时要改价重解上百次), 挪出异步线程, 免得卡住
+    // 同一 worker 上的其他请求.
+    let output = tokio::task::spawn_blocking(move || blend_kit::solve_json(&input))
+        .await
+        .unwrap_or_else(|_| r#"{"ok":false,"reason":"求解线程异常退出"}"#.to_string());
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
-        blend_kit::solve_json(&input),
+        output,
     )
         .into_response()
 }
@@ -1103,10 +1108,15 @@ async fn mcp_serve(state: &AppState, presented: &str, body: &[u8]) -> Response {
     } else {
         None
     };
-    let mut replies: Vec<serde_json::Value> = messages
-        .iter()
-        .filter_map(|message| mcp::handle(message, context.as_ref()))
-        .collect();
+    // tools/call 会求解 (CPU 密集), 同 /api/solve 一样挪出异步线程.
+    let mut replies: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
+        messages
+            .iter()
+            .filter_map(|message| mcp::handle(message, context.as_ref()))
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
     match (replies.is_empty(), batch) {
         // 全是通知: 规范要求 202, 不带内容
         (true, _) => StatusCode::ACCEPTED.into_response(),

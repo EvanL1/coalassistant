@@ -25,6 +25,7 @@ fn test_binding_lower_bound_under_truncation_is_feasible() {
         fixed_ratios: None,
         rank_interaction: None,
         price_factor: None,
+        price_robustness: None,
     };
     let result = solve(&request);
     assert!(result.ok, "{:?}", result.reason);
@@ -56,6 +57,7 @@ fn test_assay_exactly_on_lower_bound_stays_feasible() {
         fixed_ratios: None,
         rank_interaction: None,
         price_factor: None,
+        price_robustness: None,
     };
     let result = solve(&request);
     assert!(result.ok, "{:?}", result.reason);

@@ -39,6 +39,8 @@ describe("resolveCoal", () => {
       props: masterCoal.props,
       fob: 1_000,
       frt: 100,
+      // 煤种随煤进求解请求: 估价误差按煤种取, 今日屏按煤种展示.
+      coal_type: "焦煤",
     });
   });
 
@@ -450,6 +452,7 @@ describe("toBlendCoal 的 purchaseTerms 参数 (调用方传入, 不在这里重
       fob: 1_000,
       frt: 100,
       purchase_terms: terms,
+      coal_type: "焦煤",
     });
   });
 

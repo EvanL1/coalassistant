@@ -114,9 +114,11 @@ fn resolve_coal(entry: &Value, pref: Option<&Value>) -> Result<Option<Value>, ()
 
     let fob = resolve_price(entry.get("fob"), pref.and_then(|p| p.get("fob_override")))?;
     let frt = resolve_price(entry.get("frt"), pref.and_then(|p| p.get("frt_override")))?;
-    Ok(Some(json!({
-        "name": name, "props": props, "fob": fob, "frt": frt,
-    })))
+    let mut coal = json!({ "name": name, "props": props, "fob": fob, "frt": frt });
+    if let Some(kind) = entry.get("coal_type").and_then(Value::as_str) {
+        coal["coal_type"] = json!(kind);
+    }
+    Ok(Some(coal))
 }
 
 /// 按线上保存的状态组装求解请求. `master` 是合并了覆盖层的煤库 JSON,
@@ -161,10 +163,10 @@ pub fn build(
                 if coal["fob"].is_number() && coal["frt"].is_number() {
                     lp.push(coal);
                 } else {
-                    let fob = coal["fob"].as_f64().unwrap_or(0.0);
-                    unpriced.push(json!({
-                        "name": coal["name"], "props": coal["props"], "fob": fob, "frt": 0.0,
-                    }));
+                    let mut extra = coal.clone();
+                    extra["fob"] = json!(coal["fob"].as_f64().unwrap_or(0.0));
+                    extra["frt"] = json!(0.0);
+                    unpriced.push(extra);
                 }
             }
             Ok(None) => {}
@@ -198,6 +200,7 @@ pub fn build(
         let mut factor = factor.clone();
         let object = factor.as_object_mut().expect("已判定为对象");
         object.remove("description");
+        object.remove("uncertainty_note");
         if let Some(price) = market_price {
             object.insert("market_price".into(), json!(price));
         }
@@ -205,8 +208,10 @@ pub fn build(
         object.insert("estimate_unpriced".into(), json!(true));
         request["price_factor"] = factor;
     }
-    if let Some(ratios) = &options.fixed_ratios {
-        request["fixed_ratios"] = Value::Object(ratios.clone());
+    match &options.fixed_ratios {
+        Some(ratios) => request["fixed_ratios"] = Value::Object(ratios.clone()),
+        // 估算价不准时配方靠不靠得住: 翻转门槛 + 更稳的配方 (验算模式不需要).
+        None => request["price_robustness"] = json!({}),
     }
 
     let mut notes = Vec::new();
@@ -238,8 +243,8 @@ mod tests {
             "default_contract": {"name": "默认合同", "specs": [{"indicator": "S", "direction": "Upper", "max": 2.0}]},
             "price_factor": {"description": "出处", "adjusts": []},
             "coals": [
-                {"name": "有价", "status": "verified", "props": {"S": 1.0}, "fob": 1000, "frt": 50},
-                {"name": "无价", "status": "active", "props": {"S": 0.5}, "frt": 30},
+                {"name": "有价", "status": "verified", "coal_type": "焦煤", "props": {"S": 1.0}, "fob": 1000, "frt": 50},
+                {"name": "无价", "status": "active", "coal_type": "瘦煤", "props": {"S": 0.5}, "frt": 30},
                 {"name": "停了", "status": "archived", "props": {"S": 0.5}},
                 {"name": "没启用", "status": "active", "props": {"S": 0.5}},
             ]
@@ -279,8 +284,11 @@ mod tests {
         // 无价煤: fob 记 0, 运费也记 0 (出厂口径), 按估算价求解
         assert_eq!(
             req["price_factor"]["extra_coals"],
-            json!([{"name": "无价", "props": {"S": 0.5}, "fob": 0.0, "frt": 0.0}])
+            json!([{"name": "无价", "props": {"S": 0.5}, "fob": 0.0, "frt": 0.0, "coal_type": "瘦煤"}])
         );
+        assert_eq!(req["coals"][0]["coal_type"], "焦煤");
+        // 求最优时顺带做价格稳健性分析
+        assert_eq!(req["price_robustness"], json!({}));
         assert_eq!(req["price_factor"]["estimate_unpriced"], true);
         assert_eq!(req["price_factor"]["market_price"], 1907.0);
         assert!(req["price_factor"].get("description").is_none());
@@ -354,5 +362,9 @@ mod tests {
         assert_eq!(built.contract_name, "用户自定义合同");
         assert_eq!(built.request["specs"][0]["indicator"], "A");
         assert_eq!(built.request["fixed_ratios"]["有价"], 1);
+        assert!(
+            built.request.get("price_robustness").is_none(),
+            "验算不做稳健性分析"
+        );
     }
 }

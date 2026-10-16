@@ -73,9 +73,23 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
         Ok(None) => (None, None),
         Err(reason) => (None, Some(reason)),
     };
-    let mut result = solve_internal(priced.as_ref().unwrap_or(request), evaluators, true);
+    let lp_request = priced.as_ref().unwrap_or(request);
+    let mut result = solve_internal(lp_request, evaluators, true);
     result.warnings.extend(note);
-    // 价格因子只做评估, 不进 LP: 拿到结果 (含无解) 后统一挂上.
+    if let Some(config) = &request.price_robustness {
+        // 验算模式没有"最优"可言; 无解也无从谈稳不稳.
+        if result.ok && request.fixed_ratios.is_none() {
+            let resolve = |trial: &BlendRequest| solve_internal(trial, evaluators, false);
+            match crate::robustness::analyze(lp_request, request, &result, config, &resolve) {
+                Ok((report, warnings)) => {
+                    result.price_robustness = Some(report);
+                    result.warnings.extend(warnings);
+                }
+                Err(reason) => result.warnings.push(reason),
+            }
+        }
+    }
+    // 煤价对比按原请求评估: 拿到结果 (含无解) 后统一挂上.
     crate::price_factor::attach(request, &mut result);
     result
 }
@@ -1100,8 +1114,9 @@ fn solve_once(
     if hard_failed {
         return None;
     }
-    // 配煤价值只给煤价对比卡用; 不带价格因子时不多解一次 LP, 结果与以前逐字节一致.
-    if request.price_factor.is_some() {
+    // 配煤价值给煤价对比卡与价格稳健性 (挑离入选最近的煤) 用; 两者都不要时不多解一次 LP,
+    // 结果与以前逐字节一致.
+    if request.price_factor.is_some() || request.price_robustness.is_some() {
         result.blend_values = blend_values(
             &LpContext {
                 specs,
@@ -1409,6 +1424,7 @@ fn assemble_result(
         coal_values: Vec::new(),
         market_price: None,
         market_price_from_group: false,
+        price_robustness: None,
         blend_values: HashMap::new(),
     };
     let blend_value = |indicator: &str| {
@@ -1977,6 +1993,7 @@ mod tests {
             frt: 0.0,
             petrography: None,
             purchase_terms: None,
+            coal_type: None,
         }
     }
 
@@ -1999,6 +2016,7 @@ mod tests {
             fixed_ratios: None,
             rank_interaction: None,
             price_factor: None,
+            price_robustness: None,
         }
     }
 
@@ -2072,6 +2090,7 @@ mod tests {
             fixed_ratios: None,
             rank_interaction: None,
             price_factor: None,
+            price_robustness: None,
         });
 
         assert!(!result.ok, "灰分连拒收线 10 都够不到, 应当不可行");
@@ -2187,6 +2206,7 @@ mod tests {
             fixed_ratios: None,
             rank_interaction: None,
             price_factor: None,
+            price_robustness: None,
             ..request
         };
         let result = solve_with_evaluators(&request, &trained_evaluators());
@@ -2256,6 +2276,7 @@ mod tests {
             fixed_ratios: None,
             rank_interaction: None,
             price_factor: None,
+            price_robustness: None,
         };
         let result = solve(&request);
 
@@ -2389,6 +2410,7 @@ mod tests {
                 fixed_ratios: None,
                 rank_interaction: None,
                 price_factor: None,
+                price_robustness: None,
             };
             let result = solve(&request);
             assert!(
@@ -2465,6 +2487,7 @@ mod tests {
                 fixed_ratios: None,
                 rank_interaction: None,
                 price_factor: None,
+                price_robustness: None,
             })
             .ok
         };
@@ -2569,6 +2592,7 @@ mod tests {
             fixed_ratios: None,
             rank_interaction: None,
             price_factor: None,
+            price_robustness: None,
         };
         let result = solve(&request);
 
@@ -2611,6 +2635,7 @@ mod tests {
             fixed_ratios: None,
             rank_interaction: None,
             price_factor: None,
+            price_robustness: None,
         };
         let result = solve(&request);
 
@@ -3041,6 +3066,7 @@ mod measurements {
                             fixed_ratios: None,
                             rank_interaction: None,
                             price_factor: None,
+                            price_robustness: None,
                         };
                         let result = solve_with_evaluators(&request, models);
                         if !result.ok {

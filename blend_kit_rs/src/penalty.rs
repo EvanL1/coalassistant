@@ -149,6 +149,7 @@ mod tests {
             frt: 100.0,
             petrography: None,
             purchase_terms: terms,
+            coal_type: None,
         }
     }
 

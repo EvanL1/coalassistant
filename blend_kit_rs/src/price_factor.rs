@@ -356,6 +356,7 @@ mod tests {
             market_price: None,
             extra_coals: Vec::new(),
             estimate_unpriced: false,
+            uncertainty: None,
         }
     }
 
@@ -490,6 +491,7 @@ mod tests {
             market_price: Some(2000.0),
             extra_coals: Vec::new(),
             estimate_unpriced: false,
+            uncertainty: None,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -514,6 +516,7 @@ mod tests {
             market_price: Some(2000.0),
             extra_coals: Vec::new(),
             estimate_unpriced: false,
+            uncertainty: None,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -598,6 +601,7 @@ mod tests {
                 market_price: None,
                 extra_coals: Vec::new(),
                 estimate_unpriced: false,
+                uncertainty: None,
             }
         )
         .is_err());

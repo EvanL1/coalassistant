@@ -55,6 +55,8 @@ import {
   setQuantity,
 } from "../storage";
 import { CoalValueCard } from "./CoalValueCard";
+import { PriceRobustnessCard } from "./PriceRobustnessCard";
+import { coalTypeMap } from "../domain/coalTypes";
 import { CostCard } from "./CostCard";
 import { InfeasiblePanel } from "./InfeasiblePanel";
 
@@ -366,6 +368,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
               },
             }
           : {}),
+        // 煤价估不准时配方靠不靠得住: 逐煤翻转门槛 + 更稳的配方 (参数用核心默认值).
+        price_robustness: {},
       };
 
       const json = await backend.solveJson(JSON.stringify(request));
@@ -602,6 +606,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   const dateStr = `${today.getFullYear()} 年 ${today.getMonth() + 1} 月 ${today.getDate()} 日`;
 
   const sortedRecipe = [...result.orders].sort((a, b) => b.ratio - a.ratio);
+  const coalTypes = coalTypeMap(snapshot.request);
 
   return (
     <>
@@ -778,6 +783,9 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
                   style={{ background: RECIPE_COLORS[i % RECIPE_COLORS.length] }}
                 />
                 <span>{o.coal}</span>
+                {coalTypes.get(o.coal) && (
+                  <span className="recipe-coal-type">{coalTypes.get(o.coal)}</span>
+                )}
               </div>
               <div className="recipe-amount">
                 {(o.ratio * 100).toFixed(2)}% ·{" "}
@@ -787,6 +795,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           ))}
         </div>
       </div>
+
+      <PriceRobustnessCard report={result.price_robustness} types={coalTypes} />
 
       <div className="card today-indicators">
         <div
