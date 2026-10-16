@@ -14,9 +14,10 @@
 //! 升贴水按**点**计: 标准品 = 1000 点, 质量指数 Q(c) = 1000 + Σ adj_i.
 //!
 //! 第二步 —— 定价, 按优先级:
-//!   1. **基准报价** (`benchmarks`, 带日期的市场报价): 在同煤种的基准里取"升贴水差得最少"
-//!      的一条 b (Σ|adj_i(c) − adj_i(b)|, 两边都有该指标的规则才算), 估价 = 基准价 × Q(c)/Q(b).
-//!      同煤种没有基准就在全部基准里找. 这样肥煤对标肥煤、高硫对标高硫, 不必从标准品一路外推.
+//!   1. **基准报价** (`benchmarks`, 带日期的市场报价): 先按 煤种 → 形态 逐层收窄 (每层只在煤写了该属性、
+//!      且有相同的基准时收窄; 不同煤种、形态是不同的市场), 再取"升贴水差得最少"的一条 b
+//!      (Σ|adj_i(c) − adj_i(b)|, 两边都有该指标的规则才算; 地区不同的基准加罚 `region_penalty` 点),
+//!      估价 = 基准价 × Q(c)/Q(b). 这样肥煤对标肥煤、浮精对标浮精、高硫对标高硫, 不必从标准品一路外推.
 //!   2. **市场价** (`market_price`, 标准品 1000 点的价): 估价 = 市场价/1000 × Q(c).
 //!   3. 都没有: 由有报价的煤反推市场价 = 1000 × mean(报价 / Q).
 //!
@@ -99,6 +100,12 @@ pub fn validate(factor: &PriceFactor) -> Result<(), String> {
     if let Some(p) = factor.market_price.filter(|p| !(p.is_finite() && *p > 0.0)) {
         return Err(format!("市场价 {p} 无效, 须为 >0 的有限数"));
     }
+    if let Some(p) = factor
+        .region_penalty
+        .filter(|p| !(p.is_finite() && *p >= 0.0))
+    {
+        return Err(format!("外地基准加罚 {p} 无效, 须为 ≥0 的有限数"));
+    }
     validate_benchmarks(factor)
 }
 
@@ -147,6 +154,8 @@ fn probe(benchmark: &Benchmark) -> Coal {
         petrography: None,
         purchase_terms: None,
         coal_type: benchmark.coal_type.clone(),
+        form: benchmark.form.clone(),
+        region: benchmark.region.clone(),
     }
 }
 
@@ -245,10 +254,11 @@ pub fn evaluate(coals: &[Coal], factor: &PriceFactor) -> Result<PriceEvaluation,
     })
 }
 
-/// 全部用 fixture, 不读 master. 系数是 master 默认表的点数版 (元系数按市场价 2000 折半).
 /// 打过分的基准报价.
 struct Anchor<'a> {
     benchmark: &'a Benchmark,
+    /// 基准品当成煤 (属性与指标), 对标时与煤同一套取值.
+    probe: Coal,
     value: CoalValue,
 }
 
@@ -263,19 +273,52 @@ fn distance(a: &CoalValue, b: &CoalValue) -> f64 {
         .sum()
 }
 
-/// 同煤种里升贴水差得最少的基准; 同煤种没有就在全部基准里找. 并列取先列的.
-fn nearest<'a>(coal: &Coal, value: &CoalValue, anchors: &'a [Anchor<'a>]) -> &'a Anchor<'a> {
-    let same_type: Vec<&Anchor> = anchors
+/// 对标时逐层收窄的属性, 按优先级: 煤种 → 形态 (不同煤种、形态是不同的市场).
+/// 地区不在这里 —— 它只是软偏好, 见 [`nearest`].
+type Attribute = fn(&Coal) -> Option<&str>;
+const MATCH_ORDER: [Attribute; 2] = [|c| c.coal_type.as_deref(), |c| c.form.as_deref()];
+
+/// 只留与煤属性相同的基准; 煤没写该属性、或没有相同的基准时不收窄.
+fn narrow<'a>(
+    pool: Vec<&'a Anchor<'a>>,
+    wanted: Option<&str>,
+    of: Attribute,
+) -> Vec<&'a Anchor<'a>> {
+    let Some(wanted) = wanted else {
+        return pool;
+    };
+    let same: Vec<&Anchor> = pool
         .iter()
-        .filter(|anchor| coal.coal_type.is_some() && anchor.benchmark.coal_type == coal.coal_type)
+        .copied()
+        .filter(|anchor| of(&anchor.probe) == Some(wanted))
         .collect();
-    let pool: Vec<&Anchor> = if same_type.is_empty() {
-        anchors.iter().collect()
+    if same.is_empty() {
+        pool
     } else {
-        same_type
+        same
+    }
+}
+
+/// 按 [`MATCH_ORDER`] 逐层收窄后, 取升贴水差得最少的基准; 配置了 region_penalty 时,
+/// 地区与煤不同的基准距离再加罚这么多点 (煤没写地区不罚). 并列取先列的.
+fn nearest<'a>(
+    coal: &Coal,
+    value: &CoalValue,
+    anchors: &'a [Anchor<'a>],
+    region_penalty: Option<f64>,
+) -> &'a Anchor<'a> {
+    let pool = MATCH_ORDER
+        .iter()
+        .fold(anchors.iter().collect(), |pool, of| {
+            narrow(pool, of(coal), *of)
+        });
+    let cost = |anchor: &Anchor| {
+        let elsewhere = coal.region.is_some() && anchor.probe.region != coal.region;
+        let penalty = region_penalty.filter(|_| elsewhere).unwrap_or(0.0);
+        distance(value, &anchor.value) + penalty
     };
     pool.into_iter()
-        .min_by(|a, b| distance(value, &a.value).total_cmp(&distance(value, &b.value)))
+        .min_by(|a, b| cost(a).total_cmp(&cost(b)))
         .expect("调用方保证至少一条基准")
 }
 
@@ -289,16 +332,21 @@ fn price_by_benchmarks(
     let anchors: Vec<Anchor> = factor
         .benchmarks
         .iter()
-        .map(|benchmark| Anchor {
-            benchmark,
-            value: adjust_coal(&probe(benchmark), rules),
+        .map(|benchmark| {
+            let probe = probe(benchmark);
+            let value = adjust_coal(&probe, rules);
+            Anchor {
+                benchmark,
+                probe,
+                value,
+            }
         })
         .collect();
     let coal_values = coals
         .iter()
         .zip(values)
         .map(|(coal, mut value)| {
-            let anchor = nearest(coal, &value, &anchors);
+            let anchor = nearest(coal, &value, &anchors, factor.region_penalty);
             let fair = anchor.benchmark.effective_price() * value.points / anchor.value.points;
             value.fair = fair;
             value.gap = value.fob.map(|fob| fob - fair);
@@ -435,6 +483,7 @@ mod tests {
             estimate_unpriced: false,
             uncertainty: None,
             benchmarks: Vec::new(),
+            region_penalty: None,
         }
     }
 
@@ -571,6 +620,7 @@ mod tests {
             estimate_unpriced: false,
             uncertainty: None,
             benchmarks: Vec::new(),
+            region_penalty: None,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -597,6 +647,7 @@ mod tests {
             estimate_unpriced: false,
             uncertainty: None,
             benchmarks: Vec::new(),
+            region_penalty: None,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -683,6 +734,7 @@ mod tests {
                 estimate_unpriced: false,
                 uncertainty: None,
                 benchmarks: Vec::new(),
+                region_penalty: None,
             }
         )
         .is_err());

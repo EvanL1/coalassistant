@@ -99,4 +99,21 @@ describe("coalTypeMap", () => {
     expect(types.get("乙")).toBe("瘦煤");
     expect(types.has("丙")).toBe(false);
   });
+
+  it("形态与煤种并列: 精煤不标, 筛精/浮精用简称, 词表外照原样", () => {
+    const request: BlendRequest = {
+      coals: [
+        { name: "洗", props: {}, fob: 1, frt: 0, coal_type: "焦煤", form: "精煤" },
+        { name: "筛", props: {}, fob: 1, frt: 0, coal_type: "肥煤", form: "筛选精煤" },
+        { name: "浮", props: {}, fob: 1, frt: 0, coal_type: "焦煤", form: "浮选精煤" },
+        { name: "泥", props: {}, fob: 1, frt: 0, form: "煤泥" },
+      ],
+      specs: [],
+    };
+    const types = coalTypeMap(request);
+    expect(types.get("洗")).toBe("焦煤");
+    expect(types.get("筛")).toBe("肥煤·筛精");
+    expect(types.get("浮")).toBe("焦煤·浮精");
+    expect(types.get("泥")).toBe("煤泥");
+  });
 });

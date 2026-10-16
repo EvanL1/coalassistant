@@ -124,8 +124,11 @@ fn resolve_coal(entry: &Value, pref: Option<&Value>) -> Result<Option<Value>, ()
     let fob = resolve_price(entry.get("fob"), pref.and_then(|p| p.get("fob_override")))?;
     let frt = resolve_price(entry.get("frt"), pref.and_then(|p| p.get("frt_override")))?;
     let mut coal = json!({ "name": name, "props": props, "fob": fob, "frt": frt });
-    if let Some(kind) = entry.get("coal_type").and_then(Value::as_str) {
-        coal["coal_type"] = json!(kind);
+    // 煤种、形态、地区不进 LP, 估价按它们逐层对标基准.
+    for key in ["coal_type", "form", "region"] {
+        if let Some(text) = entry.get(key).and_then(Value::as_str) {
+            coal[key] = json!(text);
+        }
     }
     Ok(Some(coal))
 }
@@ -258,7 +261,7 @@ mod tests {
             "price_factor": {"description": "出处", "adjusts": []},
             "coals": [
                 {"name": "有价", "status": "verified", "coal_type": "焦煤", "props": {"S": 1.0}, "fob": 1000, "frt": 50},
-                {"name": "无价", "status": "active", "coal_type": "瘦煤", "props": {"S": 0.5}, "frt": 30},
+                {"name": "无价", "status": "active", "coal_type": "瘦煤", "form": "筛选精煤", "region": "山西临汾", "props": {"S": 0.5}, "frt": 30},
                 {"name": "停了", "status": "archived", "props": {"S": 0.5}},
                 {"name": "没启用", "status": "active", "props": {"S": 0.5}},
             ]
@@ -305,7 +308,8 @@ mod tests {
         // 无价煤: fob 记 0, 运费也记 0 (出厂口径), 按估算价求解
         assert_eq!(
             req["price_factor"]["extra_coals"],
-            json!([{"name": "无价", "props": {"S": 0.5}, "fob": 0.0, "frt": 0.0, "coal_type": "瘦煤"}])
+            json!([{"name": "无价", "props": {"S": 0.5}, "fob": 0.0, "frt": 0.0, "coal_type": "瘦煤",
+                    "form": "筛选精煤", "region": "山西临汾"}])
         );
         assert_eq!(req["coals"][0]["coal_type"], "焦煤");
         // 求最优时顺带做价格稳健性分析

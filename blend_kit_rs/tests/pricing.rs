@@ -138,6 +138,80 @@ fn test_rejects_invalid_benchmarks_and_input() {
     assert_eq!(output["ok"], false);
 }
 
+fn tagged(name: &str, coal_type: &str, form: &str, region: Option<&str>, s: f64) -> Value {
+    let mut value = coal(
+        name,
+        coal_type,
+        json!({"S": s, "A": 10.5, "G": 85.0, "Y": 15.0}),
+    );
+    value["form"] = json!(form);
+    value["region"] = json!(region);
+    value
+}
+
+/// 基准: 煤种、形态是硬分层, 地区是软偏好 (外地基准距离加 region_penalty 点).
+fn tagged_benchmarks() -> Value {
+    let quote = |name: &str, coal_type: &str, form: &str, region: &str, s: f64| {
+        json!({"name": name, "coal_type": coal_type, "form": form, "region": region,
+               "price": 2000.0, "date": "2026-10-10",
+               "props": {"S": s, "A": 10.5, "G": 85.0, "Y": 15.0}})
+    };
+    json!([
+        quote("吕梁洗精", "焦煤", "精煤", "山西吕梁", 1.0),
+        quote("临汾报价", "焦煤", "精煤", "山西临汾", 1.0),
+        quote("晋中洗精", "焦煤", "精煤", "山西晋中", 1.3),
+        quote("吕梁浮精", "焦煤", "浮选精煤", "山西吕梁", 2.0),
+        quote("肥煤洗精", "肥煤", "精煤", "山西临汾", 3.0)
+    ])
+}
+
+fn tagged_coals() -> Value {
+    json!([
+        // 两条洗精同硫, 取本地的.
+        tagged("临汾洗精", "焦煤", "精煤", Some("山西临汾"), 1.0),
+        // 本地基准差 22.5 点, 外地差 0 点 + 罚 10 点: 指标接近胜过同地区.
+        tagged("临汾中硫", "焦煤", "精煤", Some("山西临汾"), 1.3),
+        // 同形态优先于指标接近: 浮精对标浮精报价, 哪怕硫分差得远、地区也不同.
+        tagged("临汾浮精", "焦煤", "浮选精煤", Some("山西临汾"), 1.0),
+        // 煤种优先于形态: 肥煤浮精仍对标肥煤.
+        tagged("肥煤浮精", "肥煤", "浮选精煤", None, 1.0),
+        // 地区写得粗 ("山西"): 所有基准一样罚, 等于不看地区.
+        tagged("只写省", "焦煤", "精煤", Some("山西"), 1.3)
+    ])
+}
+
+#[test]
+fn test_benchmark_type_and_form_are_hard_region_is_soft() {
+    let output = estimate(&json!({
+        "coals": tagged_coals(),
+        "price_factor": {"adjusts": adjusts(), "benchmarks": tagged_benchmarks(),
+                         "region_penalty": 10.0}
+    }));
+    assert_eq!(output["ok"], true, "{output}");
+    let anchor = |name: &str| value(&output, name)["benchmark"].clone();
+    assert_eq!(anchor("临汾洗精"), "临汾报价");
+    assert_eq!(anchor("临汾中硫"), "晋中洗精");
+    assert_eq!(anchor("临汾浮精"), "吕梁浮精");
+    assert_eq!(anchor("肥煤浮精"), "肥煤洗精");
+    assert_eq!(anchor("只写省"), "晋中洗精");
+}
+
+#[test]
+fn test_region_ignored_without_penalty() {
+    let output = estimate(&json!({
+        "coals": tagged_coals(),
+        "price_factor": {"adjusts": adjusts(), "benchmarks": tagged_benchmarks()}
+    }));
+    // 同分取先列的: 不看地区时临汾的煤对标吕梁洗精.
+    assert_eq!(value(&output, "临汾洗精")["benchmark"], "吕梁洗精");
+    let bad = estimate(&json!({
+        "coals": tagged_coals(),
+        "price_factor": {"adjusts": adjusts(), "benchmarks": tagged_benchmarks(),
+                         "region_penalty": -1.0}
+    }));
+    assert_eq!(bad["ok"], false, "{bad}");
+}
+
 #[test]
 fn test_solver_uses_benchmark_prices_for_unpriced_coals() {
     let request = json!({

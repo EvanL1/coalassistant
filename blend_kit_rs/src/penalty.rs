@@ -150,6 +150,8 @@ mod tests {
             petrography: None,
             purchase_terms: terms,
             coal_type: None,
+            form: None,
+            region: None,
         }
     }
 

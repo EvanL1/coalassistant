@@ -241,6 +241,9 @@ if (priceFactor != null) {
     if (benchmark.coal_type != null && !COAL_TYPES.includes(benchmark.coal_type)) {
       fail(`${label}: 煤种 ${benchmark.coal_type} 不在 schema.coal_type 词表内`);
     }
+    if (benchmark.form != null && !FORMS.includes(benchmark.form)) {
+      fail(`${label}: 形态 ${benchmark.form} 不在 schema.form 词表内`);
+    }
     if (!(typeof benchmark.price === "number" && benchmark.price > 0)) fail(`${label}: price 须为正数`);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(benchmark.date ?? "")) fail(`${label}: date 须为 YYYY-MM-DD`);
     if (benchmark.current_price != null) fail(`${label}: current_price 由服务端推算, master 里不要写`);
@@ -250,6 +253,10 @@ if (priceFactor != null) {
       }
     }
     if (typeof benchmark.props?.S !== "number") fail(`${label}: 至少要有硫分 S`);
+  }
+  const regionPenalty = priceFactor.region_penalty;
+  if (regionPenalty != null && !(typeof regionPenalty === "number" && Number.isFinite(regionPenalty) && regionPenalty >= 0)) {
+    fail(`price_factor.region_penalty=${regionPenalty} 须为 ≥0 的有限数`);
   }
   const uncertainty = priceFactor.uncertainty;
   if (uncertainty != null) {
@@ -273,6 +280,27 @@ if (failures.length) {
 if (notices.length) {
   console.log(`煤种与国标判据不一致 (${notices.length} 条, 仅提示, 请人工确认):`);
   for (const message of notices) console.log(`  - ${message}`);
+}
+
+// 估价按 煤种 → 形态 → 地区 对标, 地区要与基准写法一致才对得上 (只提示).
+const benchmarkRegions = new Set(
+  (master.price_factor?.benchmarks ?? []).map((b) => b.region).filter(Boolean),
+);
+if (benchmarkRegions.size) {
+  const unmatched = {};
+  for (const coal of master.coals.filter((c) => c.status === "active" || c.status === "verified")) {
+    const region = coal.region ?? "(无)";
+    if (!benchmarkRegions.has(region)) unmatched[region] = (unmatched[region] ?? 0) + 1;
+  }
+  const total = Object.values(unmatched).reduce((a, b) => a + b, 0);
+  if (total) {
+    console.log(
+      `地区对不上任何基准 (${total} 种在用煤, 仅提示, 地区只是软偏好, 对不上只是不享受本地优先; 基准地区: ${[...benchmarkRegions].join("/")}): ` +
+        Object.entries(unmatched)
+          .map(([region, count]) => `${region} ${count}`)
+          .join(", "),
+    );
+  }
 }
 
 const byStatus = {};

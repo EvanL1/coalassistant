@@ -20,6 +20,8 @@ function draft(extra: Partial<Parameters<typeof draftToBenchmark>[0]> = {}) {
   return {
     name: "晋中中硫主焦",
     coal_type: "焦煤",
+    form: "精煤",
+    region: " 山西晋中 ",
     price: "2050",
     date: "2026-10-16",
     source: "",
@@ -33,11 +35,15 @@ describe("draftToBenchmark", () => {
     expect(draftToBenchmark(draft())).toEqual({
       name: "晋中中硫主焦",
       coal_type: "焦煤",
+      form: "精煤",
+      region: "山西晋中",
       props: { S: 1.3, A: 10.5, G: 80 },
       price: 2050,
       date: "2026-10-16",
       source: undefined,
     });
+    expect(draftToBenchmark(draft({ region: "" })))
+      .toMatchObject({ region: undefined });
   });
 
   it("缺品名、价格非正、缺硫分都拦下", () => {
@@ -55,6 +61,8 @@ describe("BenchmarkCard", () => {
       {
         name: "蒲县单一肥煤",
         coal_type: "肥煤",
+        form: "筛选精煤",
+        region: "山西临汾",
         props: { S: 3.8, A: 11, G: 95, Y: 32 },
         price: 2145,
         date: "2026-10-09",
@@ -74,6 +82,8 @@ describe("BenchmarkCard", () => {
     render(<BenchmarkCard />);
     expect(await screen.findByText(/蒲县单一肥煤/)).toBeTruthy();
     expect(screen.getByText("S3.8 A11 G95 Y32")).toBeTruthy();
+    // 煤种、形态、地区并列显示.
+    expect(screen.getByText("肥煤·筛精 · 山西临汾")).toBeTruthy();
     expect(screen.getByText("今 ≈ 2101")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "删除" })).toHaveLength(1);
   });

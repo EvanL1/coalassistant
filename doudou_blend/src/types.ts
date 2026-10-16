@@ -115,8 +115,12 @@ export interface Coal {
   /** 可选煤岩数据; 提供时混煤 σ 走直方图精确计算. */
   petrography?: Petrography | null;
   purchase_terms?: PurchaseTerms | null;
-  /** 煤种 (焦煤/肥煤/1/3焦煤/瘦煤…). 不进 LP; 用于展示与按煤种取估价误差. */
+  /** 煤种 (焦煤/肥煤/1/3焦煤/瘦煤…). 不进 LP; 用于展示、估价对标与按煤种取估价误差. */
   coal_type?: string | null;
+  /** 产品形态 (精煤/筛选精煤/浮选精煤…), 与煤种并列. 不进 LP; 估价对标用. */
+  form?: string | null;
+  /** 产地 (如 "山西临汾"), 与煤种并列. 不进 LP; 估价对标用. */
+  region?: string | null;
 }
 
 /** 本次指标评估实际采用的模型摘要. */
@@ -182,12 +186,17 @@ export interface PriceFactor {
   uncertainty?: PriceUncertainty | null;
   /** 基准报价 (带日期的市场价); 有就按同煤种、指标最接近的基准估价, 优先于 market_price. */
   benchmarks?: Benchmark[];
+  /** 对标时外地基准的距离加罚 (点); 煤种、形态是硬分层, 地区只是软偏好. 缺省 = 不看地区. */
+  region_penalty?: number | null;
 }
 
 /** 基准报价: 一个具体品种某天的市场价 (出厂含税). */
 export interface Benchmark {
   name: string;
   coal_type?: string | null;
+  /** 产品形态, 与 Coal.form 同一词表; 估价按 煤种 → 形态 → 地区 逐层对标. */
+  form?: string | null;
+  region?: string | null;
   /** 基准品的指标. */
   props: Partial<Record<string, number>>;
   /** 报价 (元/吨). */

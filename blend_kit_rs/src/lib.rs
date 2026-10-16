@@ -63,6 +63,8 @@ pub fn coal_from_tuple(name: &str, t: (f64, f64, f64, f64, f64, f64, f64, f64, f
         petrography: None,
         purchase_terms: None,
         coal_type: None,
+        form: None,
+        region: None,
     }
 }
 

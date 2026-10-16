@@ -240,6 +240,8 @@ fn master_ranks(master_json: &str) -> HashMap<String, Option<f64>> {
                 petrography: None,
                 purchase_terms: None,
                 coal_type: entry.coal_type,
+                form: None,
+                region: None,
             };
             (entry.name, blend_kit::coal_rank(&coal))
         })

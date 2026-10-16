@@ -38,6 +38,8 @@ export function toRequestBenchmark(entry: BenchmarkEntry): Benchmark {
   return {
     name: entry.name,
     coal_type: entry.coal_type ?? undefined,
+    form: entry.form ?? undefined,
+    region: entry.region ?? undefined,
     props: { ...entry.props },
     price: entry.price,
     date: entry.date,

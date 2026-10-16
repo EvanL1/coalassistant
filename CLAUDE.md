@@ -54,7 +54,7 @@ result is post-processed into three business views: cost breakdown, physical ord
 linearized per round so the LP stays linear); absent or k = 0 must leave results byte-identical.
 `pricing.rs` is the standalone **estimation module** (估价模块): quality index (1000-point premiums/discounts from
 `price_factor.adjusts`) + pricing against **benchmarks** (`price_factor.benchmarks`: dated market quotes per coal type) —
-each coal is priced from the same-type benchmark whose premiums differ least, `price = benchmark × Q(coal)/Q(benchmark)`,
+each coal is priced from the benchmark of the same coal type → same form (`Coal.form`: 精煤/筛选精煤/浮选精煤…; hard layers, each applied only if such a benchmark exists) whose premiums differ least — region is only a soft preference (`price_factor.region_penalty` points added to other-region benchmarks), because forcing a sparse local benchmark mis-prices by hundreds — `price = benchmark × Q(coal)/Q(benchmark)`,
 falling back to `market_price`. Own JSON entry `estimate_json` (server `POST /api/price`, CLI `blend price`);
 `price_factor.rs` is only the solver glue (unpriced coals enter the LP at the estimate; `coal_values` attached after).
 Benchmarks live in two layers merged by the server (`blend_kit_server/src/benchmarks.rs`): master defaults + the

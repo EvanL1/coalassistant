@@ -844,6 +844,8 @@ mod tests {
                 petrography: None,
                 purchase_terms: None,
                 coal_type: None,
+                form: None,
+                region: None,
             }],
             specs: vec![spec],
             total_quantity: None,
@@ -1077,6 +1079,8 @@ mod tests {
             petrography: None,
             purchase_terms: Some(terms),
             coal_type: None,
+            form: None,
+            region: None,
         }
     }
 

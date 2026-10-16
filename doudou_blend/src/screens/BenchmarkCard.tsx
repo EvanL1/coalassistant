@@ -12,10 +12,12 @@ import {
   deleteBenchmark,
   fetchBenchmarks,
 } from "../benchmarks";
+import { coalTag } from "../domain/coalTypes";
 import type { Benchmark, BenchmarkEntry } from "../types";
 
 const SPEC_KEYS = ["S", "A", "V", "G", "Y"] as const;
 const COAL_TYPES = ["焦煤", "肥煤", "1/3焦煤", "瘦煤", "贫瘦煤", "气煤"];
+const FORMS = ["精煤", "筛选精煤", "浮选精煤", "中煤", "煤泥", "原煤"];
 
 const small = { fontSize: 11, color: "var(--c-text-3)" };
 const cell = { padding: "4px 6px 4px 0", verticalAlign: "top" as const };
@@ -33,6 +35,8 @@ function specText(props: BenchmarkEntry["props"]): string {
 interface Draft {
   name: string;
   coal_type: string;
+  form: string;
+  region: string;
   price: string;
   date: string;
   source: string;
@@ -43,6 +47,8 @@ function emptyDraft(): Draft {
   return {
     name: "",
     coal_type: "焦煤",
+    form: "精煤",
+    region: "",
     price: "",
     date: today(),
     source: "",
@@ -68,6 +74,8 @@ export function draftToBenchmark(draft: Draft): Benchmark | string {
   return {
     name,
     coal_type: draft.coal_type,
+    form: draft.form,
+    region: draft.region.trim() || undefined,
     props,
     price,
     date: draft.date,
@@ -143,7 +151,8 @@ export function BenchmarkCard() {
     <div className="card">
       <div className="card-title">基准报价</div>
       <p style={{ ...small, margin: "0 0 12px" }}>
-        估价 = 同煤种、指标最接近的基准报价 × 质量指数之比. 基准越新、煤种越全, 估价越准.
+        估价按 煤种 → 形态 → 地区 逐层找同类基准, 再取指标最接近的一条, 按质量指数之比换算.
+        基准越新、品类越全, 估价越准. 地区写到市 (如"山西临汾"), 与煤库写法一致才对得上.
         拿到某个品种的最新出厂含税价就补录一条 (同名取最新报价日); 报价日早于焦煤现货指数最新一期的,
         按指数涨跌推算到今天.
       </p>
@@ -167,7 +176,10 @@ export function BenchmarkCard() {
             {rows.map((row) => (
               <tr key={row.name}>
                 <td style={cell}>
-                  <span style={small}>{row.coal_type ?? "未分煤种"}</span> {row.name}
+                  <span style={small}>
+                    {[coalTag(row) || "未分煤种", row.region].filter(Boolean).join(" · ")}
+                  </span>{" "}
+                  {row.name}
                   {row.source && <div style={small}>{row.source}</div>}
                 </td>
                 <td style={cell}>{specText(row.props)}</td>
@@ -214,7 +226,21 @@ export function BenchmarkCard() {
             </option>
           ))}
         </select>
+        <select
+          className="input"
+          style={{ height: 30, fontSize: 12 }}
+          aria-label="基准形态"
+          value={draft.form}
+          onChange={(e) => setDraft({ ...draft, form: e.target.value })}
+        >
+          {FORMS.map((form) => (
+            <option key={form} value={form}>
+              {form}
+            </option>
+          ))}
+        </select>
         {input(draft.name, (name) => setDraft({ ...draft, name }), "品名", 120)}
+        {input(draft.region, (region) => setDraft({ ...draft, region }), "地区", 80)}
         {SPEC_KEYS.map((key) =>
           input(
             draft.props[key],

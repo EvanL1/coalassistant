@@ -251,13 +251,11 @@ fn format_result(
         }
         // 每种煤的单价: 有报价用报价, 否则用估算价 (记下对标的基准).
         let mut price: Map<String, Value> = Map::new();
-        let mut anchor: Map<String, Value> = Map::new();
+        let mut notes: Map<String, Value> = Map::new();
         for value in result["coal_values"].as_array().into_iter().flatten() {
             if let Some(name) = value["name"].as_str() {
                 price.insert(name.into(), value["fair"].clone());
-                if let Some(benchmark) = value.get("benchmark").filter(|b| b.is_string()) {
-                    anchor.insert(name.into(), benchmark.clone());
-                }
+                notes.insert(name.into(), Value::String(price_note(value)));
             }
         }
         for coal in request["coals"].as_array().into_iter().flatten() {
@@ -273,10 +271,8 @@ fn format_result(
                 .and_then(Value::as_f64)
                 .map(|p| format!(", 估算出厂价 {p:.0}"))
                 .unwrap_or_default();
-            let unit = match anchor.get(name.as_str()).and_then(Value::as_str) {
-                Some(benchmark) => format!("{unit}, 对标{benchmark}"),
-                None => unit,
-            };
+            let note = notes.get(name.as_str()).and_then(Value::as_str);
+            let unit = format!("{unit}{}", note.unwrap_or_default());
             out.push(format!(
                 "- {} {:.1}% ({:.0} 吨{unit})",
                 typed(&name, &types),
@@ -525,15 +521,17 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
                 })
             })
             .collect();
-        let mut line = format!(
-            "{name} [{status}] {} {}",
-            coal["coal_type"].as_str().unwrap_or(""),
-            coal["region"].as_str().unwrap_or("")
-        );
+        let tags: Vec<&str> = ["coal_type", "form", "region"]
+            .iter()
+            .filter_map(|key| coal[*key].as_str())
+            .collect();
+        let mut line = format!("{name} [{status}] {}", tags.join(" "));
         line.push_str(&format!("\n  指标: {}", props.join(", ")));
         if let Some(factor) = &factor {
+            // 带上煤种、形态、地区: 估价按它们逐层对标基准, 与 today_blend 同一口径.
             let as_coal: Result<blend_kit::Coal, _> = serde_json::from_value(json!({
-                "name": name, "props": coal["props"], "fob": 0.0, "frt": 0.0
+                "name": name, "props": coal["props"], "fob": 0.0, "frt": 0.0,
+                "coal_type": coal["coal_type"], "form": coal["form"], "region": coal["region"]
             }));
             if let Ok(estimate) = as_coal
                 .map_err(|_| ())
@@ -542,7 +540,12 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
                 if let Some(value) = estimate.coal_values.first() {
                     let price = estimate
                         .market
-                        .map(|_| format!(", 估算出厂价 {:.0} 元/吨", value.fair))
+                        .map(|_| {
+                            let note = serde_json::to_value(value)
+                                .map(|v| price_note(&v))
+                                .unwrap_or_default();
+                            format!(", 估算出厂价 {:.0} 元/吨{note}", value.fair)
+                        })
                         .unwrap_or_default();
                     line.push_str(&format!("\n  质量指数 {:.0}{price}", value.points));
                 }
@@ -558,6 +561,14 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
     }
     out.push("(规格) = 合同/报价的保证界限, 不是化验值".into());
     Ok(out.join("\n"))
+}
+
+/// 估算价的出处说明 (一条 coal_values): ", 对标X"; 没对标基准为空.
+fn price_note(value: &Value) -> String {
+    value["benchmark"]
+        .as_str()
+        .map(|benchmark| format!(", 对标{benchmark}"))
+        .unwrap_or_default()
 }
 
 fn spec_fields_legend_needed(lines: &[String]) -> bool {
@@ -838,5 +849,28 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("按指数推算到今天 1840"), "{text}");
+    }
+
+    #[test]
+    fn test_find_coal_estimates_by_type_and_form() {
+        let mut context = context();
+        context.market_price = None;
+        context.master["coals"][1]["form"] = json!("筛选精煤");
+        context.master["coals"][1]["region"] = json!("山西临汾");
+        // 前两条与"高硫"硫分相同, 但一条是焦煤、一条是浮精; 它是瘦煤筛精, 只能对标瘦煤筛精.
+        context.benchmarks = vec![
+            json!({"name": "高硫焦", "coal_type": "焦煤", "form": "筛选精煤", "props": {"S": 2.4},
+                   "price": 2000.0, "date": "2026-10-10"}),
+            json!({"name": "高硫瘦浮精", "coal_type": "瘦煤", "form": "浮选精煤", "props": {"S": 2.4},
+                   "price": 1700.0, "date": "2026-10-10"}),
+            json!({"name": "中硫瘦筛精", "coal_type": "瘦煤", "form": "筛选精煤", "props": {"S": 1.3},
+                   "price": 1800.0, "date": "2026-10-10"}),
+        ];
+        let (text, _) = call_with(&context, "find_coal", json!({"name": "高硫"}));
+        assert!(
+            text.contains("高硫 [在用] 瘦煤 筛选精煤 山西临汾"),
+            "{text}"
+        );
+        assert!(text.contains("对标中硫瘦筛精"), "{text}");
     }
 }

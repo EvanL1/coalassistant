@@ -1994,6 +1994,8 @@ mod tests {
             petrography: None,
             purchase_terms: None,
             coal_type: None,
+            form: None,
+            region: None,
         }
     }
 

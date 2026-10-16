@@ -111,7 +111,7 @@ async fn latest_stored(pool: &PgPool) -> Result<Vec<Value>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
         SELECT DISTINCT ON (name)
-               id, name, coal_type, props, price, quoted_on, source, created_by
+               id, name, coal_type, form, region, props, price, quoted_on, source, created_by
         FROM price_benchmarks
         ORDER BY name, quoted_on DESC, created_at DESC
         "#,
@@ -133,11 +133,10 @@ fn stored_row(row: sqlx::postgres::PgRow) -> Result<Value, sqlx::Error> {
         "created_by": row.try_get::<String, _>("created_by")?,
         "origin": "stored",
     });
-    if let Some(kind) = row.try_get::<Option<String>, _>("coal_type")? {
-        benchmark["coal_type"] = json!(kind);
-    }
-    if let Some(source) = row.try_get::<Option<String>, _>("source")? {
-        benchmark["source"] = json!(source);
+    for key in ["coal_type", "form", "region", "source"] {
+        if let Some(text) = row.try_get::<Option<String>, _>(key)? {
+            benchmark[key] = json!(text);
+        }
     }
     Ok(benchmark)
 }
@@ -221,13 +220,15 @@ pub(crate) async fn create(
     let id = Uuid::new_v4().to_string();
     let inserted = sqlx::query(
         r#"
-        INSERT INTO price_benchmarks (id, name, coal_type, props, price, quoted_on, source, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO price_benchmarks (id, name, coal_type, form, region, props, price, quoted_on, source, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(&id)
     .bind(benchmark.name.trim())
     .bind(&benchmark.coal_type)
+    .bind(&benchmark.form)
+    .bind(&benchmark.region)
     .bind(json!(benchmark.props))
     .bind(benchmark.price)
     .bind(quoted_on)

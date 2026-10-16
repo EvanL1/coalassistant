@@ -39,9 +39,13 @@ describe("resolveCoal", () => {
       props: masterCoal.props,
       fob: 1_000,
       frt: 100,
-      // 煤种随煤进求解请求: 估价误差按煤种取, 今日屏按煤种展示.
+      // 煤种、地区随煤进求解请求: 估价按 煤种 → 形态 → 地区 对标, 今日屏按煤种展示.
       coal_type: "焦煤",
+      region: "山西",
     });
+    expect(
+      toBlendCoal(resolveCoal({ ...masterCoal, form: "筛选精煤" }, null, "master"))?.form,
+    ).toBe("筛选精煤");
   });
 
   it("价格和指标覆盖在展示与求解输入中保持一致，并保留合法的 0", () => {
@@ -453,6 +457,7 @@ describe("toBlendCoal 的 purchaseTerms 参数 (调用方传入, 不在这里重
       frt: 100,
       purchase_terms: terms,
       coal_type: "焦煤",
+      region: "山西",
     });
   });
 

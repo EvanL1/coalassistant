@@ -60,10 +60,16 @@ pub struct Coal {
     /// 该煤采购合同条款. None = 按报价原值, 不做买入侧修正.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purchase_terms: Option<PurchaseTerms>,
-    /// 煤种 (焦煤 / 肥煤 / 1/3焦煤 / 瘦煤 / 贫瘦煤 / 气煤 …). 不进 LP; 只用于展示,
-    /// 以及价格稳健性分析里按煤种取估算价误差.
+    /// 煤种 (焦煤 / 肥煤 / 1/3焦煤 / 瘦煤 / 贫瘦煤 / 气煤 …). 不进 LP; 用于展示、
+    /// 估价对标基准, 以及价格稳健性分析里按煤种取估算价误差.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coal_type: Option<String>,
+    /// 产品形态 (精煤 / 筛选精煤 / 浮选精煤 / 煤泥 …), 与煤种并列. 不进 LP; 估价对标用.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<String>,
+    /// 产地 (如 "山西临汾"), 与煤种并列. 不进 LP; 估价对标用.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 impl Coal {
@@ -404,6 +410,11 @@ pub struct PriceFactor {
     /// 基准报价 (带日期的市场价). 有就按同煤种、指标最接近的基准估价, 优先于 market_price.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub benchmarks: Vec<Benchmark>,
+    /// 对标时外地基准的距离加罚 (点): 本地基准指标差得不超过这么多点才优先用本地的.
+    /// 煤种、形态是硬分层, 地区只是软偏好 —— 基准稀疏时, 指标接近比同地区要紧.
+    /// None = 不看地区.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region_penalty: Option<f64>,
 }
 
 /// 基准报价: 一个具体品种某天的市场价 (出厂含税). 估价按"同煤种、指标最接近"的基准,
@@ -415,6 +426,12 @@ pub struct Benchmark {
     /// 煤种, 与 [`Coal::coal_type`] 同一词表. None = 只在没有同煤种基准时参与.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coal_type: Option<String>,
+    /// 产品形态, 与 [`Coal::form`] 同一词表.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<String>,
+    /// 产地, 与 [`Coal::region`] 同一写法.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
     /// 基准品的指标 (报价单上的那组数).
     pub props: HashMap<String, f64>,
     /// 报价 (元/吨, 出厂含税).
