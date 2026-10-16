@@ -65,6 +65,38 @@ const FORMS = Object.keys(schema.form ?? {});
 if (COAL_TYPES.length === 0) fail("schema.coal_type 未声明煤种词表");
 if (FORMS.length === 0) fail("schema.form 未声明产品形态词表");
 
+/**
+ * GB/T 5751-2009 烟煤分类, 按 schema.coal_type_basis: V 视为 Vdaf, 判据 V/G/Y.
+ * G > 85 且 Y > 25 才归肥煤 / 气肥煤; 缺 Y 时按焦煤或 1/3焦煤 记 (同 basis 的约定).
+ * 返回 null = 指标不够, 判不了.
+ */
+function gbCoalType(props) {
+  const { V, G, Y } = props;
+  if (typeof V !== "number" || typeof G !== "number") return null;
+  if (V <= 10) return "无烟煤";
+  const fat = G > 85 && typeof Y === "number" && Y > 25;
+  if (V <= 20) {
+    if (fat) return "肥煤";
+    if (G <= 5) return "贫煤";
+    if (G <= 20) return "贫瘦煤";
+    return G <= 65 ? "瘦煤" : "焦煤";
+  }
+  if (V <= 37 && !fat) {
+    if (G <= 5) return "不粘煤";
+    if (G <= 30) return "弱粘煤";
+    if (G <= 50) return "1/2中粘煤";
+    if (V <= 28) return "焦煤";
+    return G <= 65 ? "气煤" : "1/3焦煤";
+  }
+  if (V <= 37) return "肥煤";
+  if (fat) return "气肥煤";
+  return G > 35 ? "气煤" : "长焰煤";
+}
+
+// 煤种与国标判据不一致只提示, 不判失败: 有的是用户按实情改标 (如庞庞塔), 有的是
+// Y 只有规格值、真实值可能不过 25, 要人看.
+const notices = [];
+
 // ---------- 逐条记录 ----------
 const seen = new Set();
 for (const coal of master.coals) {
@@ -129,6 +161,17 @@ for (const coal of master.coals) {
       fail(`${label}: status=${coal.status} 却一项基础指标都没有`);
     }
   }
+  // 能进煤池的煤必须标煤种: 价格稳健性按煤种取估价误差, 今日屏和手机 Agent 按煤种展示.
+  if (["verified", "active"].includes(coal.status)) {
+    if (coal.coal_type == null) fail(`${label}: status=${coal.status} 却没有 coal_type`);
+    const gb = gbCoalType(props);
+    if (gb && coal.coal_type != null && gb !== coal.coal_type) {
+      const spec = coal.confidence?.Y === "spec" ? " (Y 是规格值)" : "";
+      notices.push(
+        `${label}: 标 ${coal.coal_type}, 国标判据为 ${gb} (V${props.V} G${props.G} Y${props.Y ?? "缺"}${spec})`,
+      );
+    }
+  }
 }
 
 // ---------- 默认合同 ----------
@@ -185,6 +228,16 @@ if (priceFactor != null) {
       .filter((ind, i, all) => all.indexOf(ind) !== i);
     if (duplicated.length) fail(`price_factor: 指标重复 ${[...new Set(duplicated)].join("/")}`);
   }
+  const uncertainty = priceFactor.uncertainty;
+  if (uncertainty != null) {
+    const isError = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+    if (!isError(uncertainty.default)) fail("price_factor.uncertainty.default 须为 ≥0 的有限数");
+    if (!isError(uncertainty.quoted)) fail("price_factor.uncertainty.quoted 须为 ≥0 的有限数");
+    for (const [type, value] of Object.entries(uncertainty.by_coal_type ?? {})) {
+      if (!COAL_TYPES.includes(type)) fail(`price_factor.uncertainty: 煤种 ${type} 不在 schema.coal_type 词表内`);
+      if (!isError(value)) fail(`price_factor.uncertainty.${type} 须为 ≥0 的有限数`);
+    }
+  }
 }
 
 // ---------- 结果 ----------
@@ -192,6 +245,11 @@ if (failures.length) {
   console.error(`Master 数据自检失败 (${failures.length} 项):`);
   for (const message of failures) console.error(`  - ${message}`);
   process.exit(1);
+}
+
+if (notices.length) {
+  console.log(`煤种与国标判据不一致 (${notices.length} 条, 仅提示, 请人工确认):`);
+  for (const message of notices) console.log(`  - ${message}`);
 }
 
 const byStatus = {};
