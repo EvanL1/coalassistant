@@ -228,6 +228,29 @@ if (priceFactor != null) {
       .filter((ind, i, all) => all.indexOf(ind) !== i);
     if (duplicated.length) fail(`price_factor: 指标重复 ${[...new Set(duplicated)].join("/")}`);
   }
+  // 基准报价: 估价按同煤种、指标最接近的一条换算. 名字唯一、煤种在词表里、价为正、
+  // 日期 YYYY-MM-DD、指标是已知指标的数.
+  const benchmarks = priceFactor.benchmarks ?? [];
+  if (!Array.isArray(benchmarks)) fail("price_factor.benchmarks 必须是数组");
+  const benchmarkNames = new Set();
+  for (const benchmark of Array.isArray(benchmarks) ? benchmarks : []) {
+    const label = `price_factor 基准 ${benchmark.name ?? "(无名)"}`;
+    if (!benchmark.name) fail(`${label}: 缺 name`);
+    if (benchmarkNames.has(benchmark.name)) fail(`${label}: 重名`);
+    benchmarkNames.add(benchmark.name);
+    if (benchmark.coal_type != null && !COAL_TYPES.includes(benchmark.coal_type)) {
+      fail(`${label}: 煤种 ${benchmark.coal_type} 不在 schema.coal_type 词表内`);
+    }
+    if (!(typeof benchmark.price === "number" && benchmark.price > 0)) fail(`${label}: price 须为正数`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(benchmark.date ?? "")) fail(`${label}: date 须为 YYYY-MM-DD`);
+    if (benchmark.current_price != null) fail(`${label}: current_price 由服务端推算, master 里不要写`);
+    for (const [key, value] of Object.entries(benchmark.props ?? {})) {
+      if (!INDICATORS.includes(key) || typeof value !== "number" || !Number.isFinite(value)) {
+        fail(`${label}: 指标 ${key}=${value} 无效`);
+      }
+    }
+    if (typeof benchmark.props?.S !== "number") fail(`${label}: 至少要有硫分 S`);
+  }
   const uncertainty = priceFactor.uncertainty;
   if (uncertainty != null) {
     const isError = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;

@@ -52,6 +52,14 @@ result is post-processed into three business views: cost breakdown, physical ord
 `seed.rs` loads the embedded master DB + status state machine; `predict.rs` is optional CSR regression.
 `rank_interaction.rs` is the opt-in blend-incompatibility term (`BlendRequest.rank_interaction`: CSR − k·Var(Ro),
 linearized per round so the LP stays linear); absent or k = 0 must leave results byte-identical.
+`pricing.rs` is the standalone **estimation module** (估价模块): quality index (1000-point premiums/discounts from
+`price_factor.adjusts`) + pricing against **benchmarks** (`price_factor.benchmarks`: dated market quotes per coal type) —
+each coal is priced from the same-type benchmark whose premiums differ least, `price = benchmark × Q(coal)/Q(benchmark)`,
+falling back to `market_price`. Own JSON entry `estimate_json` (server `POST /api/price`, CLI `blend price`);
+`price_factor.rs` is only the solver glue (unpriced coals enter the LP at the estimate; `coal_values` attached after).
+Benchmarks live in two layers merged by the server (`blend_kit_server/src/benchmarks.rs`): master defaults + the
+`price_benchmarks` table (admin-entered, latest date per name wins); quotes older than the latest CCP index period are
+drifted by the index ratio into `current_price`. CCP is index points (2017-01 = 1000) — never use it as a price.
 `robustness.rs` is the opt-in price-robustness analysis (`BlendRequest.price_robustness`): prices are mostly
 estimates and the LP optimum is flat, so it re-solves with perturbed prices to report per-coal flip thresholds (how
 many 元 before ≥10% of tonnage moves, vs. that coal's price uncertainty from `price_factor.uncertainty`, keyed by

@@ -175,4 +175,20 @@ describe("CoalValueCard 口径与标签", () => {
       "超出系数线性区间: 硫",
     );
   });
+
+  it("按基准估价时每行注明对标的基准", () => {
+    render(
+      <CoalValueCard
+        result={result({
+          coal_values: [
+            value("老母坡筛精", 0, 2299, { fob: null, gap: null, ratio: null, benchmark: "蒲县单一肥煤" }),
+          ],
+          market_price: 2076,
+        })}
+      />,
+    );
+    expect(screen.getByText("对标 蒲县单一肥煤")).toBeTruthy();
+    expect(screen.getByText(/同煤种、指标最接近的基准报价/)).toBeTruthy();
+    expect(screen.getByText(/标准品 1000 点约合 2076 元\/吨/)).toBeTruthy();
+  });
 });

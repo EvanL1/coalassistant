@@ -180,6 +180,46 @@ export interface PriceFactor {
   estimate_unpriced?: boolean;
   /** 煤价典型误差, 给价格稳健性分析用. */
   uncertainty?: PriceUncertainty | null;
+  /** 基准报价 (带日期的市场价); 有就按同煤种、指标最接近的基准估价, 优先于 market_price. */
+  benchmarks?: Benchmark[];
+}
+
+/** 基准报价: 一个具体品种某天的市场价 (出厂含税). */
+export interface Benchmark {
+  name: string;
+  coal_type?: string | null;
+  /** 基准品的指标. */
+  props: Partial<Record<string, number>>;
+  /** 报价 (元/吨). */
+  price: number;
+  /** 报价日 YYYY-MM-DD. */
+  date: string;
+  source?: string | null;
+  /** 按焦煤现货指数从报价日推算到今天的价 (服务端算). */
+  current_price?: number | null;
+}
+
+/** /api/benchmarks 返回的基准: 多了出处层与指数推算信息. */
+export interface BenchmarkEntry extends Benchmark {
+  /** master = 随版本发布的默认值; stored = 管理员补录 (可删). */
+  origin?: "master" | "stored";
+  id?: string;
+  index_ratio?: number;
+  index_date?: string;
+}
+
+/** 估价模块入口 (/api/price) 的输入. */
+export interface PriceRequest {
+  coals: Coal[];
+  price_factor: PriceFactor;
+}
+
+/** 估价模块入口的输出. */
+export interface PriceResult {
+  ok: boolean;
+  reason?: string | null;
+  coal_values: CoalValue[];
+  market_price?: number | null;
 }
 
 /** 煤价典型误差 (元/吨, 约等于平均绝对误差). */
@@ -219,6 +259,8 @@ export interface CoalValue {
   ratio: number | null;
   /** 配煤价值: 本次煤池与合同下的盈亏平衡到厂价 (元/吨); 到厂价低于它就会入选. */
   blend_value?: number | null;
+  /** 估价对标的基准报价名; 缺省 = 按市场价或煤池反推. */
+  benchmark?: string | null;
   parts: PricePart[];
   missing: string[];
   extrapolated: string[];

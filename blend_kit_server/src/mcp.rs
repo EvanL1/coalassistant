@@ -9,13 +9,13 @@
 use serde_json::{json, Map, Value};
 
 use crate::database::UserStorage;
-use crate::today::{self, TodayOptions};
+use crate::today::{self, Market, TodayOptions};
 
 /// 支持的协议版本, 新的在前. 客户端要的版本在列表里就照回, 否则回最新的.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "豆哥配煤: 炼焦配煤的最低成本配方。所有煤价按 1000 点质量指数估算 \
-(标准品 1000 点 = 焦煤现货指数), 合同与煤池用线上保存的那一份。先用 today_blend 出配方; \
+const INSTRUCTIONS: &str = "豆哥配煤: 炼焦配煤的最低成本配方。所有煤价都是估算价: 按同煤种、指标最接近的 \
+基准报价 (公开的分煤种出厂含税价) 与 1000 点质量指数之比换算, 合同与煤池用线上保存的那一份。先用 today_blend 出配方; \
 用户说某个煤停了/不要, 放进 exclude 重算; 用户给出具体比例时用 check_ratios 验算。";
 
 /// 处理一条消息要用到的线上数据. 只有 tools/call 需要, 由调用方按需加载.
@@ -23,6 +23,8 @@ pub struct Context {
     pub master: Value,
     pub storage: UserStorage,
     pub market_price: Option<f64>,
+    /// 当前生效的基准报价 (分煤种, 带日期).
+    pub benchmarks: Vec<Value>,
     pub rank_k: Option<f64>,
 }
 
@@ -178,12 +180,11 @@ fn blend(args: &Map<String, Value>, context: &Context, fixed: bool) -> Result<St
             .unwrap_or_default(),
         fixed_ratios,
     };
-    let built = today::build(
-        &context.master,
-        &context.storage,
-        context.market_price,
-        &options,
-    )?;
+    let market = Market {
+        benchmarks: context.benchmarks.clone(),
+        market_price: context.market_price,
+    };
+    let built = today::build(&context.master, &context.storage, &market, &options)?;
     let body = built.request.to_string();
     let body = crate::admin::inject_rank_interaction(&body, context.rank_k);
     let result: Value = serde_json::from_str(&blend_kit::solve_json(&body))
@@ -210,11 +211,21 @@ fn format_result(
     } else {
         "今日配方"
     };
-    let market_text = result["market_price"]
-        .as_f64()
-        .or(market)
-        .map(|m| format!("标准品 1000 点 = {m:.0} 元/吨"))
-        .unwrap_or_else(|| "无市场价".into());
+    let market_text = match request["price_factor"]["benchmarks"].as_array() {
+        Some(list) if !list.is_empty() => {
+            let latest = list
+                .iter()
+                .filter_map(|b| b["date"].as_str())
+                .max()
+                .unwrap_or("");
+            format!("按 {} 条分煤种基准报价估价, 最新 {latest}", list.len())
+        }
+        _ => result["market_price"]
+            .as_f64()
+            .or(market)
+            .map(|m| format!("标准品 1000 点 = {m:.0} 元/吨"))
+            .unwrap_or_else(|| "无市场价".into()),
+    };
     out.push(format!(
         "{head} ({}, {quantity:.0} 吨, 全部按估算价, {market_text})",
         built.contract_name
@@ -238,11 +249,15 @@ fn format_result(
                 cost * quantity / 10_000.0
             ));
         }
-        // 每种煤的单价: 有报价用报价, 否则用估算价.
+        // 每种煤的单价: 有报价用报价, 否则用估算价 (记下对标的基准).
         let mut price: Map<String, Value> = Map::new();
+        let mut anchor: Map<String, Value> = Map::new();
         for value in result["coal_values"].as_array().into_iter().flatten() {
             if let Some(name) = value["name"].as_str() {
                 price.insert(name.into(), value["fair"].clone());
+                if let Some(benchmark) = value.get("benchmark").filter(|b| b.is_string()) {
+                    anchor.insert(name.into(), benchmark.clone());
+                }
             }
         }
         for coal in request["coals"].as_array().into_iter().flatten() {
@@ -258,6 +273,10 @@ fn format_result(
                 .and_then(Value::as_f64)
                 .map(|p| format!(", 估算出厂价 {p:.0}"))
                 .unwrap_or_default();
+            let unit = match anchor.get(name.as_str()).and_then(Value::as_str) {
+                Some(benchmark) => format!("{unit}, 对标{benchmark}"),
+                None => unit,
+            };
             out.push(format!(
                 "- {} {:.1}% ({:.0} 吨{unit})",
                 typed(&name, &types),
@@ -466,7 +485,14 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
         .get("price_factor")
         .and_then(|f| serde_json::from_value(f.clone()).ok())
         .map(|mut f: blend_kit::PriceFactor| {
-            f.market_price = context.market_price.or(f.market_price);
+            f.benchmarks = context
+                .benchmarks
+                .iter()
+                .filter_map(|b| serde_json::from_value(b.clone()).ok())
+                .collect();
+            if f.benchmarks.is_empty() {
+                f.market_price = context.market_price.or(f.market_price);
+            }
             f
         });
     let mut out = Vec::new();
@@ -560,11 +586,41 @@ fn contract_text(context: &Context) -> String {
             bound_text(spec)
         ));
     }
-    out.push(match context.market_price {
-        Some(m) => format!("估价市场价: 标准品 1000 点 = {m:.0} 元/吨 (焦煤现货指数最新一期)"),
-        None => "估价市场价: 现货指数暂时取不到".into(),
-    });
+    if context.benchmarks.is_empty() {
+        out.push(match context.market_price {
+            Some(m) => format!(
+                "估价市场价: 标准品 1000 点 = {m:.0} (焦煤现货指数点位, 无基准报价时的退路)"
+            ),
+            None => "估价市场价: 没有基准报价, 现货指数也取不到".into(),
+        });
+    } else {
+        out.push("估价基准报价 (同煤种、指标最接近的一条换算):".into());
+        for benchmark in &context.benchmarks {
+            out.push(benchmark_line(benchmark));
+        }
+    }
     out.join("\n")
+}
+
+/// "- 焦煤 晋中中硫主焦 S1.3 A10.5 G80: 2050 (2026-10-10)", 按指数推算过的再注明.
+fn benchmark_line(benchmark: &Value) -> String {
+    let props = &benchmark["props"];
+    let spec: Vec<String> = ["S", "A", "V", "G", "Y"]
+        .into_iter()
+        .filter_map(|key| props[key].as_f64().map(|v| format!("{key}{v}")))
+        .collect();
+    let price = benchmark["price"].as_f64().unwrap_or(0.0);
+    let drift = match benchmark["current_price"].as_f64() {
+        Some(now) => format!(", 按指数推算到今天 {now:.0}"),
+        None => String::new(),
+    };
+    format!(
+        "- {} {} {}: {price:.0} ({}{drift})",
+        benchmark["coal_type"].as_str().unwrap_or("未分煤种"),
+        benchmark["name"].as_str().unwrap_or(""),
+        spec.join(" "),
+        benchmark["date"].as_str().unwrap_or("")
+    )
 }
 
 #[cfg(test)]
@@ -594,14 +650,19 @@ mod tests {
                 user_coals: json!([]),
             },
             market_price: Some(2000.0),
+            benchmarks: Vec::new(),
             rank_k: None,
         }
     }
 
     fn call(name: &str, arguments: Value) -> (String, bool) {
+        call_with(&context(), name, arguments)
+    }
+
+    fn call_with(context: &Context, name: &str, arguments: Value) -> (String, bool) {
         let message = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                              "params": {"name": name, "arguments": arguments}});
-        let response = handle(&message, Some(&context())).unwrap();
+        let response = handle(&message, Some(context)).unwrap();
         let result = &response["result"];
         (
             result["content"][0]["text"].as_str().unwrap().to_string(),
@@ -745,5 +806,37 @@ mod tests {
             text.contains("硫 S ≤1.5") && text.contains("1000 吨"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn test_benchmarks_drive_estimates_in_every_tool() {
+        let mut context = context();
+        context.market_price = None;
+        context.benchmarks = vec![
+            json!({"name": "晋中中硫主焦", "coal_type": "焦煤", "props": {"S": 1.3},
+                   "price": 2050.0, "date": "2026-10-10"}),
+            json!({"name": "吕梁高硫瘦煤", "coal_type": "瘦煤", "props": {"S": 2.8},
+                   "price": 1860.0, "date": "2026-10-09", "current_price": 1840.0}),
+        ];
+        let (text, is_error) = call_with(&context, "today_blend", json!({}));
+        assert!(!is_error, "{text}");
+        assert!(
+            text.contains("按 2 条分煤种基准报价估价, 最新 2026-10-10"),
+            "{text}"
+        );
+        assert!(
+            text.contains("对标晋中中硫主焦") && text.contains("对标吕梁高硫瘦煤"),
+            "{text}"
+        );
+
+        let (text, _) = call_with(&context, "find_coal", json!({"name": "高硫"}));
+        assert!(text.contains("估算出厂价"), "{text}");
+
+        let (text, _) = call_with(&context, "get_contract", json!({}));
+        assert!(
+            text.contains("- 焦煤 晋中中硫主焦 S1.3: 2050 (2026-10-10)"),
+            "{text}"
+        );
+        assert!(text.contains("按指数推算到今天 1840"), "{text}");
     }
 }

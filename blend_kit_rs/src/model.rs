@@ -314,7 +314,7 @@ pub struct BlendRequest {
     /// 煤阶交互罚项 (配煤不相容). None 或 k = 0 = 不启用, 结果与不传完全相同.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank_interaction: Option<RankInteraction>,
-    /// 价格因子 (按质量估每种煤应值多少钱). 默认只做评估; `estimate_unpriced` 时
+    /// 价格因子 (按质量估每种煤应值多少钱, 算法在 [`crate::pricing`]). 默认只做评估; `estimate_unpriced` 时
     /// 无报价的煤按估算价进 LP. None = 不评估, 结果里 coal_values 为空.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_factor: Option<PriceFactor>,
@@ -401,6 +401,59 @@ pub struct PriceFactor {
     /// 煤价的典型误差, 给价格稳健性分析用. None = 用内置的保守默认值.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uncertainty: Option<PriceUncertainty>,
+    /// 基准报价 (带日期的市场价). 有就按同煤种、指标最接近的基准估价, 优先于 market_price.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub benchmarks: Vec<Benchmark>,
+}
+
+/// 基准报价: 一个具体品种某天的市场价 (出厂含税). 估价按"同煤种、指标最接近"的基准,
+/// 用质量指数之比换算 —— 见 [`crate::pricing`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Benchmark {
+    /// 唯一名, 如 "晋中中硫主焦".
+    pub name: String,
+    /// 煤种, 与 [`Coal::coal_type`] 同一词表. None = 只在没有同煤种基准时参与.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coal_type: Option<String>,
+    /// 基准品的指标 (报价单上的那组数).
+    pub props: HashMap<String, f64>,
+    /// 报价 (元/吨, 出厂含税).
+    pub price: f64,
+    /// 报价日 YYYY-MM-DD.
+    pub date: String,
+    /// 出处 (网页 / 谁报的).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// 按市场指数从报价日推算到今天的价 (调用方算好填入). 有就用它, 没有用 price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_price: Option<f64>,
+}
+
+impl Benchmark {
+    /// 估价用的价: 推算到今天的价优先.
+    pub fn effective_price(&self) -> f64 {
+        self.current_price.unwrap_or(self.price)
+    }
+}
+
+/// 估价模块的 JSON 入口输入 (`estimate_json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceRequest {
+    pub coals: Vec<Coal>,
+    pub price_factor: PriceFactor,
+}
+
+/// 估价模块的 JSON 入口输出.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PriceResult {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub coal_values: Vec<CoalValue>,
+    /// 标准品 (1000 点) 对应的价; 用基准时取最接近标准品的那条基准反推.
+    #[serde(default)]
+    pub market_price: Option<f64>,
 }
 
 /// 煤价的典型误差 (元/吨, 约等于平均绝对误差). 数值是数据, 放 master, 随标定更新;
@@ -472,6 +525,9 @@ pub struct CoalValue {
     /// 已入选的煤即其现价. 由 LP 对偶算出, 只算边际 (一点点加入时) 的价值. 算不出为 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend_value: Option<f64>,
+    /// 估价对标的基准报价名. None = 按市场价或煤池反推估价.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<String>,
 }
 
 /// 价格稳健性报告: 煤价估不准时, 这个配方还靠不靠得住.

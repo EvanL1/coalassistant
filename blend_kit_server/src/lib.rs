@@ -22,6 +22,7 @@ use tower_http::{
 
 mod admin;
 mod api_key;
+mod benchmarks;
 mod coal_index;
 mod database;
 mod master_data;
@@ -220,6 +221,10 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
         .route("/api/solve", post(solve))
+        .route("/api/price", post(benchmarks::estimate))
+        .route("/api/benchmarks", get(benchmarks::list))
+        .route("/api/admin/benchmarks", post(benchmarks::create))
+        .route("/api/admin/benchmarks/{id}", delete(benchmarks::delete))
         .route("/api/master", get(master))
         // 数据更新接口: 机器密钥 (X-API-Key) 或管理员会话, 普通用户会话无权
         .route("/api/master/coals", post(update_coal_data))
@@ -1127,15 +1132,23 @@ async fn mcp_serve(state: &AppState, presented: &str, body: &[u8]) -> Response {
 
 /// 求解要用的线上数据: 合并后的煤库、网页账号保存的合同与煤池、现货指数最新值、煤阶交互 k.
 async fn load_mcp_context(state: &AppState, pool: &PgPool) -> Result<mcp::Context, sqlx::Error> {
-    let master = serde_json::from_str(&merged_master_json(state).await).unwrap_or_default();
+    let master: serde_json::Value =
+        serde_json::from_str(&merged_master_json(state).await).unwrap_or_default();
     let storage = database::load_storage(pool, &state.auth.username).await?;
-    let market_price = coal_index::get_spot_series()
-        .await
-        .and_then(|points| points.last().map(|point| point.price));
+    let benchmarks = benchmarks::current(state, &master).await;
+    // 没有任何基准报价时才退回现货指数 (那是指数点, 只能当相对尺度用).
+    let market_price = if benchmarks.is_empty() {
+        coal_index::get_spot_series()
+            .await
+            .and_then(|points| points.last().map(|point| point.price))
+    } else {
+        None
+    };
     Ok(mcp::Context {
         master,
         storage,
         market_price,
+        benchmarks,
         rank_k: state.rank_k(),
     })
 }
@@ -1267,13 +1280,19 @@ mod tests {
     /// 管理端守卫: 未登录 401, 普通账号 403, 管理员放行 (没库时 503).
     #[tokio::test]
     async fn test_admin_guard_status_codes() {
-        let routes: [(&str, &str, &str); 6] = [
+        let routes: [(&str, &str, &str); 8] = [
             ("GET", "/api/admin/settings", ""),
             ("PUT", "/api/admin/settings", r#"{"rank_interaction_k":50}"#),
             ("GET", "/api/admin/calibration", ""),
             ("GET", "/api/admin/csr-model", ""),
             ("GET", "/api/admin/keys", ""),
             ("DELETE", "/api/admin/keys/some-id", ""),
+            (
+                "POST",
+                "/api/admin/benchmarks",
+                r#"{"name":"b","props":{"S":1.3},"price":2000,"date":"2026-10-16"}"#,
+            ),
+            ("DELETE", "/api/admin/benchmarks/some-id", ""),
         ];
         for (method, uri, body) in routes {
             let anonymous = test_app()
@@ -1803,6 +1822,47 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_text(response).await, "ok");
+    }
+
+    /// 估价接口与基准列表: 要登录; 请求体坏了在估价前就 400 (不碰行情接口).
+    #[tokio::test]
+    async fn test_price_and_benchmark_endpoints_require_login() {
+        for (method, uri) in [("POST", "/api/price"), ("GET", "/api/benchmarks")] {
+            let anonymous = test_app()
+                .oneshot(key_request(method, uri, None, Body::from("{}")))
+                .await
+                .unwrap();
+            assert_eq!(
+                anonymous.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
+        let bad = test_app()
+            .oneshot(authenticated_request(
+                "POST",
+                "/api/price",
+                Body::from("{not-json"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_admin_benchmark_rejects_bad_body_before_database() {
+        let response = test_app()
+            .oneshot(session_request(
+                "POST",
+                "/api/admin/benchmarks",
+                "admin-session-token-0123456789abcdef",
+                Body::from(r#"{"name":"b","props":{"S":1.3},"price":-1,"date":"2026-10-16"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let text = response_text(response).await;
+        assert!(text.contains("价格无效"), "{text}");
     }
 
     #[tokio::test]

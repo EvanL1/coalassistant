@@ -40,6 +40,15 @@ pub struct TodayOptions {
     pub fixed_ratios: Option<Map<String, Value>>,
 }
 
+/// 估价用的市场数据.
+#[derive(Debug, Default)]
+pub struct Market {
+    /// 当前生效的基准报价 (分煤种, 带日期). 有就按它估价.
+    pub benchmarks: Vec<Value>,
+    /// 退路: 没有任何基准时的标准品价 (现货指数点位, 只当相对尺度).
+    pub market_price: Option<f64>,
+}
+
 fn normalize(name: &str) -> String {
     name.replace('\u{3000}', " ").trim().to_lowercase()
 }
@@ -121,12 +130,12 @@ fn resolve_coal(entry: &Value, pref: Option<&Value>) -> Result<Option<Value>, ()
     Ok(Some(coal))
 }
 
-/// 按线上保存的状态组装求解请求. `master` 是合并了覆盖层的煤库 JSON,
-/// `market_price` 是现货指数最新值 (拿不到传 None, 由核心按报价反推或告知估不出).
+/// 按线上保存的状态组装求解请求. `master` 是合并了覆盖层的煤库 JSON;
+/// `market` 是当前生效的基准报价 (见 [`crate::benchmarks`]) 与退路市场价.
 pub fn build(
     master: &Value,
     storage: &UserStorage,
-    market_price: Option<f64>,
+    market: &Market,
     options: &TodayOptions,
 ) -> Result<TodayRequest, String> {
     let empty = Map::new();
@@ -201,7 +210,10 @@ pub fn build(
         let object = factor.as_object_mut().expect("已判定为对象");
         object.remove("description");
         object.remove("uncertainty_note");
-        if let Some(price) = market_price {
+        object.remove("benchmarks_note");
+        if !market.benchmarks.is_empty() {
+            object.insert("benchmarks".into(), json!(market.benchmarks));
+        } else if let Some(price) = market.market_price {
             object.insert("market_price".into(), json!(price));
         }
         object.insert("extra_coals".into(), Value::Array(unpriced));
@@ -224,8 +236,10 @@ pub fn build(
     }) {
         notes.push("采购扣款模板只存在浏览器, 本次未计买入侧扣款".into());
     }
-    if market_price.is_none() {
-        notes.push("现货指数暂时取不到, 市场价改由煤池报价反推 (没有报价则估不出价)".into());
+    if market.benchmarks.is_empty() && market.market_price.is_none() {
+        notes.push(
+            "没有基准报价, 现货指数也取不到, 市场价改由煤池报价反推 (没有报价则估不出价)".into(),
+        );
     }
     Ok(TodayRequest {
         request,
@@ -261,6 +275,13 @@ mod tests {
         }
     }
 
+    fn index_only(price: f64) -> Market {
+        Market {
+            benchmarks: Vec::new(),
+            market_price: Some(price),
+        }
+    }
+
     fn names(list: &Value) -> Vec<&str> {
         list.as_array()
             .unwrap()
@@ -275,7 +296,7 @@ mod tests {
         let built = build(
             &master(),
             &storage(prefs),
-            Some(1907.0),
+            &index_only(1907.0),
             &TodayOptions::default(),
         )
         .unwrap();
@@ -305,7 +326,7 @@ mod tests {
         let built = build(
             &master(),
             &storage(prefs),
-            None,
+            &Market::default(),
             &TodayOptions {
                 exclude: vec![],
                 total_quantity: Some(100.0),
@@ -322,7 +343,7 @@ mod tests {
         let excluded = build(
             &master(),
             &storage(json!({})),
-            None,
+            &Market::default(),
             &TodayOptions {
                 exclude: vec!["有价".into()],
                 ..Default::default()
@@ -338,9 +359,37 @@ mod tests {
             json!({"name": "有价 ", "status": "verified", "props": {"S": 1.0}, "fob": 1, "frt": 1}),
         );
         let prefs = json!({"无价": {"enabled": true, "fob_override": -5}});
-        let built = build(&m, &storage(prefs), Some(1907.0), &TodayOptions::default());
+        let built = build(
+            &m,
+            &storage(prefs),
+            &index_only(1907.0),
+            &TodayOptions::default(),
+        );
         // 有价与"有价 "重名整组排除, 无价覆盖价非法 → 无煤可解
         assert!(built.is_err());
+    }
+
+    #[test]
+    fn test_benchmarks_replace_index_price() {
+        let prefs = json!({"无价": {"enabled": true}});
+        let market = Market {
+            benchmarks: vec![json!({"name": "晋中中硫主焦", "price": 2050.0})],
+            market_price: Some(1907.0),
+        };
+        let built = build(
+            &master(),
+            &storage(prefs),
+            &market,
+            &TodayOptions::default(),
+        )
+        .unwrap();
+        let factor = &built.request["price_factor"];
+        assert_eq!(factor["benchmarks"][0]["name"], "晋中中硫主焦");
+        assert!(
+            factor.get("market_price").is_none(),
+            "有基准就不用指数点当价"
+        );
+        assert!(built.notes.iter().all(|n| !n.contains("现货指数")));
     }
 
     #[test]
@@ -352,7 +401,7 @@ mod tests {
         let built = build(
             &master(),
             &s,
-            Some(1907.0),
+            &index_only(1907.0),
             &TodayOptions {
                 fixed_ratios: Some(ratios),
                 ..Default::default()

@@ -55,6 +55,7 @@ import {
   setQuantity,
 } from "../storage";
 import { CoalValueCard } from "./CoalValueCard";
+import { fetchBenchmarks, toRequestBenchmark } from "../benchmarks";
 import { PriceRobustnessCard } from "./PriceRobustnessCard";
 import { coalTypeMap } from "../domain/coalTypes";
 import { CostCard } from "./CostCard";
@@ -345,10 +346,17 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         ? "用户自定义合同"
         : master.default_contract.name;
 
-      // 标准品 1000 点的市场价取现货指数最新一期; 拿不到时由核心按煤池报价反推 (若有).
-      const marketPrice = master.price_factor
-        ? await fetchLatestCoalIndex()
-        : null;
+      // 估价按基准报价 (分煤种、带报价日, 服务端已按现货指数推算到今天); 取不到就用
+      // master 自带的默认基准. 两样都没有才退回现货指数点位当标准品价 (只是相对尺度).
+      const fetched = master.price_factor
+        ? (await fetchBenchmarks()).map(toRequestBenchmark)
+        : [];
+      const benchmarks =
+        fetched.length > 0 ? fetched : (master.price_factor?.benchmarks ?? []);
+      const marketPrice =
+        master.price_factor && benchmarks.length === 0
+          ? await fetchLatestCoalIndex()
+          : null;
       if (!tracker.isCurrent(requestId)) return;
 
       const request: BlendRequest = {
@@ -362,6 +370,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           ? {
               price_factor: {
                 ...master.price_factor,
+                ...(benchmarks.length > 0 ? { benchmarks } : {}),
                 ...(marketPrice != null ? { market_price: marketPrice } : {}),
                 extra_coals: unpriced,
                 estimate_unpriced: true,

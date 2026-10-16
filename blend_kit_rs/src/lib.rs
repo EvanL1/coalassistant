@@ -11,6 +11,7 @@ mod penalty;
 pub mod petrography;
 pub mod predict;
 pub mod price_factor;
+pub mod pricing;
 mod quality;
 mod rank_interaction;
 mod robustness;
@@ -22,6 +23,7 @@ pub use seed::{CoalMaster, CoalMasterEntry, Confidence, DefaultContract, MasterS
 
 pub use model::*;
 pub use optimizer::{solve, solve_with_evaluators};
+pub use pricing::estimate_json;
 
 /// 返回编译进核心 crate 的 Master JSON 原文.
 ///
