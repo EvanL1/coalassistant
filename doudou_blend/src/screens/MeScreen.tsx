@@ -9,7 +9,9 @@ import {
   clearAllCoalPrefs,
   clearUserContract,
   getCoalPrefs,
+  getShovelTons,
   getUserContract,
+  setShovelTons,
 } from "../storage";
 
 interface Stats {
@@ -163,6 +165,8 @@ export function MeScreen() {
         </div>
       </div>
 
+      <ShovelCard />
+
       {/* 数据状态 */}
       <div className="card">
         <div className="card-title">用户数据</div>
@@ -228,6 +232,76 @@ export function MeScreen() {
         豆哥配煤 · 核心计算由服务端完成 · Web 数据保存在 PostgreSQL
       </p>
     </>
+  );
+}
+
+/**
+ * 配煤现场: 一铲多少吨. 求解时每种煤要么不用、要么至少一铲, 且按整铲配.
+ * 失焦或回车提交; 非法值回退上次值. 改了今日页会收到 doudou:shovel_changed 自动重算.
+ */
+function ShovelCard() {
+  const [input, setInput] = useState(() => String(getShovelTons()));
+
+  useEffect(() => {
+    // 登录后云端快照可能晚于本屏挂载才到, 跟着刷新.
+    const sync = () => setInput(String(getShovelTons()));
+    window.addEventListener("doudou:shovel_changed", sync);
+    return () => window.removeEventListener("doudou:shovel_changed", sync);
+  }, []);
+
+  function commit() {
+    const n = Number(input);
+    if (Number.isFinite(n) && n > 0) {
+      setInput(String(n));
+      if (n !== getShovelTons()) setShovelTons(n);
+    } else {
+      setInput(String(getShovelTons()));
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="card-title">配煤现场</div>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "10px 0",
+          fontSize: 14,
+        }}
+      >
+        <span style={{ color: "var(--c-text-2)" }}>一铲</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            type="number"
+            inputMode="decimal"
+            min={0}
+            step={0.5}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+            }}
+            aria-label="一铲吨数"
+            style={{
+              width: 64,
+              padding: "2px 6px",
+              borderRadius: 6,
+              border: "1px solid var(--c-border)",
+              fontSize: 14,
+              textAlign: "right",
+              background: "var(--c-card, #fff)",
+            }}
+          />
+          <span>吨</span>
+        </span>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--c-text-3)" }}>
+        配方里每种煤要么不用、要么至少一铲, 且按整铲配.
+      </div>
+    </div>
   );
 }
 

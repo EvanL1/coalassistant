@@ -33,6 +33,8 @@ fn request(coals: Vec<Coal>, specs: Vec<Spec>, k: Option<f64>) -> BlendRequest {
         rank_interaction: k.map(|k| RankInteraction { k }),
         price_factor: None,
         price_robustness: None,
+        shovel_tons: None,
+        min_ratios: Default::default(),
     }
 }
 

@@ -50,6 +50,8 @@ fn request(
         rank_interaction: None,
         price_factor: None,
         price_robustness: None,
+        shovel_tons: None,
+        min_ratios: Default::default(),
     }
 }
 

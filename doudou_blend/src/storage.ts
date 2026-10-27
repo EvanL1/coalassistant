@@ -78,6 +78,8 @@ export interface UserStorageSnapshot {
   contract: Spec[] | null;
   quantity: number;
   user_coals: MasterCoalEntry[];
+  /** 一铲多少吨; 服务端老记录没有这字段时按默认值. */
+  shovel_tons: number;
 }
 
 export const USER_STORAGE_EVENTS = [
@@ -85,6 +87,7 @@ export const USER_STORAGE_EVENTS = [
   "doudou:contract_changed",
   "doudou:quantity_changed",
   "doudou:user_coals_changed",
+  "doudou:shovel_changed",
 ] as const;
 
 // ============================================================
@@ -239,6 +242,31 @@ export function setQuantity(n: number): void {
 }
 
 // ============================================================
+// 一铲吨数 (现场铲车配煤的最小单位: 每种煤要么不用、要么至少一铲, 按整铲配)
+// ============================================================
+
+const KEY_SHOVEL_TONS = "doudou_blend.shovel_tons.v1";
+/** 常见 5 吨装载机 (3 方斗) 装炼焦精煤约 3 吨; 与服务端 DEFAULT_SHOVEL_TONS 一致. */
+export const DEFAULT_SHOVEL_TONS = 3;
+
+/** 一铲多少吨. 缺失/非法时回退默认值. */
+export function getShovelTons(): number {
+  try {
+    const raw = localStorage.getItem(KEY_SHOVEL_TONS);
+    if (raw == null) return DEFAULT_SHOVEL_TONS;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_SHOVEL_TONS;
+  } catch {
+    return DEFAULT_SHOVEL_TONS;
+  }
+}
+
+export function setShovelTons(n: number): void {
+  localStorage.setItem(KEY_SHOVEL_TONS, String(n));
+  window.dispatchEvent(new CustomEvent("doudou:shovel_changed"));
+}
+
+// ============================================================
 // 历史方案
 // ============================================================
 
@@ -359,6 +387,7 @@ export function getUserStorageSnapshot(): UserStorageSnapshot {
     contract: getUserContract(),
     quantity: getQuantity(),
     user_coals: getUserCoals(),
+    shovel_tons: getShovelTons(),
   };
 }
 
@@ -377,6 +406,7 @@ export function replaceUserStorageSnapshot(snapshot: UserStorageSnapshot): void 
   }
 
   localStorage.setItem(KEY_QUANTITY, String(snapshot.quantity));
+  localStorage.setItem(KEY_SHOVEL_TONS, String(snapshot.shovel_tons));
 
   if (snapshot.user_coals.length > 0) {
     localStorage.setItem(KEY_USER_COALS, JSON.stringify(snapshot.user_coals));

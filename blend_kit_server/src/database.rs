@@ -7,6 +7,8 @@ use uuid::Uuid;
 use crate::master_data::{CoalUpdate, StoredOverride};
 
 const DEFAULT_QUANTITY: f64 = 3700.0;
+/// 一铲默认吨数: 常见 5 吨装载机 (3 方斗) 装炼焦精煤约 3 吨.
+pub const DEFAULT_SHOVEL_TONS: f64 = 3.0;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UserStorage {
@@ -20,6 +22,11 @@ pub struct UserStorage {
     pub quantity: f64,
     #[serde(default = "empty_array")]
     pub user_coals: Value,
+    /// 一铲多少吨 (现场铲车配煤的最小单位), 求解时每种煤至少一铲、按整铲配.
+    /// None = 没设过 (按 [`DEFAULT_SHOVEL_TONS`]); 上线前的老前端 PUT 时也不带它,
+    /// 保存时不能拿 None 冲掉已设的值 (见 save_storage 的 COALESCE).
+    #[serde(default)]
+    pub shovel_tons: Option<f64>,
 }
 
 impl Default for UserStorage {
@@ -30,6 +37,7 @@ impl Default for UserStorage {
             contract: None,
             quantity: DEFAULT_QUANTITY,
             user_coals: empty_array(),
+            shovel_tons: None,
         }
     }
 }
@@ -51,6 +59,12 @@ impl UserStorage {
         }
         if !self.user_coals.is_array() {
             return Err("user_coals 必须是 JSON 数组");
+        }
+        if self
+            .shovel_tons
+            .is_some_and(|tons| !tons.is_finite() || tons <= 0.0)
+        {
+            return Err("shovel_tons 必须是正数或 null");
         }
         Ok(())
     }
@@ -204,7 +218,7 @@ pub async fn health(pool: &PgPool) -> Result<(), sqlx::Error> {
 pub async fn load_storage(pool: &PgPool, username: &str) -> Result<UserStorage, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT coal_prefs, contract, quantity, user_coals
+        SELECT coal_prefs, contract, quantity, user_coals, shovel_tons
         FROM web_user_state
         WHERE username = $1
         "#,
@@ -220,6 +234,7 @@ pub async fn load_storage(pool: &PgPool, username: &str) -> Result<UserStorage, 
             contract: row.try_get("contract")?,
             quantity: row.try_get("quantity")?,
             user_coals: row.try_get("user_coals")?,
+            shovel_tons: row.try_get("shovel_tons")?,
         },
         None => UserStorage::default(),
     })
@@ -233,14 +248,15 @@ pub async fn save_storage(
     sqlx::query(
         r#"
         INSERT INTO web_user_state (
-            username, coal_prefs, contract, quantity, user_coals, updated_at
+            username, coal_prefs, contract, quantity, user_coals, shovel_tons, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
         ON CONFLICT (username) DO UPDATE SET
             coal_prefs = EXCLUDED.coal_prefs,
             contract = EXCLUDED.contract,
             quantity = EXCLUDED.quantity,
             user_coals = EXCLUDED.user_coals,
+            shovel_tons = COALESCE(EXCLUDED.shovel_tons, web_user_state.shovel_tons),
             updated_at = NOW()
         "#,
     )
@@ -249,6 +265,7 @@ pub async fn save_storage(
     .bind(&storage.contract)
     .bind(storage.quantity)
     .bind(&storage.user_coals)
+    .bind(storage.shovel_tons)
     .execute(pool)
     .await?;
     Ok(())

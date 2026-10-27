@@ -409,6 +409,13 @@ pub(crate) fn validate_request(request: &BlendRequest) -> Result<(), String> {
     {
         return Err("采购总量必须是正数".into());
     }
+    // 一铲比采购量还大不算错: shovel::solve 提示后按连续比例求解.
+    if request
+        .shovel_tons
+        .is_some_and(|tons| !tons.is_finite() || tons <= 0.0)
+    {
+        return Err("一铲吨数必须是正数".into());
+    }
 
     let mut names = std::collections::HashSet::new();
     for coal in &request.coals {
@@ -416,6 +423,17 @@ pub(crate) fn validate_request(request: &BlendRequest) -> Result<(), String> {
         if !names.insert(coal.name.as_str()) {
             return Err(format!("煤名重复: {}", coal.name));
         }
+    }
+    for (name, floor) in &request.min_ratios {
+        if !names.contains(name.as_str()) {
+            return Err(format!("配比下限里的 {name} 不在煤池中"));
+        }
+        if !floor.is_finite() || !(0.0..=1.0).contains(floor) {
+            return Err(format!("{name} 的配比下限 {floor} 须在 0~1 之间"));
+        }
+    }
+    if request.min_ratios.values().sum::<f64>() > 1.0 + 1e-9 {
+        return Err("配比下限合计超过 100%".into());
     }
 
     let mut indicators = std::collections::HashSet::new();
@@ -854,6 +872,8 @@ mod tests {
             rank_interaction: None,
             price_factor: None,
             price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
         }
     }
 
@@ -1094,6 +1114,8 @@ mod tests {
             rank_interaction: None,
             price_factor: None,
             price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
         }
     }
 

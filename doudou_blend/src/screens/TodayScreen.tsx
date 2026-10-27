@@ -50,6 +50,7 @@ import type { TabId } from "../TabBar";
 import {
   getCoalPrefs,
   getQuantity,
+  getShovelTons,
   getUserContract,
   getUserCoals,
   setQuantity,
@@ -156,7 +157,9 @@ function buildOrderText(
   lines.push("──────────────────");
   for (const o of [...result.orders].sort((a, b) => b.ratio - a.ratio)) {
     const pct = `${(o.ratio * 100).toFixed(1)}%`;
-    const tons = o.tons != null ? `${Math.round(o.tons)}吨` : "-";
+    const tons =
+      (o.tons != null ? `${Math.round(o.tons)}吨` : "-") +
+      (o.shovels != null ? ` ${o.shovels}铲` : "");
     // 结算按 cif_eff_amount (含买入侧修正); 老记录没有这字段才退回报价金额.
     const settled = o.cif_eff_amount ?? o.cif_amount;
     const amt = settled != null ? `  ${yuan(settled)}` : "";
@@ -223,17 +226,19 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   useEffect(() => {
     mountedRef.current = true;
     void runSolve(true);
-    // 监听 prefs/contract/user_coals/扣款模板 变化, 自动重算 (inline, 不整页 loading)
+    // 监听 prefs/contract/user_coals/一铲吨数/扣款模板 变化, 自动重算 (inline, 不整页 loading)
     const refresh = () => void runSolve(false);
     window.addEventListener("doudou:prefs_changed", refresh);
     window.addEventListener("doudou:contract_changed", refresh);
     window.addEventListener("doudou:user_coals_changed", refresh);
+    window.addEventListener("doudou:shovel_changed", refresh);
     window.addEventListener(PENALTY_TEMPLATE_EVENT, refresh);
     return () => {
       mountedRef.current = false;
       window.removeEventListener("doudou:prefs_changed", refresh);
       window.removeEventListener("doudou:contract_changed", refresh);
       window.removeEventListener("doudou:user_coals_changed", refresh);
+      window.removeEventListener("doudou:shovel_changed", refresh);
       window.removeEventListener(PENALTY_TEMPLATE_EVENT, refresh);
       requestTrackerRef.current.invalidate();
       if (recomputeTimerRef.current != null) {
@@ -362,6 +367,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         coals,
         specs,
         total_quantity: totalQuantity,
+        // 现场铲车配煤: 每种煤要么不用、要么至少一铲, 按整铲配.
+        shovel_tons: getShovelTons(),
         truncate_decimal: true,
         // 价格因子系数表来自 master (数据不是代码). 没报价的煤放进 extra_coals,
         // estimate_unpriced 让核心按估算价把它们并入煤池求解.
@@ -673,6 +680,14 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           }}
         />
         <span>吨</span>
+        {snapshot.request.shovel_tons != null && (
+          <>
+            <span>·</span>
+            <button onClick={() => onNavigate("me")} style={summaryLink}>
+              一铲 {snapshot.request.shovel_tons} 吨 ▸
+            </button>
+          </>
+        )}
       </div>
 
       {/* 吨数未同步的提示只在有配方时有意义: isSnapshotActionable 对不可行结果一律
@@ -798,6 +813,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
               <div className="recipe-amount">
                 {(o.ratio * 100).toFixed(2)}% ·{" "}
                 {o.tons != null ? `${o.tons.toFixed(0)} 吨` : "-"}
+                {o.shovels != null && ` · ${o.shovels} 铲`}
               </div>
             </div>
           ))}

@@ -70,6 +70,14 @@ estimates and the LP optimum is flat, so it re-solves with perturbed prices to r
 many 元 before ≥10% of tonnage moves, vs. that coal's price uncertainty from `price_factor.uncertainty`, keyed by
 `Coal.coal_type`) and a "robust recipe" (risk premium λ·uncertainty, within a cost tolerance). Absent must leave
 results byte-identical.
+`shovel.rs` is the **一铲最小量** (`BlendRequest.shovel_tons`, with `total_quantity`): loaders blend by the shovel, so
+each coal is either unused or ≥ 1 shovel, in whole shovels (one shovel = 1/N, N = round(total / shovel)).
+Branch-and-bound over "drop it / floor it at one shovel" (floors go into the LP as `BlendRequest.min_ratios` rows),
+then largest-remainder rounding to whole shovels (`OrderItem.shovels`) evaluated through the fixed-ratio path plus the
+exact petrography review (`optimizer::review_petrography`, shared with the LP path), with a one-shovel-swap repair if
+rounding breaks a spec. Blend values come from the root LP; price-robustness re-solves also go through the shovel
+wrapper. The shovel size is a per-user setting (我的 page, `web_user_state.shovel_tons`, NULL = default 3 t; saved with
+COALESCE so pre-deploy clients can't reset it). Absent = byte-identical.
 
 **Frontend screens** (`doudou_blend/src/screens/`): 今日 `TodayScreen` (solve + cost/recipe/8-indicator view,
 real purchase-qty input, export orders, save-to-history, input-summary panel), 煤池 `CoalPoolScreen`

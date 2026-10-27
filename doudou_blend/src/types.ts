@@ -147,6 +147,10 @@ export interface BlendRequest {
   price_factor?: PriceFactor | null;
   /** 价格稳健性分析 (煤价估不准时配方靠不靠得住). 不传 = 不分析. */
   price_robustness?: PriceRobustness | null;
+  /** 一铲多少吨. 与 total_quantity 同给时每种煤要么不用、要么至少一铲, 且按整铲配. */
+  shovel_tons?: number | null;
+  /** 单煤配比下限: 煤名 → 占比 (0~1). 给了的煤一定入选且不低于此比例. */
+  min_ratios?: Record<string, number>;
 }
 
 /** 价格稳健性分析配置; 字段缺省用核心默认值 (容差 10, 搜索范围 300 元/吨). */
@@ -392,6 +396,8 @@ export interface OrderItem {
    * 可选: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
    */
   cif_eff_amount?: number | null;
+  /** 按整铲配时这种煤配几铲; 未按铲配时没有. */
+  shovels?: number | null;
 }
 
 export interface IndicatorCheck {
