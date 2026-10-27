@@ -161,6 +161,9 @@ impl CoalMasterEntry {
             frt,
             petrography: None, // master 数据尚无煤岩直方图字段
             purchase_terms: None,
+            coal_type: self.coal_type.clone(),
+            form: self.form.clone(),
+            region: self.region.clone(),
         })
     }
 

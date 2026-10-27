@@ -49,6 +49,7 @@ fn request(
         fixed_ratios: fixed,
         rank_interaction: None,
         price_factor: None,
+        price_robustness: None,
     }
 }
 

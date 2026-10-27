@@ -9,13 +9,13 @@
 use serde_json::{json, Map, Value};
 
 use crate::database::UserStorage;
-use crate::today::{self, TodayOptions};
+use crate::today::{self, Market, TodayOptions};
 
 /// 支持的协议版本, 新的在前. 客户端要的版本在列表里就照回, 否则回最新的.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "豆哥配煤: 炼焦配煤的最低成本配方。所有煤价按 1000 点质量指数估算 \
-(标准品 1000 点 = 焦煤现货指数), 合同与煤池用线上保存的那一份。先用 today_blend 出配方; \
+const INSTRUCTIONS: &str = "豆哥配煤: 炼焦配煤的最低成本配方。所有煤价都是估算价: 按同煤种、指标最接近的 \
+基准报价 (公开的分煤种出厂含税价) 与 1000 点质量指数之比换算, 合同与煤池用线上保存的那一份。先用 today_blend 出配方; \
 用户说某个煤停了/不要, 放进 exclude 重算; 用户给出具体比例时用 check_ratios 验算。";
 
 /// 处理一条消息要用到的线上数据. 只有 tools/call 需要, 由调用方按需加载.
@@ -23,6 +23,8 @@ pub struct Context {
     pub master: Value,
     pub storage: UserStorage,
     pub market_price: Option<f64>,
+    /// 当前生效的基准报价 (分煤种, 带日期).
+    pub benchmarks: Vec<Value>,
     pub rank_k: Option<f64>,
 }
 
@@ -178,12 +180,11 @@ fn blend(args: &Map<String, Value>, context: &Context, fixed: bool) -> Result<St
             .unwrap_or_default(),
         fixed_ratios,
     };
-    let built = today::build(
-        &context.master,
-        &context.storage,
-        context.market_price,
-        &options,
-    )?;
+    let market = Market {
+        benchmarks: context.benchmarks.clone(),
+        market_price: context.market_price,
+    };
+    let built = today::build(&context.master, &context.storage, &market, &options)?;
     let body = built.request.to_string();
     let body = crate::admin::inject_rank_interaction(&body, context.rank_k);
     let result: Value = serde_json::from_str(&blend_kit::solve_json(&body))
@@ -210,11 +211,21 @@ fn format_result(
     } else {
         "今日配方"
     };
-    let market_text = result["market_price"]
-        .as_f64()
-        .or(market)
-        .map(|m| format!("标准品 1000 点 = {m:.0} 元/吨"))
-        .unwrap_or_else(|| "无市场价".into());
+    let market_text = match request["price_factor"]["benchmarks"].as_array() {
+        Some(list) if !list.is_empty() => {
+            let latest = list
+                .iter()
+                .filter_map(|b| b["date"].as_str())
+                .max()
+                .unwrap_or("");
+            format!("按 {} 条分煤种基准报价估价, 最新 {latest}", list.len())
+        }
+        _ => result["market_price"]
+            .as_f64()
+            .or(market)
+            .map(|m| format!("标准品 1000 点 = {m:.0} 元/吨"))
+            .unwrap_or_else(|| "无市场价".into()),
+    };
     out.push(format!(
         "{head} ({}, {quantity:.0} 吨, 全部按估算价, {market_text})",
         built.contract_name
@@ -238,11 +249,13 @@ fn format_result(
                 cost * quantity / 10_000.0
             ));
         }
-        // 每种煤的单价: 有报价用报价, 否则用估算价.
+        // 每种煤的单价: 有报价用报价, 否则用估算价 (记下对标的基准).
         let mut price: Map<String, Value> = Map::new();
+        let mut notes: Map<String, Value> = Map::new();
         for value in result["coal_values"].as_array().into_iter().flatten() {
             if let Some(name) = value["name"].as_str() {
                 price.insert(name.into(), value["fair"].clone());
+                notes.insert(name.into(), Value::String(price_note(value)));
             }
         }
         for coal in request["coals"].as_array().into_iter().flatten() {
@@ -250,26 +263,25 @@ fn format_result(
                 price.insert(name.into(), coal["fob"].clone());
             }
         }
+        let types = coal_types(request);
         out.push("配方:".into());
-        let mut recipe: Vec<(&String, f64)> = result["recipe"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter_map(|(name, ratio)| ratio.as_f64().map(|r| (name, r)))
-            .filter(|(_, r)| *r > 1e-4)
-            .collect();
-        recipe.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (name, ratio) in recipe {
+        for (name, ratio) in sorted_recipe(&result["recipe"]) {
             let unit = price
                 .get(name.as_str())
                 .and_then(Value::as_f64)
                 .map(|p| format!(", 估算出厂价 {p:.0}"))
                 .unwrap_or_default();
+            let note = notes.get(name.as_str()).and_then(Value::as_str);
+            let unit = format!("{unit}{}", note.unwrap_or_default());
             out.push(format!(
-                "- {name} {:.1}% ({:.0} 吨{unit})",
+                "- {} {:.1}% ({:.0} 吨{unit})",
+                typed(&name, &types),
                 ratio * 100.0,
                 ratio * quantity
             ));
+        }
+        if let Some(report) = result.get("price_robustness") {
+            out.extend(robustness_lines(report, &types));
         }
     }
 
@@ -329,6 +341,109 @@ fn format_result(
     out.join("\n")
 }
 
+/// 煤名 → 煤种. 进 LP 的煤和按估算价求解的煤都带.
+fn coal_types(request: &Value) -> Map<String, Value> {
+    let lp = request["coals"].as_array().into_iter().flatten();
+    let extra = request["price_factor"]["extra_coals"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    lp.chain(extra)
+        .filter_map(|coal| {
+            let name = coal["name"].as_str()?;
+            Some((name.to_string(), coal.get("coal_type")?.clone()))
+        })
+        .collect()
+}
+
+/// "明鑫 (瘦煤)"; 没标煤种就只写煤名.
+fn typed(name: &str, types: &Map<String, Value>) -> String {
+    match types.get(name).and_then(Value::as_str) {
+        Some(kind) => format!("{name} ({kind})"),
+        None => name.to_string(),
+    }
+}
+
+/// 配方按占比降序, 去掉可忽略的零头.
+fn sorted_recipe(recipe: &Value) -> Vec<(String, f64)> {
+    let mut list: Vec<(String, f64)> = recipe
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, ratio)| ratio.as_f64().map(|r| (name.clone(), r)))
+        .filter(|(_, r)| *r > 1e-4)
+        .collect();
+    list.sort_by(|a, b| b.1.total_cmp(&a.1));
+    list
+}
+
+/// 价格稳健性: 核心标了"先问价"的煤 (估错就改配方、按占比 × 误差排在最前) + 更稳的配方.
+fn robustness_lines(report: &Value, types: &Map<String, Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(error) = report["price_error"].as_f64() {
+        out.push(format!(
+            "估价可靠度: 配方用煤的平均估价误差 ±{error:.0} 元/吨 (各煤一起偏的部分只改总价, 不改配方)"
+        ));
+    }
+    let ask: Vec<&Value> = report["swings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|swing| swing["ask"] == true)
+        .collect();
+    if ask.is_empty() {
+        out.push("各煤估价误差都不足以改变配方, 可以按这个配方去问价.".into());
+    } else {
+        out.push("先问这几种的价 (价格差这么多配方就会变, 都小于估价误差):".into());
+        out.extend(ask.iter().map(|swing| swing_line(swing, types)));
+    }
+    if let Some(robust) = report.get("robust") {
+        let mix: Vec<String> = sorted_recipe(&robust["recipe"])
+            .into_iter()
+            .map(|(name, ratio)| format!("{} {:.1}%", typed(&name, types), ratio * 100.0))
+            .collect();
+        out.push(format!(
+            "更稳的配方 (按当前估算价多花 {:.1} 元/吨, 平均估价误差降到 ±{:.0}): {}",
+            robust["extra_cost"].as_f64().unwrap_or(0.0),
+            robust["price_error"].as_f64().unwrap_or(0.0),
+            mix.join("、")
+        ));
+    }
+    out
+}
+
+/// 门槛是 5 元网格上的格点; 落在最低一格表示"不超过 5 元".
+fn yuan(threshold: f64) -> String {
+    if threshold <= 5.0 {
+        "不到 5 元".into()
+    } else {
+        format!("{threshold:.0} 元")
+    }
+}
+
+fn swing_line(swing: &Value, types: &Map<String, Value>) -> String {
+    let name = typed(swing["name"].as_str().unwrap_or(""), types);
+    let share = swing["share"].as_f64().unwrap_or(0.0);
+    let error = swing["uncertainty"].as_f64().unwrap_or(0.0);
+    let rise = swing["rise"].as_f64().map(yuan);
+    let fall = swing["fall"].as_f64().map(yuan);
+    let change = match (rise, fall) {
+        (Some(r), Some(f)) => format!("贵 {r}或便宜 {f}配方就变"),
+        (Some(r), None) => format!("贵 {r}配方就变"),
+        (None, Some(f)) if share < 0.005 => format!("便宜 {f}就会入选"),
+        (None, Some(f)) => format!("便宜 {f}配方就变"),
+        (None, None) => "价格变动不影响配方".into(),
+    };
+    let place = if share <= 0.0 {
+        "未入选".to_string()
+    } else if share < 0.005 {
+        "占不到 0.5%".to_string()
+    } else {
+        format!("占 {:.1}%", share * 100.0)
+    };
+    format!("- {name} {place}: {change} [估价误差 ±{error:.0}]")
+}
+
 fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, String> {
     let query = args
         .get("name")
@@ -366,7 +481,14 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
         .get("price_factor")
         .and_then(|f| serde_json::from_value(f.clone()).ok())
         .map(|mut f: blend_kit::PriceFactor| {
-            f.market_price = context.market_price.or(f.market_price);
+            f.benchmarks = context
+                .benchmarks
+                .iter()
+                .filter_map(|b| serde_json::from_value(b.clone()).ok())
+                .collect();
+            if f.benchmarks.is_empty() {
+                f.market_price = context.market_price.or(f.market_price);
+            }
             f
         });
     let mut out = Vec::new();
@@ -399,15 +521,17 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
                 })
             })
             .collect();
-        let mut line = format!(
-            "{name} [{status}] {} {}",
-            coal["coal_type"].as_str().unwrap_or(""),
-            coal["region"].as_str().unwrap_or("")
-        );
+        let tags: Vec<&str> = ["coal_type", "form", "region"]
+            .iter()
+            .filter_map(|key| coal[*key].as_str())
+            .collect();
+        let mut line = format!("{name} [{status}] {}", tags.join(" "));
         line.push_str(&format!("\n  指标: {}", props.join(", ")));
         if let Some(factor) = &factor {
+            // 带上煤种、形态、地区: 估价按它们逐层对标基准, 与 today_blend 同一口径.
             let as_coal: Result<blend_kit::Coal, _> = serde_json::from_value(json!({
-                "name": name, "props": coal["props"], "fob": 0.0, "frt": 0.0
+                "name": name, "props": coal["props"], "fob": 0.0, "frt": 0.0,
+                "coal_type": coal["coal_type"], "form": coal["form"], "region": coal["region"]
             }));
             if let Ok(estimate) = as_coal
                 .map_err(|_| ())
@@ -416,7 +540,12 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
                 if let Some(value) = estimate.coal_values.first() {
                     let price = estimate
                         .market
-                        .map(|_| format!(", 估算出厂价 {:.0} 元/吨", value.fair))
+                        .map(|_| {
+                            let note = serde_json::to_value(value)
+                                .map(|v| price_note(&v))
+                                .unwrap_or_default();
+                            format!(", 估算出厂价 {:.0} 元/吨{note}", value.fair)
+                        })
                         .unwrap_or_default();
                     line.push_str(&format!("\n  质量指数 {:.0}{price}", value.points));
                 }
@@ -432,6 +561,14 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
     }
     out.push("(规格) = 合同/报价的保证界限, 不是化验值".into());
     Ok(out.join("\n"))
+}
+
+/// 估算价的出处说明 (一条 coal_values): ", 对标X"; 没对标基准为空.
+fn price_note(value: &Value) -> String {
+    value["benchmark"]
+        .as_str()
+        .map(|benchmark| format!(", 对标{benchmark}"))
+        .unwrap_or_default()
 }
 
 fn spec_fields_legend_needed(lines: &[String]) -> bool {
@@ -460,11 +597,41 @@ fn contract_text(context: &Context) -> String {
             bound_text(spec)
         ));
     }
-    out.push(match context.market_price {
-        Some(m) => format!("估价市场价: 标准品 1000 点 = {m:.0} 元/吨 (焦煤现货指数最新一期)"),
-        None => "估价市场价: 现货指数暂时取不到".into(),
-    });
+    if context.benchmarks.is_empty() {
+        out.push(match context.market_price {
+            Some(m) => format!(
+                "估价市场价: 标准品 1000 点 = {m:.0} (焦煤现货指数点位, 无基准报价时的退路)"
+            ),
+            None => "估价市场价: 没有基准报价, 现货指数也取不到".into(),
+        });
+    } else {
+        out.push("估价基准报价 (同煤种、指标最接近的一条换算):".into());
+        for benchmark in &context.benchmarks {
+            out.push(benchmark_line(benchmark));
+        }
+    }
     out.join("\n")
+}
+
+/// "- 焦煤 晋中中硫主焦 S1.3 A10.5 G80: 2050 (2026-10-10)", 按指数推算过的再注明.
+fn benchmark_line(benchmark: &Value) -> String {
+    let props = &benchmark["props"];
+    let spec: Vec<String> = ["S", "A", "V", "G", "Y"]
+        .into_iter()
+        .filter_map(|key| props[key].as_f64().map(|v| format!("{key}{v}")))
+        .collect();
+    let price = benchmark["price"].as_f64().unwrap_or(0.0);
+    let drift = match benchmark["current_price"].as_f64() {
+        Some(now) => format!(", 按指数推算到今天 {now:.0}"),
+        None => String::new(),
+    };
+    format!(
+        "- {} {} {}: {price:.0} ({}{drift})",
+        benchmark["coal_type"].as_str().unwrap_or("未分煤种"),
+        benchmark["name"].as_str().unwrap_or(""),
+        spec.join(" "),
+        benchmark["date"].as_str().unwrap_or("")
+    )
 }
 
 #[cfg(test)]
@@ -481,8 +648,8 @@ mod tests {
                     {"indicator": "S", "direction": "Upper", "base": 1.3, "premium_rate": 75, "discount_rate": 125}
                 ]},
                 "coals": [
-                    {"name": "低硫", "status": "active", "props": {"S": 0.6}, "confidence": {"S": "spec"}},
-                    {"name": "高硫", "status": "active", "props": {"S": 2.4}},
+                    {"name": "低硫", "status": "active", "coal_type": "焦煤", "props": {"S": 0.6}, "confidence": {"S": "spec"}},
+                    {"name": "高硫", "status": "active", "coal_type": "瘦煤", "props": {"S": 2.4}},
                     {"name": "停产", "status": "archived", "props": {"S": 0.1}}
                 ]
             }),
@@ -494,14 +661,19 @@ mod tests {
                 user_coals: json!([]),
             },
             market_price: Some(2000.0),
+            benchmarks: Vec::new(),
             rank_k: None,
         }
     }
 
     fn call(name: &str, arguments: Value) -> (String, bool) {
+        call_with(&context(), name, arguments)
+    }
+
+    fn call_with(context: &Context, name: &str, arguments: Value) -> (String, bool) {
         let message = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                              "params": {"name": name, "arguments": arguments}});
-        let response = handle(&message, Some(&context())).unwrap();
+        let response = handle(&message, Some(context)).unwrap();
         let result = &response["result"];
         (
             result["content"][0]["text"].as_str().unwrap().to_string(),
@@ -569,6 +741,46 @@ mod tests {
         assert!(!text.contains("停产"), "已停用的煤不得进配方: {text}");
         assert!(text.contains("标准品 1000 点 = 2000"), "{text}");
         assert!(text.contains("硫 S"), "{text}");
+        // 配方行带煤种 (硫按一位小数截断判, 卡在 1.6 以下), 并附估价可靠度 (两煤被硫分卡死, 估价误差改变不了配方).
+        assert!(text.contains("- 低硫 (焦煤) 44.4%"), "{text}");
+        assert!(text.contains("估价可靠度"), "{text}");
+        assert!(text.contains("不足以改变配方"), "{text}");
+    }
+
+    #[test]
+    fn test_robustness_lines_list_fragile_coals_and_robust_recipe() {
+        let types: Map<String, Value> = [("甲".to_string(), json!("瘦煤"))].into_iter().collect();
+        let report = json!({
+            "price_error": 214.4,
+            "swings": [
+                {"name": "甲", "share": 0.37, "uncertainty": 250.0, "rise": 25.0, "fall": 150.0, "ask": true},
+                {"name": "丙", "share": 0.0, "uncertainty": 250.0, "rise": null, "fall": 5.0, "ask": true},
+                {"name": "零", "share": 0.003, "uncertainty": 250.0, "rise": 5.0, "fall": null, "ask": true},
+                {"name": "稳", "share": 0.2, "uncertainty": 60.0, "rise": 5.0, "fall": null, "ask": false}
+            ],
+            "robust": {"recipe": {"乙": 0.6, "甲": 0.4}, "extra_cost": 9.9, "price_error": 138.0}
+        });
+        let text = robustness_lines(&report, &types).join("\n");
+        assert!(text.contains("平均估价误差 ±214"), "{text}");
+        assert!(
+            text.contains("- 甲 (瘦煤) 占 37.0%: 贵 25 元或便宜 150 元配方就变 [估价误差 ±250]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- 丙 未入选: 便宜 不到 5 元就会入选"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- 零 占不到 0.5%: 贵 不到 5 元配方就变"),
+            "{text}"
+        );
+        assert!(!text.contains("- 稳"), "没标先问价的不列: {text}");
+        assert!(
+            text.contains(
+                "按当前估算价多花 9.9 元/吨, 平均估价误差降到 ±138): 乙 60.0%、甲 (瘦煤) 40.0%"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -605,5 +817,60 @@ mod tests {
             text.contains("硫 S ≤1.5") && text.contains("1000 吨"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn test_benchmarks_drive_estimates_in_every_tool() {
+        let mut context = context();
+        context.market_price = None;
+        context.benchmarks = vec![
+            json!({"name": "晋中中硫主焦", "coal_type": "焦煤", "props": {"S": 1.3},
+                   "price": 2050.0, "date": "2026-10-10"}),
+            json!({"name": "吕梁高硫瘦煤", "coal_type": "瘦煤", "props": {"S": 2.8},
+                   "price": 1860.0, "date": "2026-10-09", "current_price": 1840.0}),
+        ];
+        let (text, is_error) = call_with(&context, "today_blend", json!({}));
+        assert!(!is_error, "{text}");
+        assert!(
+            text.contains("按 2 条分煤种基准报价估价, 最新 2026-10-10"),
+            "{text}"
+        );
+        assert!(
+            text.contains("对标晋中中硫主焦") && text.contains("对标吕梁高硫瘦煤"),
+            "{text}"
+        );
+
+        let (text, _) = call_with(&context, "find_coal", json!({"name": "高硫"}));
+        assert!(text.contains("估算出厂价"), "{text}");
+
+        let (text, _) = call_with(&context, "get_contract", json!({}));
+        assert!(
+            text.contains("- 焦煤 晋中中硫主焦 S1.3: 2050 (2026-10-10)"),
+            "{text}"
+        );
+        assert!(text.contains("按指数推算到今天 1840"), "{text}");
+    }
+
+    #[test]
+    fn test_find_coal_estimates_by_type_and_form() {
+        let mut context = context();
+        context.market_price = None;
+        context.master["coals"][1]["form"] = json!("筛选精煤");
+        context.master["coals"][1]["region"] = json!("山西临汾");
+        // 前两条与"高硫"硫分相同, 但一条是焦煤、一条是浮精; 它是瘦煤筛精, 只能对标瘦煤筛精.
+        context.benchmarks = vec![
+            json!({"name": "高硫焦", "coal_type": "焦煤", "form": "筛选精煤", "props": {"S": 2.4},
+                   "price": 2000.0, "date": "2026-10-10"}),
+            json!({"name": "高硫瘦浮精", "coal_type": "瘦煤", "form": "浮选精煤", "props": {"S": 2.4},
+                   "price": 1700.0, "date": "2026-10-10"}),
+            json!({"name": "中硫瘦筛精", "coal_type": "瘦煤", "form": "筛选精煤", "props": {"S": 1.3},
+                   "price": 1800.0, "date": "2026-10-10"}),
+        ];
+        let (text, _) = call_with(&context, "find_coal", json!({"name": "高硫"}));
+        assert!(
+            text.contains("高硫 [在用] 瘦煤 筛选精煤 山西临汾"),
+            "{text}"
+        );
+        assert!(text.contains("对标中硫瘦筛精"), "{text}");
     }
 }

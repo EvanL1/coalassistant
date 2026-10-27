@@ -41,6 +41,7 @@ fn request(coals: Vec<Coal>, fixed: Option<HashMap<String, f64>>) -> BlendReques
         fixed_ratios: fixed,
         rank_interaction: None,
         price_factor: None,
+        price_robustness: None,
     }
 }
 

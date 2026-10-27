@@ -49,6 +49,11 @@ function CoalValueRow({
         {missing.length > 0 && (
           <span style={tag}>{`缺 ${missing.join("、")}`}</span>
         )}
+        {value.benchmark && (
+          <div style={{ fontSize: 10, color: "var(--c-text-3)" }}>
+            对标 {value.benchmark}
+          </div>
+        )}
       </td>
       <td style={cell}>{value.fob != null ? value.fob.toFixed(0) : "—"}</td>
       <td style={cell}>{value.points.toFixed(0)}</td>
@@ -71,7 +76,8 @@ function CoalValueRow({
 
 /**
  * 煤价对比卡: 每种煤的出厂价 vs 按质量算出的应值价.
- * 质量指数以标准品 = 1000 点计; 应值 = 市场价/1000 × 质量指数.
+ * 质量指数以标准品 = 1000 点计; 有基准报价时应值 = 同煤种最近基准价 × 质量指数之比,
+ * 否则应值 = 市场价/1000 × 质量指数.
  * 出厂价取送进求解的口径 (发生锚点推算时是推算价, 不是录入的原始报价), drifted 时脚注说明.
  * 只是评估, 与配方无关; 有解无解都可显示. 没有 coal_values 时整卡不渲染.
  */
@@ -90,6 +96,7 @@ export function CoalValueCard({
   const showBlendValue = values.some((value) => value.blend_value != null);
   if (values.length === 0) return null;
   const market = result.market_price;
+  const byBenchmark = values.some((value) => value.benchmark);
   return (
     <div className="card coal-value-card" style={{ marginTop: 12 }}>
       <div className="card-title">煤价对比 (按质量)</div>
@@ -119,11 +126,17 @@ export function CoalValueCard({
         </tbody>
       </table>
       <p style={{ fontSize: 11, color: "var(--c-text-3)", marginTop: 8 }}>
+        {byBenchmark &&
+          "估价 = 同煤种、指标最接近的基准报价 × 质量指数之比 (对标见每行) · "}
         {market != null &&
-          `市场价 ${market.toFixed(0)} 元/吨 = 标准品 1000 点 (${
-            result.market_price_from_group
-              ? `由 ${pricedCount} 种有报价的煤反推`
-              : "指定"
+          `${byBenchmark ? "标准品 1000 点约合" : "市场价"} ${market.toFixed(0)} 元/吨${
+            byBenchmark ? "" : " = 标准品 1000 点"
+          } (${
+            byBenchmark
+              ? "由最接近标准品的基准反推"
+              : result.market_price_from_group
+                ? `由 ${pricedCount} 种有报价的煤反推`
+                : "指定"
           }) · `}
         只用出厂价, 不含运费
         {drifted && " · 有煤用旧报价推算, 按推算后的出厂价对比"} ·

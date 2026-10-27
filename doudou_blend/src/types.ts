@@ -115,6 +115,12 @@ export interface Coal {
   /** 可选煤岩数据; 提供时混煤 σ 走直方图精确计算. */
   petrography?: Petrography | null;
   purchase_terms?: PurchaseTerms | null;
+  /** 煤种 (焦煤/肥煤/1/3焦煤/瘦煤…). 不进 LP; 用于展示、估价对标与按煤种取估价误差. */
+  coal_type?: string | null;
+  /** 产品形态 (精煤/筛选精煤/浮选精煤…), 与煤种并列. 不进 LP; 估价对标用. */
+  form?: string | null;
+  /** 产地 (如 "山西临汾"), 与煤种并列. 不进 LP; 估价对标用. */
+  region?: string | null;
 }
 
 /** 本次指标评估实际采用的模型摘要. */
@@ -137,8 +143,18 @@ export interface BlendRequest {
   fixed_ratios?: Record<string, number> | null;
   /** 煤阶交互罚项 (配煤不相容). 不传或 k = 0 = 不启用. */
   rank_interaction?: RankInteraction | null;
-  /** 价格因子 (按质量估应值价). 只做评估, 不进 LP. */
+  /** 价格因子 (按质量估应值价). 默认只评估; estimate_unpriced 时无报价的煤按估算价进 LP. */
   price_factor?: PriceFactor | null;
+  /** 价格稳健性分析 (煤价估不准时配方靠不靠得住). 不传 = 不分析. */
+  price_robustness?: PriceRobustness | null;
+}
+
+/** 价格稳健性分析配置; 字段缺省用核心默认值 (容差 10, 搜索范围 300 元/吨). */
+export interface PriceRobustness {
+  /** 成本相差多少元/吨以内算"差不多". */
+  tolerance?: number;
+  /** 翻转门槛的搜索范围 (元/吨). */
+  swing_range?: number;
 }
 
 /** CSR配 = Σxᵢ·CSRᵢ − k·D, D = 配比加权的煤阶 (Ro) 方差. k ≥ 0, 须用本厂实测标定. */
@@ -166,11 +182,99 @@ export interface PriceFactor {
   extra_coals?: Coal[];
   /** 无报价也求解: extra_coals 按估算价并入煤池进 LP. */
   estimate_unpriced?: boolean;
+  /** 煤价典型误差, 给价格稳健性分析用. */
+  uncertainty?: PriceUncertainty | null;
+  /** 基准报价 (带日期的市场价); 有就按同煤种、指标最接近的基准估价, 优先于 market_price. */
+  benchmarks?: Benchmark[];
+  /** 对标时外地基准的距离加罚 (点); 煤种、形态是硬分层, 地区只是软偏好. 缺省 = 不看地区. */
+  region_penalty?: number | null;
+}
+
+/** 基准报价: 一个具体品种某天的市场价 (出厂含税). */
+export interface Benchmark {
+  name: string;
+  coal_type?: string | null;
+  /** 产品形态, 与 Coal.form 同一词表; 估价按 煤种 → 形态 → 地区 逐层对标. */
+  form?: string | null;
+  region?: string | null;
+  /** 基准品的指标. */
+  props: Partial<Record<string, number>>;
+  /** 报价 (元/吨). */
+  price: number;
+  /** 报价日 YYYY-MM-DD. */
+  date: string;
+  source?: string | null;
+  /** 按焦煤现货指数从报价日推算到今天的价 (服务端算). */
+  current_price?: number | null;
+}
+
+/** /api/benchmarks 返回的基准: 多了出处层与指数推算信息. */
+export interface BenchmarkEntry extends Benchmark {
+  /** master = 随版本发布的默认值; stored = 管理员补录 (可删); mcci = 钢铁网指数当天值 (服务端每天拉). */
+  origin?: "master" | "stored" | "mcci";
+  id?: string;
+  index_ratio?: number;
+  index_date?: string;
+  /** 推算用的指数: "钢铁网 LJM_xx" (同煤种序列) 或 "CCP". */
+  index_source?: string;
+  /** origin=mcci 时的钢铁网品种代码. */
+  index_code?: string;
+}
+
+/** master 里配置的钢铁网指数序列: 服务端每天拉值, 每条当一个基准 (指标 = 标准品). */
+export interface IndexSeries {
+  code: string;
+  type_name: string;
+  name: string;
+  coal_type: string;
+  form?: string;
+  region?: string;
+  props: Record<string, number>;
+}
+
+/** 钢铁网指数的一个交易日值 (元/湿吨). */
+export interface McciPoint {
+  date: string;
+  price: number;
+}
+
+/** /api/mcci 的一条序列: master 配置 + 近一年的值 (升序, 可能为空). */
+export interface McciSeries extends IndexSeries {
+  points: McciPoint[];
+}
+
+/** 估价模块入口 (/api/price) 的输入. */
+export interface PriceRequest {
+  coals: Coal[];
+  price_factor: PriceFactor;
+}
+
+/** 估价模块入口的输出. */
+export interface PriceResult {
+  ok: boolean;
+  reason?: string | null;
+  coal_values: CoalValue[];
+  market_price?: number | null;
+}
+
+/** 煤价典型误差 (元/吨, 约等于平均绝对误差). */
+export interface PriceUncertainty {
+  /** 估算价, 煤种没单列时. */
+  default: number;
+  /** 有报价的煤. */
+  quoted: number;
+  /** 按煤种单列的估算价误差. */
+  by_coal_type?: Record<string, number>;
 }
 
 /** master 里的价格因子系数表, 多一段出处说明. */
 export interface MasterPriceFactor extends PriceFactor {
   description?: string;
+  uncertainty_note?: string;
+  benchmarks_note?: string;
+  index_series_note?: string;
+  /** 只给服务端用, 不进求解请求. */
+  index_series?: IndexSeries[];
 }
 
 export interface PricePart {
@@ -194,9 +298,52 @@ export interface CoalValue {
   ratio: number | null;
   /** 配煤价值: 本次煤池与合同下的盈亏平衡到厂价 (元/吨); 到厂价低于它就会入选. */
   blend_value?: number | null;
+  /** 估价对标的基准报价名; 缺省 = 按市场价或煤池反推. */
+  benchmark?: string | null;
   parts: PricePart[];
   missing: string[];
   extrapolated: string[];
+}
+
+/** 价格稳健性报告: 煤价估不准时, 配方还靠不靠得住. */
+export interface RobustnessReport {
+  tolerance: number;
+  swing_range: number;
+  /** 配方用煤的平均估价误差 = Σ 配比 × 该煤估价误差 (元/吨); 不是吨成本误差. */
+  price_error: number;
+  /** 逐煤翻转门槛, 门槛小的在前. */
+  swings: PriceSwing[];
+  /** 更稳的配方; 缺省 = 当前配方已是最稳的. */
+  robust?: RobustRecipe | null;
+}
+
+/** 单种煤价格变多少, 配方就要换掉一成以上吨位. */
+export interface PriceSwing {
+  name: string;
+  coal_type?: string | null;
+  /** 当前配方里的占比 (0–1); 没入选为 0. */
+  share: number;
+  /** 价格是不是估算价. */
+  estimated: boolean;
+  /** 这种煤的煤价误差 (元/吨). */
+  uncertainty: number;
+  /** 涨多少元配方会变 (5 元网格, 等于 5 = 不到 5 元); null = 搜索范围内不变或没入选. */
+  rise: number | null;
+  /** 跌多少元配方会变; null = 搜索范围内不变. */
+  fall: number | null;
+  /** 先问价: 估错就会改配方, 且按"占比 × 误差"排在最前的几种. */
+  ask?: boolean;
+}
+
+/** 多花不超过容差、更多用价格有把握的煤的配方. */
+export interface RobustRecipe {
+  recipe: Record<string, number>;
+  /** 按当前煤价的吨成本. */
+  cost: number;
+  /** 比最低成本配方多花多少 (元/吨). */
+  extra_cost: number;
+  /** 这个配方的煤价误差 (元/吨). */
+  price_error: number;
 }
 
 export interface CostBreakdown {
@@ -348,6 +495,8 @@ export interface BlendResult {
   /** 标准品 1000 点对应的市场价 (元/吨). */
   market_price?: number | null;
   market_price_from_group?: boolean;
+  /** 价格稳健性分析; 请求没要或无解时缺失. */
+  price_robustness?: RobustnessReport | null;
 }
 
 /** 混合后 6 项指标 (CSR 回归自变量 X). */

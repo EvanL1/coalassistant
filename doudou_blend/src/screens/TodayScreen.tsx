@@ -55,6 +55,10 @@ import {
   setQuantity,
 } from "../storage";
 import { CoalValueCard } from "./CoalValueCard";
+import { McciCard } from "./McciCard";
+import { fetchBenchmarks, solverPriceFactor, toRequestBenchmark } from "../benchmarks";
+import { PriceRobustnessCard } from "./PriceRobustnessCard";
+import { coalTypeMap } from "../domain/coalTypes";
 import { CostCard } from "./CostCard";
 import { InfeasiblePanel } from "./InfeasiblePanel";
 
@@ -343,10 +347,17 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         ? "用户自定义合同"
         : master.default_contract.name;
 
-      // 标准品 1000 点的市场价取现货指数最新一期; 拿不到时由核心按煤池报价反推 (若有).
-      const marketPrice = master.price_factor
-        ? await fetchLatestCoalIndex()
-        : null;
+      // 估价按基准报价 (分煤种、带报价日, 服务端已按现货指数推算到今天); 取不到就用
+      // master 自带的默认基准. 两样都没有才退回现货指数点位当标准品价 (只是相对尺度).
+      const fetched = master.price_factor
+        ? (await fetchBenchmarks()).map(toRequestBenchmark)
+        : [];
+      const benchmarks =
+        fetched.length > 0 ? fetched : (master.price_factor?.benchmarks ?? []);
+      const marketPrice =
+        master.price_factor && benchmarks.length === 0
+          ? await fetchLatestCoalIndex()
+          : null;
       if (!tracker.isCurrent(requestId)) return;
 
       const request: BlendRequest = {
@@ -359,13 +370,16 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         ...(master.price_factor
           ? {
               price_factor: {
-                ...master.price_factor,
+                ...solverPriceFactor(master.price_factor),
+                ...(benchmarks.length > 0 ? { benchmarks } : {}),
                 ...(marketPrice != null ? { market_price: marketPrice } : {}),
                 extra_coals: unpriced,
                 estimate_unpriced: true,
               },
             }
           : {}),
+        // 煤价估不准时配方靠不靠得住: 逐煤翻转门槛 + 更稳的配方 (参数用核心默认值).
+        price_robustness: {},
       };
 
       const json = await backend.solveJson(JSON.stringify(request));
@@ -558,12 +572,16 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   }
   if (state.status === "error") {
     return (
-      <div className="empty">
-        <p style={{ marginBottom: 16 }}>{state.error}</p>
-        <button className="btn btn-primary" onClick={() => runSolve(true)}>
-          重试
-        </button>
-      </div>
+      <>
+        <div className="empty">
+          <p style={{ marginBottom: 16 }}>{state.error}</p>
+          <button className="btn btn-primary" onClick={() => runSolve(true)}>
+            重试
+          </button>
+        </div>
+        {/* 指数与求解成败无关; 缺价求解不了时正是要看参考价的时候. */}
+        <McciCard />
+      </>
     );
   }
 
@@ -602,6 +620,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   const dateStr = `${today.getFullYear()} 年 ${today.getMonth() + 1} 月 ${today.getDate()} 日`;
 
   const sortedRecipe = [...result.orders].sort((a, b) => b.ratio - a.ratio);
+  const coalTypes = coalTypeMap(snapshot.request);
 
   return (
     <>
@@ -778,6 +797,9 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
                   style={{ background: RECIPE_COLORS[i % RECIPE_COLORS.length] }}
                 />
                 <span>{o.coal}</span>
+                {coalTypes.get(o.coal) && (
+                  <span className="recipe-coal-type">{coalTypes.get(o.coal)}</span>
+                )}
               </div>
               <div className="recipe-amount">
                 {(o.ratio * 100).toFixed(2)}% ·{" "}
@@ -787,6 +809,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           ))}
         </div>
       </div>
+
+      <PriceRobustnessCard report={result.price_robustness} types={coalTypes} />
 
       <div className="card today-indicators">
         <div
@@ -922,6 +946,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
 
       {/* 煤价对比与配方无关, 有解无解都显示 (没有 coal_values 时组件不渲染). */}
       <CoalValueCard result={result} drifted={(price?.driftedCount ?? 0) > 0} />
+      {/* 估价对标的钢铁网指数: 规格、当天值与近一年走势. */}
+      <McciCard />
 
       {result.warnings.length > 0 && (
         <div

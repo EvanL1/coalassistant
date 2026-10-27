@@ -98,3 +98,22 @@ fn test_master_prints_the_embedded_master_json() {
     let master: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(master["coals"].is_array());
 }
+
+#[test]
+fn test_price_estimates_without_solving() {
+    let request = serde_json::json!({
+        "coals": [coal("甲", 0.5, 90.0, 0.0)],
+        "price_factor": {
+            "adjusts": [{"indicator": "S", "direction": "Upper", "base": 1.3,
+                         "premium_rate": 75, "discount_rate": 125}],
+            "benchmarks": [{"name": "基准", "price": 2000.0, "date": "2026-10-10",
+                            "props": {"S": 1.3}}]
+        }
+    });
+    let (code, out, _) = run(&["price"], &request.to_string());
+    assert_eq!(code, 0, "{out}");
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // 甲比基准低 0.8 硫, 升 60 点: 2000 × 1060 / 1000
+    assert!((result["coal_values"][0]["fair"].as_f64().unwrap() - 2120.0).abs() < 1e-6);
+    assert_eq!(result["coal_values"][0]["benchmark"], "基准");
+}

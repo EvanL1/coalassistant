@@ -52,6 +52,24 @@ result is post-processed into three business views: cost breakdown, physical ord
 `seed.rs` loads the embedded master DB + status state machine; `predict.rs` is optional CSR regression.
 `rank_interaction.rs` is the opt-in blend-incompatibility term (`BlendRequest.rank_interaction`: CSR − k·Var(Ro),
 linearized per round so the LP stays linear); absent or k = 0 must leave results byte-identical.
+`pricing.rs` is the standalone **estimation module** (估价模块): quality index (1000-point premiums/discounts from
+`price_factor.adjusts`) + pricing against **benchmarks** (`price_factor.benchmarks`: dated market quotes per coal type) —
+each coal is priced from the benchmark of the same coal type → same form (`Coal.form`: 精煤/筛选精煤/浮选精煤…; hard layers, each applied only if such a benchmark exists) whose premiums differ least — region is only a soft preference (`price_factor.region_penalty` points added to other-region benchmarks), because forcing a sparse local benchmark mis-prices by hundreds — `price = benchmark × Q(coal)/Q(benchmark)`,
+falling back to `market_price`. Own JSON entry `estimate_json` (server `POST /api/price`, CLI `blend price`);
+`price_factor.rs` is only the solver glue (unpriced coals enter the LP at the estimate; `coal_values` attached after).
+Benchmarks live in three layers merged by the server (`blend_kit_server/src/benchmarks.rs`): master defaults + the
+`price_benchmarks` table (admin-entered, latest date per name wins) + the **Mysteel coking-coal index** (MCCI,
+`blend_kit_server/src/mcci.rs`): the server pulls 7 fixed-spec series daily after 17:30 Beijing into `mcci_daily`
+(signed request copied from the public index page; `MCCI_FETCH=off` disables), and each series' latest value becomes a
+benchmark whose props are the standard product in master `price_factor.index_series`. Older quotes are drifted into
+`current_price` by the same-coal-type MCCI series (nearest S grade) when it can, else by CCP. CCP is index points
+(2017-01 = 1000) — never use it as a price. Master-only `price_factor` keys (`*_note`, `index_series`) are stripped before
+reaching the core (`MASTER_ONLY_KEYS`, mirrored in `doudou_blend/src/benchmarks.ts`).
+`robustness.rs` is the opt-in price-robustness analysis (`BlendRequest.price_robustness`): prices are mostly
+estimates and the LP optimum is flat, so it re-solves with perturbed prices to report per-coal flip thresholds (how
+many 元 before ≥10% of tonnage moves, vs. that coal's price uncertainty from `price_factor.uncertainty`, keyed by
+`Coal.coal_type`) and a "robust recipe" (risk premium λ·uncertainty, within a cost tolerance). Absent must leave
+results byte-identical.
 
 **Frontend screens** (`doudou_blend/src/screens/`): 今日 `TodayScreen` (solve + cost/recipe/8-indicator view,
 real purchase-qty input, export orders, save-to-history, input-summary panel), 煤池 `CoalPoolScreen`

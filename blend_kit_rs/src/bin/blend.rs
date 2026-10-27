@@ -3,16 +3,18 @@
 //! ```text
 //! blend solve  < request.json   求最低成本配方
 //! blend eval   < request.json   验算: 请求须带 fixed_ratios (煤名 → 份数), 按给定配比出结果
+//! blend price  < request.json   只估价: {"coals": [...], "price_factor": {...}} (估价模块, 不求解)
 //! blend master                  输出内置 master 数据 (与 GET /api/master 同源)
 //! ```
 //!
-//! 标准输入读 BlendRequest JSON, 标准输出写 BlendResult JSON.
+//! solve/eval: 标准输入读 BlendRequest JSON, 标准输出写 BlendResult JSON.
+//! price: 标准输入读 PriceRequest JSON, 标准输出写 PriceResult JSON.
 //! 退出码: 0 = 有结果 (ok=true); 1 = ok=false, 原因在 reason; 2 = 用法或 JSON 错误.
 
 use std::io::Read;
 use std::process::ExitCode;
 
-const USAGE: &str = "用法: blend solve|eval < request.json  |  blend master";
+const USAGE: &str = "用法: blend solve|eval|price < request.json  |  blend master";
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
@@ -20,7 +22,7 @@ fn main() -> ExitCode {
             println!("{}", blend_kit::master_json());
             ExitCode::SUCCESS
         }
-        Some(command @ ("solve" | "eval")) => run(command),
+        Some(command @ ("solve" | "eval" | "price")) => run(command),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
@@ -45,6 +47,9 @@ fn run(command: &str) -> ExitCode {
     let has_fixed = request
         .get("fixed_ratios")
         .is_some_and(|value| !value.is_null());
+    if command == "price" {
+        return finish(blend_kit::estimate_json(&input));
+    }
     if command == "eval" && !has_fixed {
         eprintln!("eval 需要请求里带 fixed_ratios (煤名 → 份数)");
         return ExitCode::from(2);
@@ -54,7 +59,11 @@ fn run(command: &str) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let output = blend_kit::solve_json(&input);
+    finish(blend_kit::solve_json(&input))
+}
+
+/// 打印结果, 按 ok 定退出码.
+fn finish(output: String) -> ExitCode {
     println!("{output}");
     let ok = serde_json::from_str::<serde_json::Value>(&output)
         .ok()

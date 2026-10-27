@@ -44,6 +44,8 @@ export interface ResolvedCoal {
   name: string;
   region: string | null;
   coal_type: string | null;
+  /** 产品形态; master 未写为 null (schema 约定默认精煤). */
+  form: string | null;
   status: CoalStatus;
   props: Partial<Record<string, number>>;
   /** 用户录入的原始出厂价 */
@@ -229,6 +231,7 @@ export function resolveCoal(
     name: base.name,
     region: base.region ?? null,
     coal_type: base.coal_type ?? null,
+    form: base.form ?? null,
     status: base.status,
     props,
     fob: fob.value,
@@ -301,6 +304,9 @@ export function toBlendCoal(
     fob: coal.fob_drifted ?? coal.fob,
     frt: coal.frt,
     purchase_terms: purchaseTerms ?? undefined,
+    coal_type: coal.coal_type ?? undefined,
+    form: coal.form ?? undefined,
+    region: coal.region ?? undefined,
   };
 }
 
@@ -317,6 +323,9 @@ export function toPriceOnlyCoal(coal: ResolvedCoal): Coal | null {
     props: { ...coal.props },
     fob: coal.fob_drifted ?? coal.fob ?? 0,
     frt: 0,
+    coal_type: coal.coal_type ?? undefined,
+    form: coal.form ?? undefined,
+    region: coal.region ?? undefined,
   };
 }
 

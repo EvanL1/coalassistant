@@ -5,6 +5,8 @@
  */
 import { logout } from "../auth";
 import { ApiKeyCard } from "./ApiKeyCard";
+import { BenchmarkCard } from "./BenchmarkCard";
+import { McciCard } from "./McciCard";
 import { CoalOverridesCard } from "./admin/CoalOverridesCard";
 import { CsrModelCard } from "./admin/CsrModelCard";
 import { RankInteractionCard } from "./admin/RankInteractionCard";
@@ -36,6 +38,8 @@ export function AdminScreen() {
 
       <RankInteractionCard />
       <CsrModelCard />
+      <McciCard />
+      <BenchmarkCard />
       <CoalOverridesCard />
       <ApiKeyCard />
     </div>

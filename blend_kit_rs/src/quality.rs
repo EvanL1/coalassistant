@@ -843,6 +843,9 @@ mod tests {
                 frt: 0.0,
                 petrography: None,
                 purchase_terms: None,
+                coal_type: None,
+                form: None,
+                region: None,
             }],
             specs: vec![spec],
             total_quantity: None,
@@ -850,6 +853,7 @@ mod tests {
             fixed_ratios: None,
             rank_interaction: None,
             price_factor: None,
+            price_robustness: None,
         }
     }
 
@@ -1074,6 +1078,9 @@ mod tests {
             frt: 0.0,
             petrography: None,
             purchase_terms: Some(terms),
+            coal_type: None,
+            form: None,
+            region: None,
         }
     }
 
@@ -1086,6 +1093,7 @@ mod tests {
             fixed_ratios: None,
             rank_interaction: None,
             price_factor: None,
+            price_robustness: None,
         }
     }
 

@@ -70,6 +70,7 @@ fn main() {
         fixed_ratios: None,
         rank_interaction: None,
         price_factor: None,
+        price_robustness: None,
     };
     let r = solve(&req);
 
