@@ -97,7 +97,7 @@ describe("煤卡采购保证值", () => {
     vi.stubGlobal("confirm", confirmSpy);
     mocks.getCoalPref.mockReturnValue({
       purchase_guarantees: { A: 10 },
-      fob_override: 1200,
+      props_override: { S: 0.9 },
     });
     render(<CoalEditor coal={coal} onClose={() => {}} />);
     fireEvent.click(screen.getByText("重置为 master 默认值"));
@@ -110,7 +110,7 @@ describe("煤卡采购保证值", () => {
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     mocks.getCoalPref.mockReturnValue({
       purchase_guarantees: { A: 10 },
-      fob_override: 1200,
+      props_override: { S: 0.9 },
     });
     render(<CoalEditor coal={coal} onClose={() => {}} />);
     expect((screen.getByLabelText("灰保证值") as HTMLInputElement).value).toBe("10");
@@ -128,5 +128,20 @@ describe("煤卡采购保证值", () => {
     render(<CoalEditor coal={coal} onClose={() => {}} />);
     fireEvent.click(screen.getByText("保存"));
     expect(savedPref().purchase_guarantees).toBeUndefined();
+  });
+});
+
+describe("煤卡不录价", () => {
+  it("没有出厂价/运费/价格锚点输入, 保存也不写价格字段", () => {
+    render(<CoalEditor coal={coal} onClose={() => {}} />);
+    expect(screen.queryByText("出厂价 FOB")).toBeNull();
+    expect(screen.queryByText("运费 FRT")).toBeNull();
+    expect(screen.queryByText("作为价格锚点")).toBeNull();
+
+    fireEvent.click(screen.getByText("保存"));
+    const pref = savedPref() as Record<string, unknown>;
+    for (const key of ["fob_override", "frt_override", "is_price_anchor", "fob_history"]) {
+      expect(pref).not.toHaveProperty(key);
+    }
   });
 });

@@ -297,9 +297,6 @@ fn format_result(
                 ratio * quantity
             ));
         }
-        if let Some(report) = result.get("price_robustness") {
-            out.extend(robustness_lines(report, &types));
-        }
     }
 
     let specs: Vec<&Value> = request["specs"]
@@ -392,73 +389,6 @@ fn sorted_recipe(recipe: &Value) -> Vec<(String, f64)> {
         .collect();
     list.sort_by(|a, b| b.1.total_cmp(&a.1));
     list
-}
-
-/// 价格稳健性: 核心标了"先问价"的煤 (估错就改配方、按占比 × 误差排在最前) + 更稳的配方.
-fn robustness_lines(report: &Value, types: &Map<String, Value>) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(error) = report["price_error"].as_f64() {
-        out.push(format!(
-            "估价可靠度: 配方用煤的平均估价误差 ±{error:.0} 元/吨 (各煤一起偏的部分只改总价, 不改配方)"
-        ));
-    }
-    let ask: Vec<&Value> = report["swings"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|swing| swing["ask"] == true)
-        .collect();
-    if ask.is_empty() {
-        out.push("各煤估价误差都不足以改变配方, 可以按这个配方去问价.".into());
-    } else {
-        out.push("先问这几种的价 (价格差这么多配方就会变, 都小于估价误差):".into());
-        out.extend(ask.iter().map(|swing| swing_line(swing, types)));
-    }
-    if let Some(robust) = report.get("robust") {
-        let mix: Vec<String> = sorted_recipe(&robust["recipe"])
-            .into_iter()
-            .map(|(name, ratio)| format!("{} {:.1}%", typed(&name, types), ratio * 100.0))
-            .collect();
-        out.push(format!(
-            "更稳的配方 (按当前估算价多花 {:.1} 元/吨, 平均估价误差降到 ±{:.0}): {}",
-            robust["extra_cost"].as_f64().unwrap_or(0.0),
-            robust["price_error"].as_f64().unwrap_or(0.0),
-            mix.join("、")
-        ));
-    }
-    out
-}
-
-/// 门槛是 5 元网格上的格点; 落在最低一格表示"不超过 5 元".
-fn yuan(threshold: f64) -> String {
-    if threshold <= 5.0 {
-        "不到 5 元".into()
-    } else {
-        format!("{threshold:.0} 元")
-    }
-}
-
-fn swing_line(swing: &Value, types: &Map<String, Value>) -> String {
-    let name = typed(swing["name"].as_str().unwrap_or(""), types);
-    let share = swing["share"].as_f64().unwrap_or(0.0);
-    let error = swing["uncertainty"].as_f64().unwrap_or(0.0);
-    let rise = swing["rise"].as_f64().map(yuan);
-    let fall = swing["fall"].as_f64().map(yuan);
-    let change = match (rise, fall) {
-        (Some(r), Some(f)) => format!("贵 {r}或便宜 {f}配方就变"),
-        (Some(r), None) => format!("贵 {r}配方就变"),
-        (None, Some(f)) if share < 0.005 => format!("便宜 {f}就会入选"),
-        (None, Some(f)) => format!("便宜 {f}配方就变"),
-        (None, None) => "价格变动不影响配方".into(),
-    };
-    let place = if share <= 0.0 {
-        "未入选".to_string()
-    } else if share < 0.005 {
-        "占不到 0.5%".to_string()
-    } else {
-        format!("占 {:.1}%", share * 100.0)
-    };
-    format!("- {name} {place}: {change} [估价误差 ±{error:.0}]")
 }
 
 fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, String> {
@@ -759,51 +689,14 @@ mod tests {
         assert!(!text.contains("停产"), "已停用的煤不得进配方: {text}");
         assert!(text.contains("标准品 1000 点 = 2000"), "{text}");
         assert!(text.contains("硫 S"), "{text}");
-        // 配方行带煤种 (硫按一位小数截断判, 卡在 1.6 以下), 并附估价可靠度 (两煤被硫分卡死, 估价误差改变不了配方).
+        // 配方行带煤种 (硫按一位小数截断判, 卡在 1.6 以下). 今日页已不显示估价可靠度, 这里同样不带.
         // 一铲 3 吨, 采购 1000 吨 = 333 铲, 整铲配. 连续解低硫 44.4% 卡在硫线上, 凑成 148 铲
         // 硫就过线, 所以挪一铲给低硫: 149 铲 = 44.7%.
         assert!(
             text.contains("- 低硫 (焦煤) 44.7% (447 吨 · 149 铲"),
             "{text}"
         );
-        assert!(text.contains("估价可靠度"), "{text}");
-        assert!(text.contains("不足以改变配方"), "{text}");
-    }
-
-    #[test]
-    fn test_robustness_lines_list_fragile_coals_and_robust_recipe() {
-        let types: Map<String, Value> = [("甲".to_string(), json!("瘦煤"))].into_iter().collect();
-        let report = json!({
-            "price_error": 214.4,
-            "swings": [
-                {"name": "甲", "share": 0.37, "uncertainty": 250.0, "rise": 25.0, "fall": 150.0, "ask": true},
-                {"name": "丙", "share": 0.0, "uncertainty": 250.0, "rise": null, "fall": 5.0, "ask": true},
-                {"name": "零", "share": 0.003, "uncertainty": 250.0, "rise": 5.0, "fall": null, "ask": true},
-                {"name": "稳", "share": 0.2, "uncertainty": 60.0, "rise": 5.0, "fall": null, "ask": false}
-            ],
-            "robust": {"recipe": {"乙": 0.6, "甲": 0.4}, "extra_cost": 9.9, "price_error": 138.0}
-        });
-        let text = robustness_lines(&report, &types).join("\n");
-        assert!(text.contains("平均估价误差 ±214"), "{text}");
-        assert!(
-            text.contains("- 甲 (瘦煤) 占 37.0%: 贵 25 元或便宜 150 元配方就变 [估价误差 ±250]"),
-            "{text}"
-        );
-        assert!(
-            text.contains("- 丙 未入选: 便宜 不到 5 元就会入选"),
-            "{text}"
-        );
-        assert!(
-            text.contains("- 零 占不到 0.5%: 贵 不到 5 元配方就变"),
-            "{text}"
-        );
-        assert!(!text.contains("- 稳"), "没标先问价的不列: {text}");
-        assert!(
-            text.contains(
-                "按当前估算价多花 9.9 元/吨, 平均估价误差降到 ±138): 乙 60.0%、甲 (瘦煤) 40.0%"
-            ),
-            "{text}"
-        );
+        assert!(!text.contains("估价可靠度"), "{text}");
     }
 
     #[test]

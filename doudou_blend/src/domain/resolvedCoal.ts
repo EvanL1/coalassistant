@@ -7,24 +7,17 @@ import type {
 } from "../types";
 import { INDICATOR_ORDER } from "../types";
 import { normalizeCoalName } from "./coalName";
-import { driftedFob, type PriceAnchor } from "./priceDrift";
 
 export type CoalOrigin = "master" | "user";
 
-/** 价格漂移上下文; 不传 = 不推算, 一切按录入价(旧行为). */
-export interface PriceDriftContext {
-  /** 锚点煤构成的自建价格指数 */
-  anchor: PriceAnchor;
-  /** master 的 updated_at, 给从没单独录过价的煤兜底当录价日 */
-  masterUpdatedAt?: string | null;
-}
-
+/**
+ * 单煤真实报价拿不到, 煤价一律按质量估算 (价格因子). 不读录入价, 也不读 master 里的
+ * fob/frt —— 真实报价是在估算之后去谈的, 不进求解.
+ */
 export type CoalReadiness =
   | "ready"
   | "disabled"
   | "hidden"
-  | "missing_fob"
-  | "missing_frt"
   | "duplicate_name"
   | "invalid_override";
 
@@ -48,17 +41,6 @@ export interface ResolvedCoal {
   form: string | null;
   status: CoalStatus;
   props: Partial<Record<string, number>>;
-  /** 用户录入的原始出厂价 */
-  fob: number | null;
-  /** 这个 fob 是哪天的口径 */
-  fob_quoted_at: string | null;
-  /** 按锚点推算的当前出厂价; null = 无法推算, 求解退回 fob */
-  fob_drifted: number | null;
-  /** 推算用的涨跌比例; null = 未推算 */
-  drift_ratio: number | null;
-  frt: number | null;
-  /** 到厂价 = (推算价 ?? 录入价) + 运费 */
-  cif: number | null;
   hidden: boolean;
   requestedEnabled: boolean;
   effectiveEnabled: boolean;
@@ -71,32 +53,10 @@ function isValidNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-function resolvePrice(
-  base: number | null | undefined,
-  override: unknown,
-): { value: number | null; overridden: boolean; invalid: boolean } {
-  if (override == null) {
-    return {
-      value: isValidNumber(base) ? base : null,
-      overridden: false,
-      invalid: false,
-    };
-  }
-  if (!isValidNumber(override)) {
-    return { value: null, overridden: false, invalid: true };
-  }
-  return {
-    value: override,
-    overridden: override !== base,
-    invalid: false,
-  };
-}
-
 export function resolveCoal(
   base: MasterCoalEntry,
   pref: CoalPref | null,
   origin: CoalOrigin,
-  drift?: PriceDriftContext | null,
 ): ResolvedCoal {
   const rawPref: unknown = pref;
   const safePref = isRecord(rawPref) ? (rawPref as CoalPref) : null;
@@ -124,10 +84,6 @@ export function resolveCoal(
       invalidOverride = true;
     }
   }
-
-  const fob = resolvePrice(base.fob, safePref?.fob_override);
-  const frt = resolvePrice(base.frt, safePref?.frt_override);
-  invalidOverride ||= fob.invalid || frt.invalid;
 
   const props: Partial<Record<string, number>> = {};
   const baseProps: unknown = base.props;
@@ -175,35 +131,6 @@ export function resolveCoal(
     }
   }
 
-  // 录价日: 显式记录 > 改价时间戳 > master 口径. 定不出来就不推算.
-  const explicitQuotedAt =
-    typeof safePref?.fob_quoted_at === "string" ? safePref.fob_quoted_at : null;
-  const legacyQuotedAt =
-    safePref?.fob_override != null && typeof safePref.updated_at === "string"
-      ? safePref.updated_at.slice(0, 10)
-      : null;
-  const fobQuotedAt =
-    explicitQuotedAt ?? legacyQuotedAt ?? drift?.masterUpdatedAt ?? null;
-
-  const fobDrifted =
-    drift?.anchor != null && fob.value != null
-      ? driftedFob(fob.value, fobQuotedAt, drift.anchor)
-      : null;
-  const driftRatioValue =
-    fobDrifted != null && fob.value != null && fob.value > 0
-      ? fobDrifted / fob.value
-      : null;
-
-  const effectiveFob = fobDrifted ?? fob.value;
-  let cif =
-    effectiveFob != null && frt.value != null
-      ? effectiveFob + frt.value
-      : null;
-  if (cif != null && !Number.isFinite(cif)) {
-    cif = null;
-    invalidOverride = true;
-  }
-
   const effectiveEnabled = requestedEnabled && !hidden;
   let readiness: CoalReadiness;
   if (hidden) {
@@ -212,18 +139,11 @@ export function resolveCoal(
     readiness = "disabled";
   } else if (invalidOverride) {
     readiness = "invalid_override";
-  } else if (fob.value == null) {
-    readiness = "missing_fob";
-  } else if (frt.value == null) {
-    readiness = "missing_frt";
   } else {
     readiness = "ready";
   }
 
-  const hasOverrides =
-    fob.overridden ||
-    frt.overridden ||
-    Object.keys(overriddenProps).length > 0;
+  const hasOverrides = Object.keys(overriddenProps).length > 0;
 
   return {
     origin,
@@ -234,12 +154,6 @@ export function resolveCoal(
     form: base.form ?? null,
     status: base.status,
     props,
-    fob: fob.value,
-    fob_quoted_at: fobQuotedAt,
-    fob_drifted: fobDrifted,
-    drift_ratio: driftRatioValue,
-    frt: frt.value,
-    cif,
     hidden,
     requestedEnabled,
     effectiveEnabled,
@@ -253,14 +167,13 @@ export function resolveCoalPool(
   masterCoals: MasterCoalEntry[],
   userCoals: MasterCoalEntry[],
   prefs: CoalPrefs,
-  drift?: PriceDriftContext | null,
 ): ResolvedCoal[] {
   const resolved = [
     ...userCoals.map((coal) =>
-      resolveCoal(coal, prefs[coal.name] ?? null, "user", drift),
+      resolveCoal(coal, prefs[coal.name] ?? null, "user"),
     ),
     ...masterCoals.map((coal) =>
-      resolveCoal(coal, prefs[coal.name] ?? null, "master", drift),
+      resolveCoal(coal, prefs[coal.name] ?? null, "master"),
     ),
   ];
   const nameCounts = new Map<string, number>();
@@ -280,103 +193,26 @@ export function resolveCoalPool(
 }
 
 /**
- * `purchaseTerms` 由调用方传入: 单次 `resolvePurchaseTerms` 扫描
- * (domain/purchaseTerms.ts) 的结果, 不要在这里重新调用 `mergePurchaseTerms`
- * —— 两处各自算一遍同一件事, 正是这个项目反复出现的分叉缺陷形状。
- * `null`/缺省都表示该煤没有可用采购条款, 落到 `Coal.purchase_terms` 上就是
- * 不产出这个字段(用 `undefined`, 不是显式 `null`, 让 JSON.stringify 省略它)。
+ * 求解用的煤: 一律不带报价 (fob/frt 记 0), 放进价格因子 extra_coals, 由核心按估算价
+ * 并入煤池 (estimate_unpriced). 只有启用且数据有效的煤参与.
+ *
+ * `purchaseTerms` 由调用方传入: 单次 `resolvePurchaseTerms` 扫描 (domain/purchaseTerms.ts)
+ * 的结果, 不要在这里重新调用 `mergePurchaseTerms`. 核心并入煤池时条款随煤走, 保证值扣款
+ * 照算在估算价上. `null`/缺省 = 不产出这个字段 (用 `undefined`, 让 JSON.stringify 省略它).
  */
-export function toBlendCoal(
+export function toEstimateCoal(
   coal: ResolvedCoal,
   purchaseTerms?: PurchaseTerms | null,
 ): Coal | null {
-  if (
-    coal.readiness !== "ready" ||
-    coal.fob == null ||
-    coal.frt == null
-  ) {
-    return null;
-  }
-  // 求解用推算价: 拿几十天前的旧报价求解会系统性低估到厂成本.
+  if (coal.readiness !== "ready") return null;
   return {
     name: coal.name,
     props: { ...coal.props },
-    fob: coal.fob_drifted ?? coal.fob,
-    frt: coal.frt,
+    fob: 0,
+    frt: 0,
     purchase_terms: purchaseTerms ?? undefined,
     coal_type: coal.coal_type ?? undefined,
     form: coal.form ?? undefined,
     region: coal.region ?? undefined,
   };
 }
-
-/**
- * 只做煤价评估 (价格因子 extra_coals) 的煤: 启用了但缺报价/运费, 进不了 LP,
- * 照样按质量打分给估算价. fob 为 0 表示没报价 (有报价但缺运费的仍带上报价).
- */
-export function toPriceOnlyCoal(coal: ResolvedCoal): Coal | null {
-  if (coal.readiness !== "missing_fob" && coal.readiness !== "missing_frt") {
-    return null;
-  }
-  return {
-    name: coal.name,
-    props: { ...coal.props },
-    fob: coal.fob_drifted ?? coal.fob ?? 0,
-    frt: 0,
-    coal_type: coal.coal_type ?? undefined,
-    form: coal.form ?? undefined,
-    region: coal.region ?? undefined,
-  };
-}
-
-/** 本次求解所用价格的可信度摘要. 无论是否发生推算都会返回. */
-export interface PriceStatus {
-  /** 参与求解的煤里最旧的报价日; null = 无法判定 */
-  oldestQuotedAt: string | null;
-  /** 用了推算价的煤数量; 0 = 全部按原始录入价 */
-  driftedCount: number;
-  /** 被推算煤的平均涨跌比例; null = 没有发生推算 */
-  avgRatio: number | null;
-  /** 参与推算的锚点煤 */
-  anchors: string[];
-}
-
-/**
- * 汇总本次求解的价格可信度.
- *
- * 注意这里**总是**返回对象, 而不是"没推算就返回 null" —— 最需要向用户交代的
- * 恰恰是没有推算的默认态: 那时卡片上印着两位小数的到厂价和总额, 底下却是几十天
- * 前的报价. 把提示做成"功能生效后才显示"等于把警告装在了不需要警告的一侧.
- */
-export function summarizePriceStatus(
-  pool: readonly ResolvedCoal[],
-  anchors: readonly string[],
-): PriceStatus {
-  const participating = pool.filter((coal) => coal.readiness === "ready");
-  let oldestQuotedAt: string | null = null;
-  for (const coal of participating) {
-    const quoted = coal.fob_quoted_at;
-    if (quoted && (oldestQuotedAt == null || quoted < oldestQuotedAt)) {
-      oldestQuotedAt = quoted;
-    }
-  }
-  const drifted = participating.filter(
-    (coal) =>
-      coal.drift_ratio != null && Math.abs(coal.drift_ratio - 1) > 1e-9,
-  );
-  const avgRatio =
-    drifted.length > 0
-      ? drifted.reduce((sum, coal) => sum + (coal.drift_ratio ?? 1), 0) /
-        drifted.length
-      : null;
-  return {
-    oldestQuotedAt,
-    driftedCount: drifted.length,
-    avgRatio,
-    anchors: [...anchors],
-  };
-}
-
-// 采购扣款模板缺失告警 (曾在这里, Step 8) 已经搬到 domain/purchaseTerms.ts 的
-// resolvePurchaseTerms/extractOrphanedGuarantees —— 跟 toBlendCoal 用的
-// purchase_terms 出自同一次 mergePurchaseTerms 扫描, 不再各自算一遍。

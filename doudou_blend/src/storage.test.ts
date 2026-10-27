@@ -105,8 +105,24 @@ describe("storage 持久化数据防御", () => {
     clearUserCoals([" 同名煤　"]);
 
     expect(getUserCoals()).toEqual([]);
+    // 共用偏好保留; 旧版本录的价格键读取时摘掉 (煤价一律按质量估算).
     expect(getCoalPrefs()).toEqual({
-      同名煤: { enabled: false, fob_override: 880 },
+      同名煤: { enabled: false },
     });
+  });
+
+  it("旧版本录的价格键读取时摘掉, 写回后本地缓存 (进而云端) 也就干净了", () => {
+    localStorage.setItem(
+      "doudou_blend.coal_prefs.v1",
+      JSON.stringify({
+        昌恒: { enabled: true, frt_override: 24, is_price_anchor: true },
+      }),
+    );
+    expect(getCoalPrefs()).toEqual({ 昌恒: { enabled: true } });
+
+    setCoalPref("昌恒", { hidden: false });
+    const stored = JSON.parse(localStorage.getItem("doudou_blend.coal_prefs.v1")!);
+    expect(stored.昌恒).not.toHaveProperty("frt_override");
+    expect(stored.昌恒).not.toHaveProperty("is_price_anchor");
   });
 });

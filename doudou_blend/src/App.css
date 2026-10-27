@@ -458,16 +458,6 @@ button {
   color: var(--c-text-3);
   margin-top: 2px;
 }
-.coal-price {
-  text-align: right;
-  font-size: 15px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-.coal-price-detail {
-  font-size: 10px;
-  color: var(--c-text-3);
-}
 .coal-props {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -1192,18 +1182,3 @@ button {
   }
 }
 
-/* 成本卡下方的价格推算说明: 求解用的不是原始录入价时必须说清楚 */
-.cost-drift {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.22);
-  font-size: 11px;
-  line-height: 1.5;
-  opacity: 0.9;
-}
-
-/* 报价过期告警: 蓝底卡片上用暖黄, 保证对比度 */
-.cost-warn {
-  color: #ffd666;
-  font-weight: 600;
-}

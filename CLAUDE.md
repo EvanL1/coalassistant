@@ -81,7 +81,7 @@ COALESCE so pre-deploy clients can't reset it). Absent = byte-identical.
 
 **Frontend screens** (`doudou_blend/src/screens/`): 今日 `TodayScreen` (solve + cost/recipe/8-indicator view,
 real purchase-qty input, export orders, save-to-history, input-summary panel), 煤池 `CoalPoolScreen`
-(enable/hide + price + assay overrides), 合同 `ContractScreen` (quality specs), 历史 `HistoryScreen` (saved
+(enable/hide + assay overrides; **no price entry**), 合同 `ContractScreen` (quality specs), 历史 `HistoryScreen` (saved
 blends + measured-CSR backfill), 我的 `MeScreen`. Tabs mount/unmount on switch (`App.tsx`
 `{tab === ... && <Screen/>}`), so each screen reloads its data on entry — relevant for async backend reads.
 The whole app sits behind a login gate: `App.tsx` renders `LoginScreen` until `tryLogin` (`auth.ts`) succeeds
@@ -90,9 +90,16 @@ frontend bundle. Screens read master data through `master_loader.ts`'s `loadMast
 `invalidateMaster()` after anything that changes master data.
 
 **Master vs. user data split.** `coal_master.json` (embedded in `blend_kit_rs/data/`, served read-only via
-`GET /api/master`) is the canonical coal set and is never mutated. User edits (enable/hide, price overrides,
-assay overrides) persist separately: `localStorage` acts as a synchronous cache (`doudou_blend/src/storage.ts`)
-and `cloudStorage.ts` mirrors it to PostgreSQL through `GET/PUT /api/storage` after login.
+`GET /api/master`) is the canonical coal set and is never mutated. User edits (enable/hide, assay overrides) persist separately:
+`localStorage` acts as a synchronous cache (`doudou_blend/src/storage.ts`) and `cloudStorage.ts` mirrors it to
+PostgreSQL through `GET/PUT /api/storage` after login.
+
+**Estimate-only pricing.** Real per-coal quotes are unobtainable, so every coal is priced by the estimation
+module: neither the web (`domain/resolvedCoal.ts` `toEstimateCoal`) nor `today.rs` reads master `fob`/`frt` or
+user price overrides; all enabled coals go to `price_factor.extra_coals` with `estimate_unpriced`, `coals: []`.
+Real quotes are negotiated *after* the estimate and never enter the solve. Legacy price keys in stored prefs
+(`fob_override`/`frt_override`/`fob_history`/`is_price_anchor`…) are stripped on read; `check:data` fails if
+master carries `fob`/`frt`.
 
 **Blend history & the CSR data loop.** Saved blends persist to PostgreSQL via `/api/history`, keeping the full
 `BlendResult` JSON. The History screen lets the user backfill the lab-measured coke CSR onto a past blend —

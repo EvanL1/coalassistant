@@ -27,10 +27,10 @@ export interface CoalPurchaseTerms {
  * 只做一次, 两个下游(`purchaseTermsByCoalName` / `extractOrphanedGuarantees`)
  * 都从同一份扫描结果派生, 保证不可能分叉。
  *
- * 只处理 `readiness === "ready"` 的煤 —— 这跟 `toBlendCoal`(resolvedCoal.ts)
+ * 只处理 `readiness === "ready"` 的煤 —— 这跟 `toEstimateCoal`(resolvedCoal.ts)
  * 实际会塞进求解请求的煤集合完全一致: `readiness !== "ready"` 的煤
- * `toBlendCoal` 直接返回 null, 根本不会出现在请求里。早先孤儿检测是在
- * `effectiveEnabled` 上扫描的, 会把还没配好价格、这次求解压根用不上的煤也
+ * `toEstimateCoal` 直接返回 null, 根本不会出现在请求里。早先孤儿检测是在
+ * `effectiveEnabled` 上扫描的, 会把数据无效、这次求解压根用不上的煤也
  * 纳入告警, 让用户为不影响这次成本的煤操心。
  */
 export function resolvePurchaseTerms(
