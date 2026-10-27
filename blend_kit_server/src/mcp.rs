@@ -264,6 +264,18 @@ fn format_result(
             }
         }
         let types = coal_types(request);
+        // 按整铲配时每种煤配几铲 (orders[].shovels).
+        let shovels: Map<String, Value> = result["orders"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|order| {
+                Some((
+                    order["coal"].as_str()?.to_string(),
+                    order["shovels"].clone(),
+                ))
+            })
+            .collect();
         out.push("配方:".into());
         for (name, ratio) in sorted_recipe(&result["recipe"]) {
             let unit = price
@@ -273,8 +285,13 @@ fn format_result(
                 .unwrap_or_default();
             let note = notes.get(name.as_str()).and_then(Value::as_str);
             let unit = format!("{unit}{}", note.unwrap_or_default());
+            let shovel = shovels
+                .get(name.as_str())
+                .and_then(Value::as_u64)
+                .map(|count| format!(" · {count} 铲"))
+                .unwrap_or_default();
             out.push(format!(
-                "- {} {:.1}% ({:.0} 吨{unit})",
+                "- {} {:.1}% ({:.0} 吨{shovel}{unit})",
                 typed(&name, &types),
                 ratio * 100.0,
                 ratio * quantity
@@ -659,6 +676,7 @@ mod tests {
                 contract: None,
                 quantity: 1000.0,
                 user_coals: json!([]),
+                shovel_tons: None,
             },
             market_price: Some(2000.0),
             benchmarks: Vec::new(),
@@ -742,7 +760,12 @@ mod tests {
         assert!(text.contains("标准品 1000 点 = 2000"), "{text}");
         assert!(text.contains("硫 S"), "{text}");
         // 配方行带煤种 (硫按一位小数截断判, 卡在 1.6 以下), 并附估价可靠度 (两煤被硫分卡死, 估价误差改变不了配方).
-        assert!(text.contains("- 低硫 (焦煤) 44.4%"), "{text}");
+        // 一铲 3 吨, 采购 1000 吨 = 333 铲, 整铲配. 连续解低硫 44.4% 卡在硫线上, 凑成 148 铲
+        // 硫就过线, 所以挪一铲给低硫: 149 铲 = 44.7%.
+        assert!(
+            text.contains("- 低硫 (焦煤) 44.7% (447 吨 · 149 铲"),
+            "{text}"
+        );
         assert!(text.contains("估价可靠度"), "{text}");
         assert!(text.contains("不足以改变配方"), "{text}");
     }

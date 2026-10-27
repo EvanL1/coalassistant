@@ -42,6 +42,8 @@ fn request(coals: Vec<Coal>, fixed: Option<HashMap<String, f64>>) -> BlendReques
         rank_interaction: None,
         price_factor: None,
         price_robustness: None,
+        shovel_tons: None,
+        min_ratios: Default::default(),
     }
 }
 

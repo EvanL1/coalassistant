@@ -206,6 +206,7 @@ pub fn build(
         "coals": lp,
         "specs": specs,
         "total_quantity": options.total_quantity.unwrap_or(storage.quantity),
+        "shovel_tons": storage.shovel_tons.unwrap_or(crate::database::DEFAULT_SHOVEL_TONS),
         "truncate_decimal": true,
     });
     if let Some(factor) = price_factor {
@@ -275,6 +276,7 @@ mod tests {
             contract: None,
             quantity: 3700.0,
             user_coals: json!([]),
+            shovel_tons: None,
         }
     }
 
@@ -318,6 +320,8 @@ mod tests {
         assert_eq!(req["price_factor"]["market_price"], 1907.0);
         assert!(req["price_factor"].get("description").is_none());
         assert_eq!(req["total_quantity"], 3700.0);
+        // 没设过一铲吨数: 按默认 3 吨.
+        assert_eq!(req["shovel_tons"], 3.0);
         assert_eq!(built.contract_name, "默认合同");
     }
 

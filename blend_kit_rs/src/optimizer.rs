@@ -57,6 +57,8 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 /// 事, 各写一个数就会重演"LP 认、复核不认"那个缺陷.
 pub(crate) const FEASIBILITY_TOLERANCE: f64 = 1e-7;
 const OUTPUT_RATIO_TOLERANCE: f64 = 1e-5;
+/// 验算模式不做岩相精确复核时的提示. 按整铲验算 ([`crate::shovel`]) 沿用凑整前的复核, 会把它摘掉.
+pub(crate) const FIXED_PETRO_NOTE: &str = "验算模式未做岩相精确复核, 岩相按线性代理估算";
 
 /// 基础求解入口，不读取训练样本，也不在求解期间拟合模型.
 pub fn solve(request: &BlendRequest) -> BlendResult {
@@ -74,12 +76,18 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
         Err(reason) => (None, Some(reason)),
     };
     let lp_request = priced.as_ref().unwrap_or(request);
-    let mut result = solve_internal(lp_request, evaluators, true);
+    // 一铲最小量 (shovel_tons) 在这里套一层分支定界与凑整铲; 没给时就是一次普通求解.
+    let resolve =
+        |trial: &BlendRequest, diagnose: bool| solve_internal(trial, evaluators, diagnose);
+    let mut result = crate::shovel::solve(lp_request, &resolve);
     result.warnings.extend(note);
     if let Some(config) = &request.price_robustness {
         // 验算模式没有"最优"可言; 无解也无从谈稳不稳.
         if result.ok && request.fixed_ratios.is_none() {
-            let resolve = |trial: &BlendRequest| solve_internal(trial, evaluators, false);
+            // 重解同样按整铲配, 否则零改价时连续解与整铲基准就差一截, 门槛全塌到第一档.
+            let plain =
+                |trial: &BlendRequest, _diagnose: bool| solve_internal(trial, evaluators, false);
+            let resolve = |trial: &BlendRequest| crate::shovel::solve(trial, &plain);
             match crate::robustness::analyze(lp_request, request, &result, config, &resolve) {
                 Ok((report, warnings)) => {
                     result.price_robustness = Some(report);
@@ -348,80 +356,16 @@ fn solve_core(
             .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
             .map(|(coal, ratio)| (*coal, *ratio))
             .collect();
-        let petro_parts: Vec<(&Petrography, f64)> = participating
-            .iter()
-            .filter_map(|(coal, ratio)| {
-                coal.petrography
-                    .as_ref()
-                    .filter(|data| data.is_valid())
-                    .map(|data| (data, *ratio))
-            })
-            .collect();
-
-        if petro_parts.len() != participating.len() {
-            let any_petro_input = participating
-                .iter()
-                .any(|(coal, _)| coal.petrography.is_some());
-            if petro_spec.is_some() && any_petro_input {
-                let missing: Vec<&str> = participating
-                    .iter()
-                    .filter(|(coal, _)| {
-                        !coal.petrography.as_ref().is_some_and(Petrography::is_valid)
-                    })
-                    .map(|(coal, _)| coal.name.as_str())
-                    .collect();
-                result.warnings.push(format!(
-                    "岩相精确复核跳过: {} 缺有效煤岩输入",
-                    missing.join("/")
-                ));
-            }
-            finalize_quality_status(&mut result, &active_specs);
-            return result;
-        }
-
-        let Some((mean, sigma)) = petrography::mix_mean_std(&petro_parts) else {
-            if petro_spec.is_some() {
-                result
-                    .warnings
-                    .push("岩相精确复核跳过: μ/σ 输入无法计算".into());
-            }
+        let Some((sigma, petro_outcome)) = review_petrography(
+            &mut result,
+            &participating,
+            petro_spec,
+            request.truncate_decimal,
+            iteration,
+        ) else {
             finalize_quality_status(&mut result, &active_specs);
             return result;
         };
-
-        let all_histograms = petro_parts.iter().all(|(data, _)| data.has_histogram());
-        let mixed_histogram = all_histograms
-            .then(|| petrography::mix_histogram(&petro_parts))
-            .flatten();
-        let notch = mixed_histogram.as_deref().and_then(|histogram| {
-            petrography::detect_notch(histogram, NOTCH_WINDOW.0, NOTCH_WINDOW.1)
-        });
-        if let Some(notch_data) = &notch {
-            result.warnings.push(format!(
-                "岩相: {:.1}~{:.1} 主焦区间存在凹口（谷深比 {:.2}）",
-                NOTCH_WINDOW.0, NOTCH_WINDOW.1, notch_data.depth_ratio
-            ));
-        }
-
-        let petro_outcome = check_value(sigma, petro_spec, request.truncate_decimal, true);
-        update_petro_check(
-            &mut result,
-            sigma,
-            &petro_outcome,
-            if all_histograms {
-                EvaluationMethod::Histogram
-            } else {
-                EvaluationMethod::Moments
-            },
-        );
-        result.petrography_check = Some(PetrographyCheck {
-            mean,
-            sigma,
-            sigma_max: petro_spec.and_then(|spec| spec.max),
-            sigma_ok: petro_spec.map(|_| petro_outcome.status != EvaluationStatus::Fail),
-            notch,
-            refine_iterations: iteration,
-        });
 
         let above_upper =
             petro_internal_upper.is_some_and(|limit| sigma > limit + SOLUTION_TOLERANCE);
@@ -974,6 +918,20 @@ fn build_lp(
         &mut inequalities,
         &mut bounds,
     )?;
+    // 单煤配比下限 xᵢ ≥ lᵢ, 写成 −xᵢ ≤ −lᵢ. 放在最后, 不打乱前面各行的顺序.
+    // 被剔出煤池的煤不在 coals 里, 它的下限随之不生效.
+    for (column, coal) in coals.iter().enumerate() {
+        if let Some(floor) = request
+            .min_ratios
+            .get(&coal.name)
+            .filter(|floor| **floor > 0.0)
+        {
+            let mut row = vec![0.0; count];
+            row[column] = -1.0;
+            inequalities.push(row);
+            bounds.push(-floor);
+        }
+    }
     let total_columns = costs.len();
 
     Some((
@@ -1293,6 +1251,7 @@ fn assemble_result(
                 cif_amount: tons.map(|value| value * coal.cif()),
                 cif_eff_per_ton: effective,
                 cif_eff_amount: tons.map(|value| value * effective),
+                shovels: None,
             }
         })
         .collect();
@@ -1515,7 +1474,7 @@ fn evaluate_fixed(
         .zip(&ratios)
         .any(|(coal, ratio)| *ratio > 0.0 && coal.petrography.is_some())
     {
-        warnings.push("验算模式未做岩相精确复核, 岩相按线性代理估算".into());
+        warnings.push(FIXED_PETRO_NOTE.into());
     }
     assemble_result(
         kept,
@@ -1581,6 +1540,90 @@ fn mixed_csr_features(coals: &[&Coal], ratios: &[f64]) -> Option<[f64; 6]> {
     ])
 }
 
+/// 岩相精确复核: 按真实配比混合煤岩 (μ/σ, 齐全时用直方图), 改写体检里的岩相项并挂上
+/// `petrography_check`, 返回 σ 与判定. 参配煤缺有效煤岩输入或 μ/σ 算不出时返回 None
+/// (按需加提示), 调用方照线性代理收尾. 求最优的岩相修复循环与按整铲验算 ([`crate::shovel`])
+/// 共用这一段 —— 两边判的是同一件事.
+pub(crate) fn review_petrography(
+    result: &mut BlendResult,
+    participating: &[(&Coal, f64)],
+    petro_spec: Option<&Spec>,
+    truncate: bool,
+    refine_iterations: usize,
+) -> Option<(f64, crate::quality::CheckOutcome)> {
+    let petro_parts: Vec<(&Petrography, f64)> = participating
+        .iter()
+        .filter_map(|(coal, ratio)| {
+            coal.petrography
+                .as_ref()
+                .filter(|data| data.is_valid())
+                .map(|data| (data, *ratio))
+        })
+        .collect();
+
+    if petro_parts.len() != participating.len() {
+        let any_petro_input = participating
+            .iter()
+            .any(|(coal, _)| coal.petrography.is_some());
+        if petro_spec.is_some() && any_petro_input {
+            let missing: Vec<&str> = participating
+                .iter()
+                .filter(|(coal, _)| !coal.petrography.as_ref().is_some_and(Petrography::is_valid))
+                .map(|(coal, _)| coal.name.as_str())
+                .collect();
+            result.warnings.push(format!(
+                "岩相精确复核跳过: {} 缺有效煤岩输入",
+                missing.join("/")
+            ));
+        }
+        return None;
+    }
+
+    let Some((mean, sigma)) = petrography::mix_mean_std(&petro_parts) else {
+        if petro_spec.is_some() {
+            result
+                .warnings
+                .push("岩相精确复核跳过: μ/σ 输入无法计算".into());
+        }
+        return None;
+    };
+
+    let all_histograms = petro_parts.iter().all(|(data, _)| data.has_histogram());
+    let mixed_histogram = all_histograms
+        .then(|| petrography::mix_histogram(&petro_parts))
+        .flatten();
+    let notch = mixed_histogram
+        .as_deref()
+        .and_then(|histogram| petrography::detect_notch(histogram, NOTCH_WINDOW.0, NOTCH_WINDOW.1));
+    if let Some(notch_data) = &notch {
+        result.warnings.push(format!(
+            "岩相: {:.1}~{:.1} 主焦区间存在凹口（谷深比 {:.2}）",
+            NOTCH_WINDOW.0, NOTCH_WINDOW.1, notch_data.depth_ratio
+        ));
+    }
+
+    let petro_outcome = check_value(sigma, petro_spec, truncate, true);
+    update_petro_check(
+        result,
+        sigma,
+        &petro_outcome,
+        if all_histograms {
+            EvaluationMethod::Histogram
+        } else {
+            EvaluationMethod::Moments
+        },
+    );
+    result.petrography_check = Some(PetrographyCheck {
+        mean,
+        sigma,
+        sigma_max: petro_spec.and_then(|spec| spec.max),
+        sigma_ok: petro_spec.map(|_| petro_outcome.status != EvaluationStatus::Fail),
+        notch,
+        refine_iterations,
+    });
+    Some((sigma, petro_outcome))
+}
+
 fn update_petro_check(
     result: &mut BlendResult,
     sigma: f64,
@@ -1604,7 +1647,7 @@ fn update_petro_check(
     }
 }
 
-fn finalize_quality_status(result: &mut BlendResult, specs: &[&Spec]) {
+pub(crate) fn finalize_quality_status(result: &mut BlendResult, specs: &[&Spec]) {
     if !result.ok {
         result.quality_status = QualityStatus::NeedsReview;
         return;
@@ -2019,6 +2062,8 @@ mod tests {
             rank_interaction: None,
             price_factor: None,
             price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
         }
     }
 
@@ -2093,6 +2138,8 @@ mod tests {
             rank_interaction: None,
             price_factor: None,
             price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
         });
 
         assert!(!result.ok, "灰分连拒收线 10 都够不到, 应当不可行");
@@ -2209,6 +2256,8 @@ mod tests {
             rank_interaction: None,
             price_factor: None,
             price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
             ..request
         };
         let result = solve_with_evaluators(&request, &trained_evaluators());
@@ -2279,6 +2328,8 @@ mod tests {
             rank_interaction: None,
             price_factor: None,
             price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
         };
         let result = solve(&request);
 
@@ -2413,6 +2464,8 @@ mod tests {
                 rank_interaction: None,
                 price_factor: None,
                 price_robustness: None,
+                shovel_tons: None,
+                min_ratios: Default::default(),
             };
             let result = solve(&request);
             assert!(
@@ -2490,6 +2543,8 @@ mod tests {
                 rank_interaction: None,
                 price_factor: None,
                 price_robustness: None,
+                shovel_tons: None,
+                min_ratios: Default::default(),
             })
             .ok
         };
@@ -2595,6 +2650,8 @@ mod tests {
             rank_interaction: None,
             price_factor: None,
             price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
         };
         let result = solve(&request);
 
@@ -2638,6 +2695,8 @@ mod tests {
             rank_interaction: None,
             price_factor: None,
             price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
         };
         let result = solve(&request);
 
@@ -3069,6 +3128,8 @@ mod measurements {
                             rank_interaction: None,
                             price_factor: None,
                             price_robustness: None,
+                            shovel_tons: None,
+                            min_ratios: Default::default(),
                         };
                         let result = solve_with_evaluators(&request, models);
                         if !result.ok {

@@ -53,6 +53,7 @@ vi.mock("../master_loader", () => ({
 vi.mock("../storage", () => ({
   getCoalPrefs: () => mocks.coalPrefs.value,
   getQuantity: () => mocks.quantity.value,
+  getShovelTons: () => 3,
   getUserContract: () => null,
   getUserCoals: () => [],
   setQuantity: mocks.setQuantity,
@@ -287,6 +288,45 @@ describe("TodayScreen 求解快照", () => {
 
     expect(timerSpy).not.toHaveBeenCalled();
     timerSpy.mockRestore();
+  });
+
+  it("按整铲配: 请求带一铲吨数, 配方行与导出清单都写铲数", async () => {
+    const result = makeResult(1_000, 3_700);
+    result.orders = [{ ...result.orders[0], shovels: 1_233 }];
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+    const onNavigate = vi.fn();
+
+    render(<TodayScreen onNavigate={onNavigate} />);
+    await screen.findByText("今日配方");
+
+    const request = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
+    expect(request.shovel_tons).toBe(3);
+    expect(screen.getByText(/3700 吨 · 1233 铲/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /一铲 3 吨/ }));
+    expect(onNavigate).toHaveBeenCalledWith("me");
+
+    fireEvent.click(screen.getByRole("button", { name: "导出订单" }));
+    await waitFor(() => expect(mocks.writeText).toHaveBeenCalledTimes(1));
+    expect(mocks.writeText.mock.calls[0][0]).toContain("3700吨 1233铲");
+  });
+
+  it("在「我的」改了一铲吨数, 今日页自动重算", async () => {
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+    await waitFor(() => expect(backend.solveJson).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(new CustomEvent("doudou:shovel_changed"));
+    await waitFor(() => expect(backend.solveJson).toHaveBeenCalledTimes(2));
   });
 
   it("导出订单文本用实际成本结算, 不是报价 (符号: 修 defect#9 只改了 CostCard 没改导出)", async () => {

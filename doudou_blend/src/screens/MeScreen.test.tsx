@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   getCoalPrefs: vi.fn(),
   getUserContract: vi.fn(),
   confirm: vi.fn(),
+  shovelTons: { value: 3 },
+  setShovelTons: vi.fn(),
 }));
 
 function deferred<T>() {
@@ -39,6 +41,8 @@ vi.mock("../storage", () => ({
   clearUserContract: vi.fn(),
   getCoalPrefs: mocks.getCoalPrefs,
   getUserContract: mocks.getUserContract,
+  getShovelTons: () => mocks.shovelTons.value,
+  setShovelTons: mocks.setShovelTons,
 }));
 
 afterEach(() => {
@@ -51,6 +55,8 @@ beforeEach(() => {
   mocks.getCoalPrefs.mockReset();
   mocks.getUserContract.mockReset();
   mocks.confirm.mockReset();
+  mocks.setShovelTons.mockReset();
+  mocks.shovelTons.value = 3;
   mocks.getCoalPrefs.mockReturnValue({});
   mocks.getUserContract.mockReturnValue(null);
   mocks.confirm.mockReturnValue(true);
@@ -139,5 +145,33 @@ describe("MeScreen 历史数据", () => {
 
     expect(screen.getByText("0 条")).toBeTruthy();
     expect(screen.queryByText("8 条")).toBeNull();
+  });
+});
+
+describe("MeScreen 一铲吨数", () => {
+  beforeEach(() => {
+    mocks.getBackend.mockResolvedValue({ countHistory: vi.fn().mockResolvedValue(0) });
+  });
+
+  it("改成合法值失焦后保存, 没改不重复保存", () => {
+    render(<MeScreen />);
+    const input = screen.getByLabelText("一铲吨数") as HTMLInputElement;
+    expect(input.value).toBe("3");
+
+    fireEvent.blur(input);
+    expect(mocks.setShovelTons).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "4.5" } });
+    fireEvent.blur(input);
+    expect(mocks.setShovelTons).toHaveBeenCalledWith(4.5);
+  });
+
+  it("非法值回退上次的值", () => {
+    render(<MeScreen />);
+    const input = screen.getByLabelText("一铲吨数") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "0" } });
+    fireEvent.blur(input);
+    expect(mocks.setShovelTons).not.toHaveBeenCalled();
+    expect(input.value).toBe("3");
   });
 });

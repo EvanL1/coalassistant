@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initializeCloudStorage } from "./cloudStorage";
-import { getCoalPrefs, setCoalPref } from "./storage";
+import { getCoalPrefs, getShovelTons, setCoalPref, setShovelTons } from "./storage";
 
 function makeStorage(): Storage {
   const values = new Map<string, string>();
@@ -62,6 +62,8 @@ describe("Web PostgreSQL 状态同步", () => {
 
     expect(getCoalPrefs()).toEqual({ 云端煤: { enabled: true } });
     expect(localStorage.getItem("doudou_blend.quantity.v1")).toBe("4200");
+    // 一铲吨数上线前的服务端不回这个字段: 按默认值.
+    expect(localStorage.getItem("doudou_blend.shovel_tons.v1")).toBe("3");
 
     setCoalPref("云端煤", { enabled: false });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
@@ -109,5 +111,43 @@ describe("Web PostgreSQL 状态同步", () => {
     ]);
     expect(localStorage.getItem("doudou_blend.history.v1")).toBeNull();
     cleanup();
+  });
+
+  it("一铲吨数随云端同步; 改了会写回, 非法值拒收", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(
+        Response.json({
+          initialized: true,
+          coal_prefs: {},
+          contract: null,
+          quantity: 3700,
+          user_coals: [],
+          shovel_tons: 5,
+        }),
+      )
+      .mockResolvedValue(Response.json({ initialized: true }));
+
+    const cleanup = await initializeCloudStorage();
+    expect(getShovelTons()).toBe(5);
+
+    setShovelTons(2.5);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const body = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
+    expect(body.shovel_tons).toBe(2.5);
+    cleanup();
+
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(
+      Response.json({
+        initialized: true,
+        coal_prefs: {},
+        contract: null,
+        quantity: 3700,
+        user_coals: [],
+        shovel_tons: 0,
+      }),
+    );
+    await expect(initializeCloudStorage()).rejects.toThrow("字段无效");
   });
 });

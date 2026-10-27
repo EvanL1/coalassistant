@@ -327,6 +327,14 @@ pub struct BlendRequest {
     /// 价格稳健性分析 (煤价估不准时配方还靠不靠得住). None = 不分析, 结果与不传完全相同.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_robustness: Option<PriceRobustness>,
+    /// 一铲多少吨: 现场铲车配煤, 一铲是最小单位. 与 `total_quantity` 同给时每种煤要么不用、
+    /// 要么至少一铲且按整铲配 (见 [`crate::shovel`]). None = 比例连续, 结果与不传完全相同.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shovel_tons: Option<f64>,
+    /// 单煤配比下限: 煤名 → 占比 (0~1). 给了的煤一定入选且不低于此比例.
+    /// 一铲最小量的分支定界靠它强制"至少一铲"; 空 = 不限, 结果与不传完全相同.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub min_ratios: HashMap<String, f64>,
 }
 
 /// 价格稳健性分析配置. 见 [`crate::robustness`].
@@ -656,6 +664,9 @@ pub struct OrderItem {
     /// `#[serde(default)]`: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
     #[serde(default)]
     pub cif_eff_amount: Option<f64>,
+    /// 按整铲配时这种煤配几铲 (见 [`crate::shovel`]); 未按铲配为 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shovels: Option<u32>,
 }
 
 /// 视图 C: 单项指标的体检结果 (给质检/销售).

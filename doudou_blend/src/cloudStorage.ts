@@ -1,5 +1,6 @@
 import {
   clearHistory,
+  DEFAULT_SHOVEL_TONS,
   getHistory,
   getUserStorageSnapshot,
   replaceUserStorageSnapshot,
@@ -37,11 +38,19 @@ function parseRemoteStorage(value: unknown): RemoteUserStorage {
     typeof storage.quantity !== "number" ||
     !Number.isFinite(storage.quantity) ||
     storage.quantity <= 0 ||
-    !Array.isArray(storage.user_coals)
+    !Array.isArray(storage.user_coals) ||
+    (storage.shovel_tons != null &&
+      (typeof storage.shovel_tons !== "number" ||
+        !Number.isFinite(storage.shovel_tons) ||
+        storage.shovel_tons <= 0))
   ) {
     throw new Error("服务端用户状态字段无效");
   }
-  return storage as RemoteUserStorage;
+  // 一铲吨数上线前部署的服务端不回这个字段.
+  return {
+    ...storage,
+    shovel_tons: storage.shovel_tons ?? DEFAULT_SHOVEL_TONS,
+  } as RemoteUserStorage;
 }
 
 async function saveRemoteStorage(snapshot: UserStorageSnapshot): Promise<void> {
