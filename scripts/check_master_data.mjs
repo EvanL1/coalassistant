@@ -254,6 +254,30 @@ if (priceFactor != null) {
     }
     if (typeof benchmark.props?.S !== "number") fail(`${label}: 至少要有硫分 S`);
   }
+  // 钢铁网指数序列: 服务端每天拉值, 每条当一个基准 (指标 = 标准品). 代码与名字唯一、
+  // 名字不和基准报价撞、煤种必填且在词表里、指标是已知指标的数; 价格不写在 master.
+  const indexSeries = priceFactor.index_series ?? [];
+  if (!Array.isArray(indexSeries)) fail("price_factor.index_series 必须是数组");
+  const seriesCodes = new Set();
+  for (const series of Array.isArray(indexSeries) ? indexSeries : []) {
+    const label = `price_factor 指数序列 ${series.code ?? "(无代码)"}`;
+    if (!/^[A-Z][A-Z0-9_]*$/.test(series.code ?? "")) fail(`${label}: code 须为钢铁网品种代码 (大写字母/数字/下划线)`);
+    if (seriesCodes.has(series.code)) fail(`${label}: 代码重复`);
+    seriesCodes.add(series.code);
+    if (!series.type_name) fail(`${label}: 缺 type_name (钢铁网品种名)`);
+    if (!series.name) fail(`${label}: 缺 name`);
+    if (benchmarkNames.has(series.name)) fail(`${label}: name 与基准报价重名`);
+    benchmarkNames.add(series.name);
+    if (!COAL_TYPES.includes(series.coal_type)) fail(`${label}: 煤种 ${series.coal_type} 不在 schema.coal_type 词表内`);
+    if (series.form != null && !FORMS.includes(series.form)) fail(`${label}: 形态 ${series.form} 不在 schema.form 词表内`);
+    if (series.price != null || series.date != null) fail(`${label}: 价格与日期由服务端每天拉取, master 里不要写`);
+    for (const [key, value] of Object.entries(series.props ?? {})) {
+      if (!INDICATORS.includes(key) || typeof value !== "number" || !Number.isFinite(value)) {
+        fail(`${label}: 指标 ${key}=${value} 无效`);
+      }
+    }
+    if (typeof series.props?.S !== "number") fail(`${label}: 至少要有硫分 S`);
+  }
   const regionPenalty = priceFactor.region_penalty;
   if (regionPenalty != null && !(typeof regionPenalty === "number" && Number.isFinite(regionPenalty) && regionPenalty >= 0)) {
     fail(`price_factor.region_penalty=${regionPenalty} 须为 ≥0 的有限数`);
@@ -284,7 +308,9 @@ if (notices.length) {
 
 // 估价按 煤种 → 形态 → 地区 对标, 地区要与基准写法一致才对得上 (只提示).
 const benchmarkRegions = new Set(
-  (master.price_factor?.benchmarks ?? []).map((b) => b.region).filter(Boolean),
+  [...(master.price_factor?.benchmarks ?? []), ...(master.price_factor?.index_series ?? [])]
+    .map((b) => b.region)
+    .filter(Boolean),
 );
 if (benchmarkRegions.size) {
   const unmatched = {};
