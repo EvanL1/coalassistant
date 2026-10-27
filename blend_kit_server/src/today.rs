@@ -211,9 +211,9 @@ pub fn build(
     if let Some(factor) = price_factor {
         let mut factor = factor.clone();
         let object = factor.as_object_mut().expect("已判定为对象");
-        object.remove("description");
-        object.remove("uncertainty_note");
-        object.remove("benchmarks_note");
+        for key in crate::benchmarks::MASTER_ONLY_KEYS {
+            object.remove(key);
+        }
         if !market.benchmarks.is_empty() {
             object.insert("benchmarks".into(), json!(market.benchmarks));
         } else if let Some(price) = market.market_price {

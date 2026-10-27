@@ -26,6 +26,7 @@ mod benchmarks;
 mod coal_index;
 mod database;
 mod master_data;
+mod mcci;
 mod mcp;
 mod today;
 
@@ -50,6 +51,11 @@ pub async fn app(public_dir: PathBuf) -> Router {
         Some(pool) => admin::load_rank_interaction_k(pool).await,
         None => None,
     };
+    if let Some(pool) = database.clone() {
+        let master: serde_json::Value =
+            serde_json::from_str(blend_kit::master_json()).unwrap_or_default();
+        mcci::spawn_daily(pool, &master);
+    }
     app_with_state(
         public_dir,
         AppState {
@@ -223,6 +229,7 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         .route("/api/solve", post(solve))
         .route("/api/price", post(benchmarks::estimate))
         .route("/api/benchmarks", get(benchmarks::list))
+        .route("/api/mcci", get(mcci::list))
         .route("/api/admin/benchmarks", post(benchmarks::create))
         .route("/api/admin/benchmarks/{id}", delete(benchmarks::delete))
         .route("/api/master", get(master))
@@ -1847,6 +1854,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 指数总览: 要登录; 没配数据库时照样列出 master 配置的序列, 只是没有值.
+    #[tokio::test]
+    async fn test_mcci_overview_requires_login_and_works_without_database() {
+        let anonymous = test_app()
+            .oneshot(key_request("GET", "/api/mcci", None, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        let response = test_app()
+            .oneshot(authenticated_request("GET", "/api/mcci", Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
+        assert_eq!(body["ok"], true);
+        for series in body["series"].as_array().unwrap() {
+            assert!(series["code"].is_string());
+            assert_eq!(series["points"], serde_json::json!([]));
+        }
     }
 
     #[tokio::test]

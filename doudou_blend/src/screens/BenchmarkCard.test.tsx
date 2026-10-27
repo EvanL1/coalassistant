@@ -87,4 +87,32 @@ describe("BenchmarkCard", () => {
     expect(screen.getByText("今 ≈ 2101")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "删除" })).toHaveLength(1);
   });
+
+  it("钢铁网指数行单独标出, 推算过的价注明按哪条指数推的, 指数行不能删", async () => {
+    mocks.fetchBenchmarks.mockResolvedValue([
+      {
+        name: "钢铁网肥煤指数",
+        coal_type: "肥煤",
+        props: { S: 1.8, A: 10, G: 90 },
+        price: 2188.7,
+        date: "2026-10-26",
+        origin: "mcci",
+        index_code: "LJM_FM",
+      },
+      {
+        name: "蒲县单一肥煤",
+        coal_type: "肥煤",
+        props: { S: 3.8, A: 11, G: 95 },
+        price: 2145,
+        date: "2026-10-09",
+        current_price: 2151,
+        origin: "master",
+        index_source: "钢铁网 LJM_FM",
+      },
+    ]);
+    render(<BenchmarkCard />);
+    expect(await screen.findByText("钢铁网指数")).toBeTruthy();
+    expect(screen.getByText("按 钢铁网 LJM_FM")).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "删除" })).toHaveLength(0);
+  });
 });

@@ -210,11 +210,37 @@ export interface Benchmark {
 
 /** /api/benchmarks 返回的基准: 多了出处层与指数推算信息. */
 export interface BenchmarkEntry extends Benchmark {
-  /** master = 随版本发布的默认值; stored = 管理员补录 (可删). */
-  origin?: "master" | "stored";
+  /** master = 随版本发布的默认值; stored = 管理员补录 (可删); mcci = 钢铁网指数当天值 (服务端每天拉). */
+  origin?: "master" | "stored" | "mcci";
   id?: string;
   index_ratio?: number;
   index_date?: string;
+  /** 推算用的指数: "钢铁网 LJM_xx" (同煤种序列) 或 "CCP". */
+  index_source?: string;
+  /** origin=mcci 时的钢铁网品种代码. */
+  index_code?: string;
+}
+
+/** master 里配置的钢铁网指数序列: 服务端每天拉值, 每条当一个基准 (指标 = 标准品). */
+export interface IndexSeries {
+  code: string;
+  type_name: string;
+  name: string;
+  coal_type: string;
+  form?: string;
+  region?: string;
+  props: Record<string, number>;
+}
+
+/** 钢铁网指数的一个交易日值 (元/湿吨). */
+export interface McciPoint {
+  date: string;
+  price: number;
+}
+
+/** /api/mcci 的一条序列: master 配置 + 近一年的值 (升序, 可能为空). */
+export interface McciSeries extends IndexSeries {
+  points: McciPoint[];
 }
 
 /** 估价模块入口 (/api/price) 的输入. */
@@ -245,6 +271,10 @@ export interface PriceUncertainty {
 export interface MasterPriceFactor extends PriceFactor {
   description?: string;
   uncertainty_note?: string;
+  benchmarks_note?: string;
+  index_series_note?: string;
+  /** 只给服务端用, 不进求解请求. */
+  index_series?: IndexSeries[];
 }
 
 export interface PricePart {

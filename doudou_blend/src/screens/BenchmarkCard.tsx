@@ -19,6 +19,12 @@ const SPEC_KEYS = ["S", "A", "V", "G", "Y"] as const;
 const COAL_TYPES = ["焦煤", "肥煤", "1/3焦煤", "瘦煤", "贫瘦煤", "气煤"];
 const FORMS = ["精煤", "筛选精煤", "浮选精煤", "中煤", "煤泥", "原煤"];
 
+const ORIGIN_LABEL: Record<NonNullable<BenchmarkEntry["origin"]>, string> = {
+  master: "默认",
+  stored: "补录",
+  mcci: "钢铁网指数",
+};
+
 const small = { fontSize: 11, color: "var(--c-text-3)" };
 const cell = { padding: "4px 6px 4px 0", verticalAlign: "top" as const };
 
@@ -190,10 +196,13 @@ export function BenchmarkCard() {
                       今 ≈ {row.current_price.toFixed(0)}
                     </div>
                   )}
+                  {row.current_price != null && row.index_source && (
+                    <div style={small}>按 {row.index_source}</div>
+                  )}
                 </td>
                 <td style={cell}>
                   {row.date}
-                  <div style={small}>{row.origin === "stored" ? "补录" : "默认"}</div>
+                  <div style={small}>{ORIGIN_LABEL[row.origin ?? "master"]}</div>
                 </td>
                 <td style={cell}>
                   {row.origin === "stored" && row.id && (

@@ -4,7 +4,7 @@
  *
  * 读: 登录即可 (今日屏求解要用). 写: 管理员补录 / 删补录的 (master 的默认值删不了).
  */
-import type { Benchmark, BenchmarkEntry } from "./types";
+import type { Benchmark, BenchmarkEntry, MasterPriceFactor, PriceFactor } from "./types";
 
 async function request(path: string, init?: RequestInit): Promise<unknown> {
   const response = await fetch(path, { credentials: "same-origin", ...init });
@@ -31,6 +31,23 @@ export async function fetchBenchmarks(): Promise<BenchmarkEntry[]> {
   } catch {
     return [];
   }
+}
+
+/** master 价格因子里只给人看、只给服务端用的字段 (与服务端 MASTER_ONLY_KEYS 一致). */
+const MASTER_ONLY_KEYS = [
+  "description",
+  "uncertainty_note",
+  "benchmarks_note",
+  "index_series",
+  "index_series_note",
+] as const;
+
+/** master 的价格因子去掉说明与服务端配置, 只留核心认识的字段. */
+export function solverPriceFactor(master: MasterPriceFactor): PriceFactor {
+  const hidden = new Set<string>(MASTER_ONLY_KEYS);
+  return Object.fromEntries(
+    Object.entries(master).filter(([key]) => !hidden.has(key)),
+  ) as unknown as PriceFactor;
 }
 
 /** 求解请求里只带核心认识的字段. */
