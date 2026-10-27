@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IndexTicker } from "./IndexTicker";
 
@@ -59,5 +59,90 @@ describe("IndexTicker", () => {
     const { container } = render(<IndexTicker />);
     await Promise.resolve();
     expect(container.textContent).toBe("");
+  });
+});
+
+/** 2025-10-27 起每个工作日一个点, 到 2026-10-26, 价格逐日 +1. */
+function yearOfPoints(): [string, number][] {
+  const out: [string, number][] = [];
+  const day = new Date("2025-10-27T00:00:00Z");
+  const end = new Date("2026-10-26T00:00:00Z");
+  let price = 2000;
+  while (day <= end) {
+    const weekday = day.getUTCDay();
+    if (weekday !== 0 && weekday !== 6) out.push([day.toISOString().slice(0, 10), price++]);
+    day.setUTCDate(day.getUTCDate() + 1);
+  }
+  return out;
+}
+
+const drawnPoints = () =>
+  (document.querySelector(".index-chart-line")?.getAttribute("points") ?? "")
+    .split(" ")
+    .filter(Boolean).length;
+
+describe("指数走势弹层", () => {
+  async function openLowSulfur() {
+    vi.useFakeTimers({ now: new Date("2026-10-27T20:00:00+08:00"), toFake: ["Date"] });
+    const points = yearOfPoints();
+    mocks.fetchMcci.mockResolvedValue([
+      { ...series("低硫主焦煤", points), props: { A: 9.5, V: 25, S: 0.6, G: 85, M: 10 } },
+    ]);
+    render(<IndexTicker />);
+    const opener = await screen.findByRole("button", { name: /低硫主焦煤 最新 \d+, 查看走势/ });
+    opener.focus();
+    fireEvent.click(opener);
+    return { opener, points };
+  }
+
+  it("点开显示品种、标准品规格、最新价与日/周涨跌; 不写数据来源", async () => {
+    const { points } = await openLowSulfur();
+    const dialog = screen.getByRole("dialog", { name: "低硫主焦煤" });
+    expect(dialog.textContent).toContain("标准品 A9.5 V25 S0.6 G85 Mt10");
+    expect(dialog.textContent).toContain(String(points[points.length - 1][1]));
+    expect(dialog.textContent).toContain("2026-10-26");
+    expect(dialog.textContent).toMatch(/日 ▲\+0\.04%/);
+    expect(dialog.textContent).toMatch(/周 ▲\+/);
+    expect(document.body.textContent).not.toMatch(/钢铁网|mysteel/i);
+    // 焦点进弹层 (关闭按钮)
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "关闭" }));
+  });
+
+  it("时间范围切换改变画出的点数, 默认一年", async () => {
+    const { points } = await openLowSulfur();
+    expect(drawnPoints()).toBe(points.length);
+    fireEvent.click(screen.getByRole("button", { name: "1月" }));
+    expect(screen.getByRole("button", { name: "1月" }).getAttribute("aria-pressed")).toBe("true");
+    // 09-27 之后的工作日: 9/28 … 10/26 共 21 天
+    expect(drawnPoints()).toBe(21);
+    fireEvent.click(screen.getByRole("button", { name: "3月" }));
+    expect(drawnPoints()).toBeGreaterThan(21);
+    expect(drawnPoints()).toBeLessThan(points.length);
+  });
+
+  it("键盘逐日查看: tooltip 显示日期与价格", async () => {
+    const { points } = await openLowSulfur();
+    const chart = screen.getByRole("img", { name: /低硫主焦煤走势/ });
+    fireEvent.keyDown(chart, { key: "ArrowLeft" });
+    const [date, price] = points[points.length - 2];
+    const tip = screen.getByRole("status");
+    expect(tip.textContent).toContain(date);
+    expect(tip.textContent).toContain(String(price));
+    fireEvent.keyDown(chart, { key: "Home" });
+    expect(screen.getByRole("status").textContent).toContain(points[0][0]);
+  });
+
+  it("Esc 或点遮罩关闭, 焦点回到行情条那一项", async () => {
+    const { opener } = await openLowSulfur();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(opener);
+
+    fireEvent.click(opener);
+    // 点弹层内部不关
+    fireEvent.click(screen.getByRole("dialog"));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    fireEvent.click(document.querySelector(".modal-backdrop")!);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

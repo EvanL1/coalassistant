@@ -55,7 +55,6 @@ import {
   setQuantity,
 } from "../storage";
 import { fetchBenchmarks, solverPriceFactor, toRequestBenchmark } from "../benchmarks";
-import { PriceRobustnessCard } from "./PriceRobustnessCard";
 import { coalTypeMap } from "../domain/coalTypes";
 import { CostCard } from "./CostCard";
 import { InfeasiblePanel } from "./InfeasiblePanel";
@@ -376,8 +375,6 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
               },
             }
           : {}),
-        // 煤价估不准时配方靠不靠得住: 逐煤翻转门槛 + 更稳的配方 (参数用核心默认值).
-        price_robustness: {},
       };
 
       const json = await backend.solveJson(JSON.stringify(request));
@@ -804,8 +801,6 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </div>
       </div>
 
-      <PriceRobustnessCard report={result.price_robustness} types={coalTypes} />
-
       <div className="card today-indicators">
         <div
           className="card-title"
@@ -917,6 +912,23 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       ) : (
         <>
           <InfeasiblePanel result={result} />
+          {/* 求解侧提示只在没解出来时给: 剔煤、岩相复核这类原因能解释为什么不可行.
+              解出来时不显示 —— 今日页只留配方、成本、指标. */}
+          {result.warnings.length > 0 && (
+            <div
+              className="binding-list"
+              style={{
+                background: "#fef3c7",
+                borderColor: "#fde6b3",
+                marginTop: 12,
+              }}
+            >
+              <div className="binding-list-title">提示</div>
+              {result.warnings.map((w, i) => (
+                <div key={i}>{w}</div>
+              ))}
+            </div>
+          )}
           {/* 报价时效与成败无关, 照常提示; 指数推算要 cost 才算得出, 这里没有. */}
           {price?.oldestQuotedAt && (
             <p
@@ -936,23 +948,6 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             </p>
           )}
         </>
-      )}
-
-
-      {result.warnings.length > 0 && (
-        <div
-          className="binding-list"
-          style={{
-            background: "#fef3c7",
-            borderColor: "#fde6b3",
-            marginTop: 12,
-          }}
-        >
-          <div className="binding-list-title">提示</div>
-          {result.warnings.map((w, i) => (
-            <div key={i}>{w}</div>
-          ))}
-        </div>
       )}
 
       <div className="action-row">
