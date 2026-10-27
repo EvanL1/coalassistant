@@ -267,6 +267,8 @@ if (priceFactor != null) {
     if (!series.type_name) fail(`${label}: 缺 type_name (钢铁网品种名)`);
     if (!series.name) fail(`${label}: 缺 name`);
     if (benchmarkNames.has(series.name)) fail(`${label}: name 与基准报价重名`);
+    // 指数名会显示在界面上 (对标、推算出处), 不写数据来源.
+    if (/钢铁网|mysteel/i.test(series.name ?? "")) fail(`${label}: name 不写数据来源 (界面会显示)`);
     benchmarkNames.add(series.name);
     if (!COAL_TYPES.includes(series.coal_type)) fail(`${label}: 煤种 ${series.coal_type} 不在 schema.coal_type 词表内`);
     if (series.form != null && !FORMS.includes(series.form)) fail(`${label}: 形态 ${series.form} 不在 schema.form 词表内`);

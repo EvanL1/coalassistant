@@ -889,12 +889,12 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     expect(backend.solveJson).not.toHaveBeenCalled();
   });
 
-  it("求解不了时也显示钢铁网指数卡 (缺价时最需要看参考价)", async () => {
+  it("求解不了时也显示指数卡, 且在报错之前 (缺价时最需要看参考价)", async () => {
     mocks.fetchMcci.mockResolvedValue([
       {
         code: "LJM_FM",
         type_name: "肥煤",
-        name: "钢铁网肥煤指数",
+        name: "肥煤指数",
         coal_type: "肥煤",
         props: { S: 1.8 },
         points: [
@@ -911,8 +911,33 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     });
     mocks.getBackend.mockResolvedValue({ solveJson: vi.fn(), saveHistory: vi.fn() });
     render(<TodayScreen onNavigate={vi.fn()} />);
-    expect(await screen.findByText(/没有可参与求解的煤/)).toBeTruthy();
-    expect(await screen.findByText("钢铁网炼焦煤指数")).toBeTruthy();
+    const error = await screen.findByText(/没有可参与求解的煤/);
+    const card = await screen.findByText("炼焦煤价格指数");
+    expect(card.compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("指数卡放在最上方: 在今日配方之前", async () => {
+    mocks.fetchMcci.mockResolvedValue([
+      {
+        code: "LJM_FM",
+        type_name: "肥煤",
+        name: "肥煤指数",
+        coal_type: "肥煤",
+        props: { S: 1.8 },
+        points: [
+          { date: "2026-10-23", price: 2188.7 },
+          { date: "2026-10-26", price: 2200 },
+        ],
+      },
+    ]);
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    });
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    const recipe = await screen.findByText("今日配方");
+    const card = await screen.findByText("炼焦煤价格指数");
+    expect(card.compareDocumentPosition(recipe) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("结果带 coal_values 时显示煤价对比卡, 不带时不显示", async () => {

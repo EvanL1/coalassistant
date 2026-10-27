@@ -593,10 +593,10 @@ mod tests {
     #[test]
     fn test_overview_lists_every_configured_series_with_its_points() {
         let config = vec![
-            json!({"code": "LJM_FM", "type_name": "肥煤", "name": "钢铁网肥煤指数",
+            json!({"code": "LJM_FM", "type_name": "肥煤", "name": "肥煤指数",
                    "coal_type": "肥煤", "form": "精煤", "region": "山西",
                    "props": {"A": 10, "V": 30, "S": 1.8, "G": 90, "M": 10}}),
-            json!({"code": "LJM_QM", "type_name": "气煤", "name": "钢铁网气煤指数",
+            json!({"code": "LJM_QM", "type_name": "气煤", "name": "气煤指数",
                    "coal_type": "气煤", "props": {"S": 0.6}}),
         ];
         let history = HashMap::from([(
@@ -615,7 +615,7 @@ mod tests {
         let rows = overview(&config, &history);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["code"], "LJM_FM");
-        assert_eq!(rows[0]["name"], "钢铁网肥煤指数");
+        assert_eq!(rows[0]["name"], "肥煤指数");
         assert_eq!(rows[0]["type_name"], "肥煤");
         assert_eq!(rows[0]["coal_type"], "肥煤");
         assert_eq!(rows[0]["props"]["G"], 90);

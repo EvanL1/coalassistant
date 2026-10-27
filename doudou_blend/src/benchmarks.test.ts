@@ -12,7 +12,7 @@ describe("solverPriceFactor", () => {
       benchmarks_note: "说明",
       index_series_note: "说明",
       index_series: [
-        { code: "LJM_FM", type_name: "肥煤", name: "钢铁网肥煤指数", coal_type: "肥煤", props: { S: 1.8 } },
+        { code: "LJM_FM", type_name: "肥煤", name: "肥煤指数", coal_type: "肥煤", props: { S: 1.8 } },
       ],
     };
     const factor = solverPriceFactor(master);

@@ -125,7 +125,7 @@ pub(crate) fn index_benchmarks(
                 "props": series["props"].clone(),
                 "price": latest.price,
                 "date": latest.date,
-                "source": format!("钢铁网国产炼焦煤价格指数 {code} (元/湿吨, 现金)"),
+                "source": format!("炼焦煤价格指数 {code} (元/湿吨, 现金)"),
                 "origin": "mcci",
                 "index_code": code,
             });
@@ -173,7 +173,10 @@ pub(crate) fn drift_series<'a>(
         })
         .min_by(|(a, ..), (b, ..)| sulfur_gap(a).total_cmp(&sulfur_gap(b)));
     match same_type {
-        Some((_, code, points)) => Some((points.as_slice(), format!("钢铁网 {code}"))),
+        Some((series, code, points)) => {
+            let label = series["name"].as_str().unwrap_or(code);
+            Some((points.as_slice(), label.to_string()))
+        }
         None => ccp,
     }
 }
@@ -485,13 +488,13 @@ mod tests {
 
     fn index_config() -> Vec<Value> {
         vec![
-            json!({"code": "LJM_DLZJM", "type_name": "低硫主焦煤", "name": "钢铁网低硫主焦煤指数",
+            json!({"code": "LJM_DLZJM", "type_name": "低硫主焦煤", "name": "低硫主焦煤指数",
                    "coal_type": "焦煤", "form": "精煤", "region": "山西",
                    "props": {"A": 9.5, "S": 0.6, "V": 25, "G": 85, "M": 10}}),
-            json!({"code": "LJM_GLZJM", "type_name": "高硫主焦煤", "name": "钢铁网高硫主焦煤指数",
+            json!({"code": "LJM_GLZJM", "type_name": "高硫主焦煤", "name": "高硫主焦煤指数",
                    "coal_type": "焦煤", "form": "精煤", "region": "山西",
                    "props": {"A": 10.5, "S": 2.5, "V": 25, "G": 80, "M": 10}}),
-            json!({"code": "LJM_QM", "type_name": "气煤", "name": "钢铁网气煤指数",
+            json!({"code": "LJM_QM", "type_name": "气煤", "name": "气煤指数",
                    "coal_type": "气煤", "props": {"A": 9, "S": 0.6, "V": 39, "G": 75, "M": 8}}),
         ]
     }
@@ -516,7 +519,7 @@ mod tests {
         assert_eq!(indexed.len(), 2);
         let low = indexed
             .iter()
-            .find(|b| b["name"] == "钢铁网低硫主焦煤指数")
+            .find(|b| b["name"] == "低硫主焦煤指数")
             .unwrap();
         assert_eq!(low["price"], 2321.0);
         assert_eq!(low["date"], "2026-10-26");
@@ -524,6 +527,8 @@ mod tests {
         assert_eq!(low["props"]["S"], 0.6);
         assert_eq!(low["origin"], "mcci");
         assert_eq!(low["index_code"], "LJM_DLZJM");
+        // 界面会显示出处: 不写数据来源.
+        assert!(!low["source"].as_str().unwrap().contains("钢铁网"));
         // 能直接当核心的基准用.
         let parsed: blend_kit::Benchmark = serde_json::from_value(low.clone()).unwrap();
         assert_eq!(parsed.price, 2321.0);
@@ -543,12 +548,12 @@ mod tests {
         assert_eq!(
             pick(json!({"coal_type": "焦煤", "date": "2026-10-20", "props": {"S": 2.9}}))
                 .as_deref(),
-            Some("钢铁网 LJM_GLZJM")
+            Some("高硫主焦煤指数")
         );
         assert_eq!(
             pick(json!({"coal_type": "焦煤", "date": "2026-10-20", "props": {"S": 0.5}}))
                 .as_deref(),
-            Some("钢铁网 LJM_DLZJM")
+            Some("低硫主焦煤指数")
         );
         // 配了序列但没数据 (气煤) 与没配序列的煤种 (贫瘦煤): 退回 CCP.
         assert_eq!(
@@ -609,7 +614,7 @@ mod tests {
         });
         // 高硫档 10/15 → 10/26: 2107.4 / 2118.6.
         assert_eq!(benchmarks[0]["current_price"], 2028.22);
-        assert_eq!(benchmarks[0]["index_source"], "钢铁网 LJM_GLZJM");
+        assert_eq!(benchmarks[0]["index_source"], "高硫主焦煤指数");
         assert_eq!(benchmarks[0]["index_date"], "2026-10-26");
     }
 

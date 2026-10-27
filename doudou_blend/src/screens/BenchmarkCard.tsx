@@ -22,7 +22,7 @@ const FORMS = ["精煤", "筛选精煤", "浮选精煤", "中煤", "煤泥", "�
 const ORIGIN_LABEL: Record<NonNullable<BenchmarkEntry["origin"]>, string> = {
   master: "默认",
   stored: "补录",
-  mcci: "钢铁网指数",
+  mcci: "指数",
 };
 
 const small = { fontSize: 11, color: "var(--c-text-3)" };
