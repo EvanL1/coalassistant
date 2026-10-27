@@ -15,20 +15,14 @@ import {
   type CSSProperties,
 } from "react";
 import { getBackend } from "../backend";
-import {
-  resolveCoalPool,
-  summarizePriceStatus,
-  toBlendCoal,
-  toPriceOnlyCoal,
-} from "../domain/resolvedCoal";
+import { resolveCoalPool, toEstimateCoal } from "../domain/resolvedCoal";
 import {
   extractOrphanedGuarantees,
   purchaseTermsByCoalName,
   resolvePurchaseTerms,
 } from "../domain/purchaseTerms";
 import { hasCostAdjustments } from "../domain/costBreakdown";
-import { buildPriceAnchor } from "../domain/priceDrift";
-import { fetchCoalIndexRatioSince, fetchLatestCoalIndex } from "../coal_index";
+import { fetchLatestCoalIndex } from "../coal_index";
 import {
   isSnapshotActionable,
   LatestRequestTracker,
@@ -72,13 +66,6 @@ const summaryLink: CSSProperties = {
   fontWeight: 600,
   fontSize: 12,
 };
-
-/** 距今天数; 日期不合法返回 null. */
-function daysSince(date: string): number | null {
-  const t = Date.parse(`${date}T00:00:00`);
-  if (!Number.isFinite(t)) return null;
-  return Math.max(0, Math.round((Date.now() - t) / 86_400_000));
-}
 
 const QUALITY_STATUS_LABEL: Record<QualityStatus, string> = {
   Verified: "已验证",
@@ -206,8 +193,6 @@ type SolveState =
 export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   const [state, setState] = useState<SolveState>({ status: "loading" });
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
-  // 焦煤现货指数(CCP)自最旧报价日以来的涨跌比例, 只用于参考估算
-  const [indexRatio, setIndexRatio] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   // 重算反馈: idle / running / done. running 时按钮显示"重算中...", done 时显示"✓ 已重算" 1.5s
   const [recompute, setRecompute] = useState<"idle" | "running" | "done">("idle");
@@ -253,27 +238,6 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
     };
   }, []);
 
-  const oldestQuotedAt =
-    state.status === "ok" ? state.snapshot.price?.oldestQuotedAt ?? null : null;
-
-  useEffect(() => {
-    if (!oldestQuotedAt) {
-      setIndexRatio(null);
-      return;
-    }
-    let alive = true;
-    fetchCoalIndexRatioSince(oldestQuotedAt)
-      .then((ratio) => {
-        if (alive) setIndexRatio(ratio);
-      })
-      .catch(() => {
-        if (alive) setIndexRatio(null);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [oldestQuotedAt]);
-
   /** initial=true 时整页 loading; 否则原地反馈, 保留旧结果直到新结果出来. */
   async function runSolve(initial: boolean = false) {
     const tracker = requestTrackerRef.current;
@@ -306,13 +270,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       const [master, backend] = await Promise.all([loadMaster(), getBackend()]);
       if (!tracker.isCurrent(requestId)) return;
 
-      // 用锚点煤把各煤的旧报价推算到当前口径再求解, 否则会系统性低估到厂成本.
-      const anchor = buildPriceAnchor(prefs);
-      const pool = resolveCoalPool(master.coals, userCoals, prefs, {
-        anchor,
-        masterUpdatedAt: master.updated_at,
-      });
-      const priceStatus = summarizePriceStatus(pool, anchor.coals);
+      const pool = resolveCoalPool(master.coals, userCoals, prefs);
       // 采购扣款模板只存本机 localStorage, 不跨设备同步 (见 penaltyStorage.ts);
       // 换设备后煤的保证值同步了但模板没有, 会悄悄漏算扣款, 必须提示用户.
       //
@@ -326,19 +284,18 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       );
       const termsByCoal = purchaseTermsByCoalName(purchaseTermsEntries);
       const orphanedGuarantees = extractOrphanedGuarantees(purchaseTermsEntries);
-      const coals = pool
-        .map((resolved) => toBlendCoal(resolved, termsByCoal.get(resolved.name)))
+      // 单煤真实报价拿不到: 煤价一律按质量估算, 全部放进价格因子 extra_coals.
+      const estimated = pool
+        .map((resolved) => toEstimateCoal(resolved, termsByCoal.get(resolved.name)))
         .filter((coal) => coal != null);
-      // 没报价的煤: 有价格因子时按估算价求解 (市场价取现货指数), 没有就只能缺席.
-      const unpriced = master.price_factor
-        ? pool.map(toPriceOnlyCoal).filter((coal) => coal != null)
-        : [];
 
-      if (coals.length === 0 && unpriced.length === 0) {
+      if (!master.price_factor || estimated.length === 0) {
         tracker.accept(requestId, () => {
           setState({
             status: "error",
-            error: "没有可参与求解的煤。请在煤池启用煤种并补齐有效价格。",
+            error: master.price_factor
+              ? "没有可参与求解的煤。请在煤池启用煤种。"
+              : "缺少估价参数 (price_factor), 无法估算煤价。",
           });
         });
         return;
@@ -351,37 +308,30 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
 
       // 估价按基准报价 (分煤种、带报价日, 服务端已按现货指数推算到今天); 取不到就用
       // master 自带的默认基准. 两样都没有才退回现货指数点位当标准品价 (只是相对尺度).
-      const fetched = master.price_factor
-        ? (await fetchBenchmarks()).map(toRequestBenchmark)
-        : [];
+      const priceFactor = master.price_factor;
+      const fetched = (await fetchBenchmarks()).map(toRequestBenchmark);
       const benchmarks =
-        fetched.length > 0 ? fetched : (master.price_factor?.benchmarks ?? []);
+        fetched.length > 0 ? fetched : (priceFactor.benchmarks ?? []);
       const marketPrice =
-        master.price_factor && benchmarks.length === 0
-          ? await fetchLatestCoalIndex()
-          : null;
+        benchmarks.length === 0 ? await fetchLatestCoalIndex() : null;
       if (!tracker.isCurrent(requestId)) return;
 
       const request: BlendRequest = {
-        coals,
+        coals: [],
         specs,
         total_quantity: totalQuantity,
         // 现场铲车配煤: 每种煤要么不用、要么至少一铲, 按整铲配.
         shovel_tons: getShovelTons(),
         truncate_decimal: true,
-        // 价格因子系数表来自 master (数据不是代码). 没报价的煤放进 extra_coals,
+        // 价格因子系数表来自 master (数据不是代码). 煤全在 extra_coals 里,
         // estimate_unpriced 让核心按估算价把它们并入煤池求解.
-        ...(master.price_factor
-          ? {
-              price_factor: {
-                ...solverPriceFactor(master.price_factor),
-                ...(benchmarks.length > 0 ? { benchmarks } : {}),
-                ...(marketPrice != null ? { market_price: marketPrice } : {}),
-                extra_coals: unpriced,
-                estimate_unpriced: true,
-              },
-            }
-          : {}),
+        price_factor: {
+          ...solverPriceFactor(priceFactor),
+          ...(benchmarks.length > 0 ? { benchmarks } : {}),
+          ...(marketPrice != null ? { market_price: marketPrice } : {}),
+          extra_coals: estimated,
+          estimate_unpriced: true,
+        },
       };
 
       const json = await backend.solveJson(JSON.stringify(request));
@@ -394,8 +344,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             request,
             result,
             contractName,
-            enabledCount: coals.length,
-            price: priceStatus,
+            enabledCount: estimated.length,
             orphanedGuarantees,
           },
         });
@@ -585,27 +534,13 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
 
   const { snapshot } = state;
   const { result, contractName, enabledCount } = snapshot;
-  const price = snapshot.price ?? null;
-  const quoteAgeDays = price?.oldestQuotedAt
-    ? daysSince(price.oldestQuotedAt)
-    : null;
-  const quoteStale = quoteAgeDays != null && quoteAgeDays > 14;
-  // 只漂出厂价, 运费不动 —— 与锚点推算同一套口径
-  const indexEstimate =
-    indexRatio != null && result.cost != null
-      ? result.cost.fob_per_ton * indexRatio + result.cost.frt_per_ton
-      : null;
-  const indexTotal =
-    indexEstimate != null && snapshot.request.total_quantity != null
-      ? indexEstimate * snapshot.request.total_quantity
-      : null;
   const refreshing = state.status === "refreshing";
   const actionsEnabled = isSnapshotActionable(
     snapshot,
     requestTrackerRef.current.currentRequestId,
     qtyInput,
   );
-  // 不可行不再提前 return: 页头、输入摘要、报价时效这些上下文与求解成败无关,
+  // 不可行不再提前 return: 页头、输入摘要这些上下文与求解成败无关,
   // 而恰恰是用户排查不可行时唯一的抓手 —— 只把结果区换成诊断面板.
   const cost = result.ok ? result.cost ?? null : null;
   // 总额展示优先 total_net (真实应付合计); 没算扣款条款前两者相等.
@@ -729,39 +664,6 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
               </span>
             )}
           </div>
-          {price?.oldestQuotedAt && (
-            <div className="cost-drift">
-              {price.driftedCount > 0 && price.avgRatio != null ? (
-                <>
-                  按锚点推算 {price.avgRatio >= 1 ? "+" : "−"}
-                  {(Math.abs(price.avgRatio - 1) * 100).toFixed(1)}%
-                  {" · "}
-                  {price.driftedCount} 种煤用旧报价推算
-                  {` · 最旧报价 ${price.oldestQuotedAt}`}
-                  {price.anchors.length > 0 &&
-                    ` · 锚点 ${price.anchors.join("、")}`}
-                </>
-              ) : (
-                <>
-                  <div className={quoteStale ? "cost-warn" : undefined}>
-                    {quoteStale && "⚠ "}
-                    报价停留在 {price.oldestQuotedAt}
-                    {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
-                    {" · 未按市场校正"}
-                  </div>
-                  {indexEstimate != null && indexRatio != null && (
-                    <div style={{ marginTop: 4 }}>
-                      参考 · 随焦煤现货指数 {indexRatio >= 1 ? "+" : "−"}
-                      {(Math.abs(indexRatio - 1) * 100).toFixed(1)}% · 到厂价约{" "}
-                      <b>{indexEstimate.toFixed(0)}</b> 元/吨
-                      {indexTotal != null &&
-                        ` · 总额约 ${Math.round(indexTotal).toLocaleString("zh-CN")} 元`}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          )}
         </div>
       </div>
 
@@ -944,17 +846,6 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
                 <div key={i}>{w}</div>
               ))}
             </div>
-          )}
-          {/* 报价时效与成败无关, 照常提示; 指数推算要 cost 才算得出, 这里没有. */}
-          {price?.oldestQuotedAt && (
-            <p
-              className={quoteStale ? "cost-warn" : undefined}
-              style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}
-            >
-              {quoteStale && "⚠ "}
-              报价停留在 {price.oldestQuotedAt}
-              {quoteAgeDays != null && ` · ${quoteAgeDays} 天前`}
-            </p>
           )}
           {/* 只在真·不可行时给这条建议: ok 却没有成本结构是结果不完整, 放宽合同
               解决不了, 那时这句是错的指路. */}

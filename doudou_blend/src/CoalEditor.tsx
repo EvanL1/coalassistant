@@ -4,8 +4,8 @@
  * 入口: 点煤池里的煤卡 → 弹出
  * 功能:
  *   - 改 8 项化验值 (S/A/V/G/Y/petro/CSR/M)
- *   - 改 FOB / FRT
  *   - 启用/停用
+ *   - 不录价: 单煤真实报价拿不到, 煤价一律按质量估算 (见 domain/resolvedCoal.ts)
  *   - "重置为 master 默认" 按钮 (清除 user_overrides)
  */
 import { useEffect, useState } from "react";
@@ -18,7 +18,6 @@ import {
   getCoalPref,
   setCoalPref,
   clearCoalPref,
-  recordCoalQuote,
   removeUserCoal,
   type CoalPref,
 } from "./storage";
@@ -29,18 +28,12 @@ interface Props {
   isUserAdded?: boolean;
   /** 旧数据与 Master 重名时，删除用户煤不能连带清掉共用的 Master 偏好。 */
   preservePrefOnDelete?: boolean;
-  /** master 的 updated_at, 首次改价时用来给报价历史补起点 */
-  masterUpdatedAt?: string | null;
   onClose: () => void;
   onSaved?: () => void;
 }
 
 interface FormState {
   enabled: boolean;
-  fob: string;
-  frt: string;
-  /** 作为价格锚点参与推算 */
-  isAnchor: boolean;
   props: Record<string, string>;
   /** 该煤采购合同的保证值 (买入侧): 达不到这个数供应商扣钱, 到厂价更低. */
   guarantees: Record<string, string>;
@@ -54,9 +47,6 @@ function toForm(
   const resolved = resolveCoal(coal, pref, origin);
   return {
     enabled: resolved.requestedEnabled,
-    fob: resolved.fob != null ? String(resolved.fob) : "",
-    frt: resolved.frt != null ? String(resolved.frt) : "",
-    isAnchor: pref?.is_price_anchor === true,
     props: Object.fromEntries(
       INDICATOR_ORDER.map((key) => [
         key,
@@ -72,13 +62,6 @@ function toForm(
   };
 }
 
-/** 距今天数; 日期不合法返回 null. */
-function daysSince(date: string): number | null {
-  const t = Date.parse(`${date}T00:00:00`);
-  if (!Number.isFinite(t)) return null;
-  return Math.max(0, Math.round((Date.now() - t) / 86_400_000));
-}
-
 function parseNumOrNull(s: string): number | null {
   if (!s.trim()) return null;
   const n = parseFloat(s);
@@ -89,7 +72,6 @@ export function CoalEditor({
   coal,
   isUserAdded,
   preservePrefOnDelete,
-  masterUpdatedAt,
   onClose,
   onSaved,
 }: Props) {
@@ -103,11 +85,6 @@ export function CoalEditor({
   const [template] = useState(() => getPenaltyTemplate());
   const resolved = resolveCoal(coal, pref, origin);
   const isHidden = resolved.hidden;
-  const quotedAt = resolved.fob_quoted_at ?? masterUpdatedAt ?? null;
-  const staleDays = quotedAt ? daysSince(quotedAt) : null;
-  // 一个点算不出涨跌. 锚点开着却只有 0~1 条报价时会静默不生效, 必须说出来.
-  const quoteCount = pref?.fob_history?.length ?? 0;
-  const anchorNotReady = form.isAnchor && quoteCount < 2;
 
   // 锁住 body 滚动
   useEffect(() => {
@@ -128,8 +105,6 @@ export function CoalEditor({
         propsOverride[k] = newVal;
       }
     }
-    const fobNum = parseNumOrNull(form.fob);
-    const frtNum = parseNumOrNull(form.frt);
 
     const guarantees: Record<string, number> = {};
     for (const k of INDICATOR_ORDER) {
@@ -139,9 +114,6 @@ export function CoalEditor({
 
     setCoalPref(coal.name, {
       enabled: form.enabled,
-      fob_override: fobNum !== coal.fob ? fobNum : null,
-      frt_override: frtNum !== coal.frt ? frtNum : null,
-      is_price_anchor: form.isAnchor,
       props_override: Object.keys(propsOverride).length > 0 ? propsOverride : undefined,
       // 清空某项保证值就得让它从 map 里消失: 留着 undefined 会被
       // mergePurchaseTerms 跳过(它只认有限数), 但 JSON 往返后行为一致, 干脆整
@@ -149,21 +121,12 @@ export function CoalEditor({
       purchase_guarantees:
         Object.keys(guarantees).length > 0 ? guarantees : undefined,
     });
-    // 出厂价变了才记一次报价. 报价历史是漂移推算唯一的数据来源, 没有它锚点算不出比例.
-    if (fobNum != null && fobNum !== resolved.fob) {
-      const seedDate = pref?.fob_quoted_at ?? masterUpdatedAt ?? null;
-      const seed =
-        resolved.fob != null && seedDate
-          ? { date: seedDate, fob: resolved.fob }
-          : null;
-      recordCoalQuote(coal.name, fobNum, seed);
-    }
     onSaved?.();
     onClose();
   }
 
   function resetToMaster() {
-    // 采购保证值没有 master 默认值(master 不含采购合同), 但它跟价格/化验覆盖
+    // 采购保证值没有 master 默认值(master 不含采购合同), 但它跟化验覆盖
     // 存在同一份 CoalPref 里, 重置会一并清掉 —— 得在确认框里说出来.
     const alsoDropped =
       filledGuarantees > 0 ? `\n已填的 ${filledGuarantees} 项采购保证值也会一并清掉。` : "";
@@ -231,89 +194,6 @@ export function CoalEditor({
             />
           </div>
 
-          {/* 价格 */}
-          <div className="edit-section">
-            <div className="edit-section-title">价格</div>
-            <div className="edit-row">
-              <div className="edit-row-label">出厂价 FOB</div>
-              <input
-                type="number"
-                inputMode="decimal"
-                className="edit-input"
-                value={form.fob}
-                onChange={(e) => setForm({ ...form, fob: e.target.value })}
-                placeholder="元/吨"
-              />
-            </div>
-            {quotedAt && (
-              <div
-                style={{
-                  fontSize: 11,
-                  padding: "0 0 8px",
-                  color:
-                    staleDays != null && staleDays > 30
-                      ? "var(--c-danger)"
-                      : "var(--c-text-3)",
-                }}
-              >
-                上次录价 {quotedAt}
-                {staleDays != null && ` · ${staleDays} 天前`}
-                {staleDays != null && staleDays > 30 && " · 建议复核"}
-              </div>
-            )}
-            <div className="edit-row">
-              <div className="edit-row-label">
-                作为价格锚点
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 400,
-                    color: "var(--c-text-3)",
-                    marginTop: 2,
-                  }}
-                >
-                  用它的涨跌比例推算其他未更新的煤
-                </div>
-              </div>
-              <div
-                className={`toggle ${form.isAnchor ? "on" : ""}`}
-                onClick={() => setForm({ ...form, isAnchor: !form.isAnchor })}
-              />
-            </div>
-            {anchorNotReady && (
-              <div
-                style={{
-                  fontSize: 11,
-                  padding: "0 0 8px",
-                  color: "var(--c-warning, #f59e0b)",
-                }}
-              >
-                改一次出厂价并保存后生效
-              </div>
-            )}
-            <div className="edit-row">
-              <div className="edit-row-label">运费 FRT</div>
-              <input
-                type="number"
-                inputMode="decimal"
-                className="edit-input"
-                value={form.frt}
-                onChange={(e) => setForm({ ...form, frt: e.target.value })}
-                placeholder="元/吨"
-              />
-            </div>
-            <div className="edit-row" style={{ background: "var(--c-bg)" }}>
-              <div className="edit-row-label">到厂价 CIF</div>
-              <div style={{ fontWeight: 700, color: "var(--c-primary)" }}>
-                ¥
-                {(
-                  (parseNumOrNull(form.fob) ?? 0) +
-                  (parseNumOrNull(form.frt) ?? 0)
-                ).toFixed(2)}
-              </div>
-            </div>
-          </div>
-
           {/* 化验值 */}
           <div className="edit-section">
             <div className="edit-section-title">化验指标</div>
@@ -355,7 +235,7 @@ export function CoalEditor({
               红字(error 级)只提示, 不挡保存 —— 与合同屏刻意不同。
               合同屏的条款自成一体, 填不对就该拦住; 这里的对错取决于模板里的
               拒收线, 用户完全可能先填保证值再去改模板, 拦住等于逼他先放弃这次
-              修改(而这个弹层里还有价格和化验值要存)。
+              修改(而这个弹层里还有化验值要存)。
             */}
             {INDICATOR_ORDER.map((k) => {
               const raw = form.guarantees[k];

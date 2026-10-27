@@ -12,8 +12,8 @@
       "petro": "岩相 (反射率分布度量)",
       "CSR":   "焦炭反应后强度 %",
       "M":     "水分 %",
-      "fob":   "出厂价 元/吨",
-      "frt":   "运费 元/吨"
+      "fob":   "出厂价 元/吨 —— 不再使用: 单煤真实报价拿不到, 煤价一律按 price_factor 估算 (2026-10-27 起 master 不带)",
+      "frt":   "运费 元/吨 —— 同上, 不再使用"
     },
     "coal_type": {
       "焦煤":      "Vdaf 10~28, G>65 (Vdaf 20~28 时 Y≤25). 炼焦骨架, 贸易口语的「主焦煤」即此",
@@ -113,11 +113,9 @@
         "S": 2.0, "A": 6.0, "V": 22, "G": 93,
         "Y": 17, "petro": 0.08, "CSR": 70, "M": 11
       },
-      "frt": 25,
       "confidence": {
         "S": "high", "A": "high", "V": "high", "G": "high",
-        "Y": "medium", "petro": "low", "CSR": "high", "M": "medium",
-        "frt": "high"
+        "Y": "medium", "petro": "low", "CSR": "high", "M": "medium"
       },
       "note": "用户主力煤."
     },
@@ -128,11 +126,9 @@
         "S": 1.1, "A": 13.5, "V": 21, "G": 80,
         "Y": 10, "petro": 0.07, "CSR": 50, "M": 23
       },
-      "frt": 35,
       "confidence": {
         "S": "high", "A": "high", "V": "high", "G": "high",
-        "Y": "medium", "petro": "low", "CSR": "high", "M": "high",
-        "frt": "high"
+        "Y": "medium", "petro": "low", "CSR": "high", "M": "high"
       },
       "note": "古交的浮选精煤. 区别于原 '古交' (煤泥, 已 archived). M=23 高水分."
     },
@@ -143,11 +139,9 @@
         "S": 3.8, "A": 11.0, "V": 24, "G": 92,
         "Y": 19, "petro": 0.13, "CSR": 64, "M": 11
       },
-      "frt": 50,
       "confidence": {
         "S": "high", "A": "high", "V": "high", "G": "high",
-        "Y": "high", "petro": "low", "CSR": "low", "M": "medium",
-        "frt": "high"
+        "Y": "high", "petro": "low", "CSR": "low", "M": "medium"
       },
       "note": "用户主力煤. CSR 是估值, Y 已确认."
     },
@@ -158,11 +152,9 @@
         "S": 3.0, "A": 8.5, "V": 18, "G": 75,
         "Y": 12, "petro": 0.11, "CSR": 58, "M": 11
       },
-      "frt": 15,
       "confidence": {
         "S": "high", "A": "high", "V": "high", "G": "high",
         "Y": "medium", "petro": "low", "CSR": "low", "M": "medium",
-        "frt": "high",
         "CSR": "spec"
       },
       "note": "用户主力煤. CSR/Y 是估值."

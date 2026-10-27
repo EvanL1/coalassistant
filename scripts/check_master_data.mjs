@@ -148,8 +148,11 @@ for (const coal of master.coals) {
   if (coal.status === "verified") {
     const missing = INDICATORS.filter((k) => !(k in props));
     if (missing.length) fail(`${label}: verified 却缺指标 ${missing.join("/")}`);
-    if (typeof coal.fob !== "number") fail(`${label}: verified 却没有 fob`);
-    if (typeof coal.frt !== "number") fail(`${label}: verified 却没有 frt`);
+  }
+  // 单煤真实报价拿不到, 煤价一律按质量估算 (price_factor): master 不带任何单煤价格.
+  // 真实报价在估算之后去谈, 不进 master, 也不进求解.
+  for (const key of ["fob", "frt"]) {
+    if (coal[key] != null) fail(`${label}: 不应带 ${key} (煤价一律按估算, 实际 ${coal[key]})`);
   }
   if (coal.status === "incomplete" && Object.keys(props).length > 0) {
     fail(`${label}: incomplete 不应带 props (实际 ${Object.keys(props).join("/")})`);

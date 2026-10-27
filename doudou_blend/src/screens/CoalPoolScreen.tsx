@@ -7,7 +7,6 @@ import {
   resolveCoalPool,
   type ResolvedCoal,
 } from "../domain/resolvedCoal";
-import { buildPriceAnchor } from "../domain/priceDrift";
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalStatus, MasterCoalEntry } from "../types";
@@ -79,10 +78,7 @@ export function CoalPoolScreen() {
   // 卡片、筛选和求解器共用同一套有效值解析，用户新增煤排在前面。
   const allCoals = useMemo<ResolvedCoal[]>(
     () =>
-      resolveCoalPool(master?.coals ?? [], userCoals, prefs, {
-        anchor: buildPriceAnchor(prefs),
-        masterUpdatedAt: master?.updated_at ?? null,
-      }),
+      resolveCoalPool(master?.coals ?? [], userCoals, prefs),
     [master, prefs, userCoals],
   );
   const masterCoalNames = useMemo(
@@ -300,7 +296,6 @@ export function CoalPoolScreen() {
             editing.origin === "user" &&
             masterCoalNames.has(normalizeCoalName(editing.name))
           }
-          masterUpdatedAt={master.updated_at}
           onClose={() => setEditing(null)}
         />
       )}
@@ -357,8 +352,6 @@ function CoalCard({
     ready: "● 启用中",
     disabled: "○ 停用 · 点击编辑",
     hidden: "○ 已隐藏 · 点击恢复",
-    missing_fob: "● 已启用 · 缺出厂价，未参与求解",
-    missing_frt: "● 已启用 · 缺运费，未参与求解",
     duplicate_name: "名称冲突 · 未参与求解",
     invalid_override: "● 已启用 · 修改数据无效",
   };
@@ -388,18 +381,9 @@ function CoalCard({
           </div>
         </div>
         <div>
-          {coal.cif != null ? (
-            <>
-              <div className="coal-price">¥{coal.cif}</div>
-              <div className="coal-price-detail">
-                单价 {coal.fob} + 运费 {coal.frt}
-              </div>
-            </>
-          ) : (
-            <span className={`status-pill status-${coal.status}`}>
-              {STATUS_LABEL[coal.status]}
-            </span>
-          )}
+          <span className={`status-pill status-${coal.status}`}>
+            {STATUS_LABEL[coal.status]}
+          </span>
         </div>
       </div>
 

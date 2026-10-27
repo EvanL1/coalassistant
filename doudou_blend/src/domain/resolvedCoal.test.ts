@@ -1,13 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CoalPref } from "../storage";
 import type { MasterCoalEntry, PurchaseTerms } from "../types";
-import {
-  resolveCoal,
-  resolveCoalPool,
-  summarizePriceStatus,
-  toBlendCoal,
-  toPriceOnlyCoal,
-} from "./resolvedCoal";
+import { resolveCoal, resolveCoalPool, toEstimateCoal } from "./resolvedCoal";
 
 const masterCoal: MasterCoalEntry = {
   name: "测试主煤",
@@ -15,92 +9,85 @@ const masterCoal: MasterCoalEntry = {
   coal_type: "焦煤",
   status: "verified",
   props: { S: 0.5, A: 10, G: 80 },
-  fob: 1_000,
-  frt: 100,
+  fob: null,
+  frt: null,
 };
 
 describe("resolveCoal", () => {
-  it("无覆盖时展示值和求解值都使用 Master", () => {
+  it("启用的煤一律按估算价进求解: 不带报价, 煤种/地区随煤走", () => {
     const resolved = resolveCoal(masterCoal, null, "master");
 
     expect(resolved).toMatchObject({
       origin: "master",
       props: masterCoal.props,
-      fob: 1_000,
-      frt: 100,
-      cif: 1_100,
       requestedEnabled: true,
       effectiveEnabled: true,
       readiness: "ready",
       hasOverrides: false,
     });
-    expect(toBlendCoal(resolved)).toEqual({
+    expect(toEstimateCoal(resolved)).toEqual({
       name: "测试主煤",
       props: masterCoal.props,
-      fob: 1_000,
-      frt: 100,
+      fob: 0,
+      frt: 0,
       // 煤种、地区随煤进求解请求: 估价按 煤种 → 形态 → 地区 对标, 今日屏按煤种展示.
       coal_type: "焦煤",
       region: "山西",
     });
     expect(
-      toBlendCoal(resolveCoal({ ...masterCoal, form: "筛选精煤" }, null, "master"))?.form,
+      toEstimateCoal(resolveCoal({ ...masterCoal, form: "筛选精煤" }, null, "master"))?.form,
     ).toBe("筛选精煤");
   });
 
-  it("价格和指标覆盖在展示与求解输入中保持一致，并保留合法的 0", () => {
-    const pref: CoalPref = {
-      enabled: true,
-      fob_override: 0,
-      frt_override: 80,
-      props_override: { S: 0, G: 85 },
-    };
+  it("master 里残留的出厂价/运费不进求解", () => {
+    const resolved = resolveCoal({ ...masterCoal, fob: 1_000, frt: 100 }, null, "master");
 
-    const resolved = resolveCoal(masterCoal, pref, "master");
+    expect(resolved.readiness).toBe("ready");
+    expect(toEstimateCoal(resolved)).toMatchObject({ fob: 0, frt: 0 });
+  });
+
+  it("旧版本录过的价格键被忽略, 不算修改也不算坏数据", () => {
+    const legacy = {
+      enabled: true,
+      fob_override: 1_200,
+      frt_override: 24,
+      is_price_anchor: true,
+      fob_history: [{ date: "2026-09-01", fob: 1_150 }],
+    } as unknown as CoalPref;
+
+    const resolved = resolveCoal(masterCoal, legacy, "master");
+
+    expect(resolved.readiness).toBe("ready");
+    expect(resolved.hasOverrides).toBe(false);
+    expect(toEstimateCoal(resolved)).toMatchObject({ fob: 0, frt: 0 });
+  });
+
+  it("指标覆盖进入求解输入, 并保留合法的 0", () => {
+    const resolved = resolveCoal(
+      masterCoal,
+      { enabled: true, props_override: { S: 0, G: 85 } },
+      "master",
+    );
 
     expect(resolved).toMatchObject({
-      fob: 0,
-      frt: 80,
-      cif: 80,
       props: { S: 0, A: 10, G: 85 },
       hasOverrides: true,
       overriddenProps: { S: true, G: true },
       readiness: "ready",
     });
-    expect(toBlendCoal(resolved)).toMatchObject({
-      fob: 0,
-      frt: 80,
-      props: { S: 0, A: 10, G: 85 },
-    });
-  });
-
-  it("null 覆盖明确表示继承 Master", () => {
-    const resolved = resolveCoal(
-      masterCoal,
-      {
-        enabled: true,
-        fob_override: null,
-        frt_override: null,
-      },
-      "master",
-    );
-
-    expect(resolved.fob).toBe(1_000);
-    expect(resolved.frt).toBe(100);
-    expect(resolved.hasOverrides).toBe(false);
+    expect(toEstimateCoal(resolved)?.props).toEqual({ S: 0, A: 10, G: 85 });
   });
 
   it("已停用 (archived) 的煤一票否决, 用户偏好里的启用也拉不回来", () => {
     const resolved = resolveCoal(
-      { ...masterCoal, status: "archived", fob: null },
+      { ...masterCoal, status: "archived" },
       { enabled: true },
       "master",
     );
 
     expect(resolved.effectiveEnabled).toBe(false);
     expect(resolved.readiness).toBe("disabled");
-    expect(toBlendCoal(resolved)).toBeNull();
-    expect(toPriceOnlyCoal(resolved)).toBeNull();
+    expect(toEstimateCoal(resolved)).toBeNull();
   });
 
   it("隐藏状态一票否决，不进入求解", () => {
@@ -113,10 +100,10 @@ describe("resolveCoal", () => {
     expect(resolved.requestedEnabled).toBe(true);
     expect(resolved.effectiveEnabled).toBe(false);
     expect(resolved.readiness).toBe("hidden");
-    expect(toBlendCoal(resolved)).toBeNull();
+    expect(toEstimateCoal(resolved)).toBeNull();
   });
 
-  it("用户新增煤可由覆盖值补齐并进入求解", () => {
+  it("用户新增煤补齐指标后进入求解", () => {
     const userCoal: MasterCoalEntry = {
       name: "用户煤",
       status: "draft",
@@ -126,59 +113,35 @@ describe("resolveCoal", () => {
     };
     const resolved = resolveCoal(
       userCoal,
-      {
-        enabled: true,
-        fob_override: 900,
-        frt_override: 120,
-        props_override: { S: 0.6, A: 9.5 },
-      },
+      { enabled: true, props_override: { S: 0.6, A: 9.5 } },
       "user",
     );
 
     expect(resolved).toMatchObject({
       origin: "user",
-      fob: 900,
-      frt: 120,
       props: { S: 0.6, A: 9.5 },
       readiness: "ready",
     });
-    expect(toBlendCoal(resolved)?.name).toBe("用户煤");
-  });
-
-  it("启用但缺少价格时给出明确原因并排除求解", () => {
-    const incomplete: MasterCoalEntry = {
-      ...masterCoal,
-      fob: null,
-      frt: null,
-    };
-
-    const missingFob = resolveCoal(
-      incomplete,
-      { enabled: true, frt_override: 100 },
-      "master",
-    );
-    const missingFrt = resolveCoal(
-      incomplete,
-      { enabled: true, fob_override: 1_000 },
-      "master",
-    );
-
-    expect(missingFob.readiness).toBe("missing_fob");
-    expect(missingFrt.readiness).toBe("missing_frt");
-    expect(toBlendCoal(missingFob)).toBeNull();
-    expect(toBlendCoal(missingFrt)).toBeNull();
+    expect(toEstimateCoal(resolved)?.name).toBe("用户煤");
   });
 
   it("非法持久化覆盖不会静默回退 Master 或进入求解", () => {
     const invalidPref = {
-      enabled: true,
-      fob_override: "坏数据",
+      enabled: "坏数据",
     } as unknown as CoalPref;
 
     const resolved = resolveCoal(masterCoal, invalidPref, "master");
 
-    expect(resolved.readiness).toBe("invalid_override");
-    expect(toBlendCoal(resolved)).toBeNull();
+    expect(resolved.readiness).toBe("disabled");
+    expect(toEstimateCoal(resolved)).toBeNull();
+
+    const badProps = resolveCoal(
+      masterCoal,
+      { enabled: true, props_override: { S: -1 } },
+      "master",
+    );
+    expect(badProps.readiness).toBe("invalid_override");
+    expect(toEstimateCoal(badProps)).toBeNull();
   });
 
   it("未知指标键会标记为非法且不会传给求解器", () => {
@@ -193,35 +156,19 @@ describe("resolveCoal", () => {
 
     expect(resolved.readiness).toBe("invalid_override");
     expect(resolved.props).not.toHaveProperty("typo");
-    expect(toBlendCoal(resolved)).toBeNull();
+    expect(toEstimateCoal(resolved)).toBeNull();
   });
 
-  it("价格相加溢出时不会生成无限 CIF", () => {
-    const resolved = resolveCoal(
-      {
-        ...masterCoal,
-        fob: Number.MAX_VALUE,
-        frt: Number.MAX_VALUE,
-      },
-      null,
-      "master",
-    );
-
-    expect(resolved.cif).toBeNull();
-    expect(resolved.readiness).toBe("invalid_override");
-    expect(toBlendCoal(resolved)).toBeNull();
-  });
-
-  it("未启用煤保留有效展示值但不进入求解", () => {
+  it("未启用煤保留展示值但不进入求解", () => {
     const resolved = resolveCoal(
       masterCoal,
       { enabled: false },
       "master",
     );
 
-    expect(resolved.fob).toBe(1_000);
+    expect(resolved.props).toEqual(masterCoal.props);
     expect(resolved.readiness).toBe("disabled");
-    expect(toBlendCoal(resolved)).toBeNull();
+    expect(toEstimateCoal(resolved)).toBeNull();
   });
 });
 
@@ -268,217 +215,28 @@ describe("resolveCoalPool", () => {
       "duplicate_name",
       "duplicate_name",
     ]);
-    expect(resolved.map((coal) => toBlendCoal(coal))).toEqual([null, null]);
+    expect(resolved.map((coal) => toEstimateCoal(coal))).toEqual([null, null]);
   });
 });
 
-describe("价格漂移推算", () => {
-  /** 临北 6-30 报 1425, 9-8 复录 1650 -> 全池比例 1.157894... */
-  const drift = {
-    anchor: {
-      coals: ["临北"],
-      quotes: {
-        临北: [
-          { date: "2026-06-30", fob: 1425 },
-          { date: "2026-09-08", fob: 1650 },
-        ],
-      },
-    },
-    masterUpdatedAt: "2026-06-30",
-  };
-  const ratio = 1650 / 1425;
+describe("toEstimateCoal 的 purchaseTerms 参数 (调用方传入, 不在这里重算)", () => {
+  const terms: PurchaseTerms = {
+    clauses: [{ indicator: "S", guarantee: 0.6, direction: "Upper", tiers: [] }],
+  } as unknown as PurchaseTerms;
 
-  it("没有锚点时行为与从前完全一致", () => {
+  it("传入 terms 时挂到 purchase_terms 上 (核心并入煤池时随煤走)", () => {
     const resolved = resolveCoal(masterCoal, null, "master");
-    expect(resolved.fob_drifted).toBeNull();
-    expect(resolved.drift_ratio).toBeNull();
-    expect(resolved.cif).toBe(1_100);
-    expect(toBlendCoal(resolved)?.fob).toBe(1_000);
+    expect(toEstimateCoal(resolved, terms)?.purchase_terms).toBe(terms);
   });
 
-  it("没单独录过价的煤按 master updated_at 当录价日推算", () => {
-    const resolved = resolveCoal(masterCoal, null, "master", drift);
-    expect(resolved.fob_quoted_at).toBe("2026-06-30");
-    expect(resolved.fob).toBe(1_000);
-    expect(resolved.fob_drifted).toBeCloseTo(1_000 * ratio, 6);
-    expect(resolved.drift_ratio).toBeCloseTo(ratio, 6);
-  });
-
-  it("到厂价用推算价, 运费不参与漂移", () => {
-    const resolved = resolveCoal(masterCoal, null, "master", drift);
-    expect(resolved.cif).toBeCloseTo(1_000 * ratio + 100, 6);
-  });
-
-  it("求解器拿到的是推算价而不是旧报价", () => {
-    const resolved = resolveCoal(masterCoal, null, "master", drift);
-    expect(toBlendCoal(resolved)).toMatchObject({
-      fob: resolved.fob_drifted,
-      frt: 100,
-    });
-  });
-
-  it("刚录过价的煤不再被漂移", () => {
-    const pref: CoalPref = {
-      fob_override: 1_200,
-      fob_quoted_at: "2026-09-08",
-    };
-    const resolved = resolveCoal(masterCoal, pref, "master", drift);
-    expect(resolved.fob).toBe(1_200);
-    expect(resolved.fob_drifted).toBe(1_200);
-    expect(resolved.cif).toBe(1_300);
-  });
-
-  it("旧数据没有 fob_quoted_at 时退回 updated_at 时间戳", () => {
-    const pref: CoalPref = {
-      fob_override: 1_200,
-      updated_at: "2026-09-08T02:00:00.000Z",
-    };
-    const resolved = resolveCoal(masterCoal, pref, "master", drift);
-    expect(resolved.fob_quoted_at).toBe("2026-09-08");
-    expect(resolved.fob_drifted).toBe(1_200);
-  });
-
-  it("锚点定位不到基准时不推算, 退回录入价求解", () => {
-    const pref: CoalPref = {
-      fob_override: 1_200,
-      fob_quoted_at: "2026-01-01",
-    };
-    const resolved = resolveCoal(masterCoal, pref, "master", drift);
-    expect(resolved.fob_drifted).toBeNull();
-    expect(resolved.cif).toBe(1_300);
-    expect(toBlendCoal(resolved)?.fob).toBe(1_200);
-  });
-
-  it("整池解析时漂移逐煤生效", () => {
-    const other: MasterCoalEntry = { ...masterCoal, name: "另一个煤", fob: 800 };
-    const pool = resolveCoalPool([masterCoal, other], [], {}, drift);
-    expect(pool.map((c) => c.fob_drifted)).toEqual([
-      expect.closeTo(1_000 * ratio, 6),
-      expect.closeTo(800 * ratio, 6),
-    ]);
-  });
-});
-
-describe("summarizePriceStatus", () => {
-  const drift = {
-    anchor: {
-      coals: ["临北"],
-      quotes: {
-        临北: [
-          { date: "2026-06-30", fob: 1425 },
-          { date: "2026-09-08", fob: 1650 },
-        ],
-      },
-    },
-    masterUpdatedAt: "2026-06-30",
-  };
-
-  it("没有锚点时仍然报告报价时效 —— 这正是最需要提示的状态", () => {
-    const pool = resolveCoalPool([masterCoal], [], {}, {
-      anchor: { coals: [], quotes: {} },
-      masterUpdatedAt: "2026-06-30",
-    });
-    expect(summarizePriceStatus(pool, [])).toEqual({
-      oldestQuotedAt: "2026-06-30",
-      driftedCount: 0,
-      avgRatio: null,
-      anchors: [],
-    });
-  });
-
-  it("统计被推算的煤数量与平均比例", () => {
-    const other: MasterCoalEntry = { ...masterCoal, name: "另一个煤", fob: 800 };
-    const pool = resolveCoalPool([masterCoal, other], [], {}, drift);
-    const status = summarizePriceStatus(pool, drift.anchor.coals);
-    expect(status).toMatchObject({
-      driftedCount: 2,
-      oldestQuotedAt: "2026-06-30",
-      anchors: ["临北"],
-    });
-    expect(status.avgRatio).toBeCloseTo(1650 / 1425, 6);
-  });
-
-  it("刚录过价的煤不计入推算, 但仍贡献报价日", () => {
-    const pool = resolveCoalPool(
-      [masterCoal],
-      [],
-      { 测试主煤: { fob_override: 1_200, fob_quoted_at: "2026-09-08" } },
-      drift,
-    );
-    expect(summarizePriceStatus(pool, drift.anchor.coals)).toMatchObject({
-      driftedCount: 0,
-      oldestQuotedAt: "2026-09-08",
-    });
-  });
-
-  it("停用的煤既不计入推算也不影响报价时效", () => {
-    const pool = resolveCoalPool(
-      [masterCoal],
-      [],
-      { 测试主煤: { enabled: false } },
-      drift,
-    );
-    expect(summarizePriceStatus(pool, drift.anchor.coals)).toMatchObject({
-      driftedCount: 0,
-      oldestQuotedAt: null,
-    });
-  });
-
-  it("多个煤报价日不同时取最旧的那个", () => {
-    const other: MasterCoalEntry = { ...masterCoal, name: "另一个煤", fob: 800 };
-    const pool = resolveCoalPool(
-      [masterCoal, other],
-      [],
-      { 测试主煤: { fob_override: 1_200, fob_quoted_at: "2026-08-01" } },
-      drift,
-    );
-    expect(summarizePriceStatus(pool, []).oldestQuotedAt).toBe("2026-06-30");
-  });
-});
-
-describe("toBlendCoal 的 purchaseTerms 参数 (调用方传入, 不在这里重算)", () => {
-  it("传入 terms 时挂到 purchase_terms 上", () => {
+  it("不传或传 null 时不产出 purchase_terms 字段", () => {
     const resolved = resolveCoal(masterCoal, null, "master");
-    const terms: PurchaseTerms = {
-      clauses: [
-        {
-          indicator: "S",
-          direction: "Upper",
-          guarantee: 0.5,
-          penalty: { tiers: [{ rate: 80 }], reject: 1.5 },
-        },
-      ],
-    };
-
-    expect(toBlendCoal(resolved, terms)).toEqual({
-      name: "测试主煤",
-      props: masterCoal.props,
-      fob: 1_000,
-      frt: 100,
-      purchase_terms: terms,
-      coal_type: "焦煤",
-      region: "山西",
-    });
-  });
-
-  it("不传或传 null 时不产出 purchase_terms 字段 (undefined, 不是显式 null)", () => {
-    const resolved = resolveCoal(masterCoal, null, "master");
-
-    const withoutArg = toBlendCoal(resolved);
-    const withNull = toBlendCoal(resolved, null);
-
-    expect(withoutArg?.purchase_terms).toBeUndefined();
-    expect(withNull?.purchase_terms).toBeUndefined();
-    expect(Object.prototype.hasOwnProperty.call(withoutArg, "purchase_terms")).toBe(true);
-    // 值是 undefined, 但 JSON.stringify 会把这个键整个丢掉 —— 这才是关键效果.
-    expect(JSON.parse(JSON.stringify(withoutArg))).not.toHaveProperty(
-      "purchase_terms",
-    );
+    expect(toEstimateCoal(resolved)?.purchase_terms).toBeUndefined();
+    expect(toEstimateCoal(resolved, null)?.purchase_terms).toBeUndefined();
   });
 
   it("非 ready 的煤仍然返回 null, 不受 purchaseTerms 参数影响", () => {
     const resolved = resolveCoal(masterCoal, { enabled: false }, "master");
-
-    expect(toBlendCoal(resolved, { clauses: [] })).toBeNull();
+    expect(toEstimateCoal(resolved, terms)).toBeNull();
   });
 });

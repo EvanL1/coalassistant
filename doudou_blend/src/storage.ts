@@ -11,7 +11,6 @@
 
 import type { Spec, MasterCoalEntry, BlendResult, MeasuredQuality } from "./types";
 import { normalizeCoalName } from "./domain/coalName";
-import type { AnchorQuote } from "./domain/priceDrift";
 import type { CoalPenaltyOverride } from "./penalty";
 
 export { normalizeCoalName } from "./domain/coalName";
@@ -21,23 +20,13 @@ const KEY_CONTRACT = "doudou_blend.contract.v1";
 const KEY_HISTORY = "doudou_blend.history.v1";
 const KEY_USER_COALS = "doudou_blend.user_coals.v1";
 
-/** 单个煤的用户偏好: 启用 + 价格覆盖 + 化验值覆盖 */
+/** 单个煤的用户偏好: 启用 + 化验值覆盖. 不存价格: 煤价一律按质量估算. */
 export interface CoalPref {
   enabled?: boolean;
   /** 读取旧存储时发现该煤偏好结构损坏，仅供解析层阻止求解。 */
   invalid_data?: boolean;
   /** 用户隐藏: true 时从煤池/求解器全部滤掉 (master 煤不能真删, 只能隐藏) */
   hidden?: boolean;
-  /** 用户改后的 FOB; null = 用 master 默认 */
-  fob_override?: number | null;
-  /** fob 是哪天录的 (YYYY-MM-DD); 缺失时按 master updated_at 兜底 */
-  fob_quoted_at?: string | null;
-  /** 这个煤的报价历史, 每次改价追加一条; 锚点煤靠它构成自建价格指数 */
-  fob_history?: AnchorQuote[];
-  /** 标记为价格锚点: 用它的涨跌比例推算其余未更新煤的现价 */
-  is_price_anchor?: boolean;
-  /** 用户改后的运费; null = 用 master 默认 */
-  frt_override?: number | null;
   /** 用户改过的化验项; null = 用 master 默认 */
   props_override?: Partial<Record<string, number | null>>;
   /** 该煤采购合同的保证值: 指标 → 保证值. 缺项不算扣款. */
@@ -103,7 +92,7 @@ export function getCoalPrefs(): CoalPrefs {
     const prefs: CoalPrefs = {};
     for (const [name, value] of Object.entries(parsed)) {
       prefs[name] = isRecord(value)
-        ? (value as CoalPref)
+        ? (withoutLegacyPrice(value) as CoalPref)
         : { invalid_data: true };
     }
     return prefs;
@@ -126,50 +115,28 @@ export function setCoalPref(name: string, pref: Partial<CoalPref>): void {
   window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
 }
 
+/**
+ * 早期版本录过的单煤价格 (出厂价/运费覆盖、录价日、报价历史、价格锚点). 现在不录价,
+ * 读取时一律摘掉: 不进求解, 下次写回本地缓存与云端时也随之清掉.
+ */
+const LEGACY_PRICE_KEYS = [
+  "fob_override",
+  "frt_override",
+  "fob_quoted_at",
+  "fob_history",
+  "is_price_anchor",
+] as const;
+
+function withoutLegacyPrice(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...value };
+  for (const key of LEGACY_PRICE_KEYS) delete next[key];
+  return next;
+}
+
 export function getCoalPref(name: string): CoalPref | null {
   return getCoalPrefs()[name] ?? null;
-}
-
-/** 本地日期 YYYY-MM-DD. 不能用 toISOString(那是 UTC), 国内凌晨会差一天. */
-function todayLocal(): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-}
-
-const MAX_QUOTE_HISTORY = 60;
-
-/**
- * 录一次价: 写 fob 覆盖 + 录价日, 并追加到该煤的报价历史.
- *
- * `seed` 是改价之前的口径(通常是 master 的 {updated_at, fob}), 只在历史为空时
- * 用来补起点 —— 没有起点就只有一个点, 算不出涨跌比例, 锚点也就失效了.
- */
-export function recordCoalQuote(
-  name: string,
-  fob: number,
-  seed?: AnchorQuote | null,
-): void {
-  const date = todayLocal();
-  const previous = getCoalPref(name);
-  const history: AnchorQuote[] = Array.isArray(previous?.fob_history)
-    ? [...previous.fob_history]
-    : [];
-  if (history.length === 0 && seed != null && seed.date < date) {
-    history.push({ date: seed.date, fob: seed.fob });
-  }
-  const sameDay = history.findIndex((quote) => quote?.date === date);
-  if (sameDay >= 0) {
-    history[sameDay] = { date, fob };
-  } else {
-    history.push({ date, fob });
-  }
-  history.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  setCoalPref(name, {
-    fob_override: fob,
-    fob_quoted_at: date,
-    fob_history: history.slice(-MAX_QUOTE_HISTORY),
-  });
 }
 
 export function clearCoalPref(name: string): void {

@@ -1,18 +1,18 @@
 //! 按线上保存的状态组装"今日"求解请求 —— 网页今日屏点求解时发的那份请求的服务端版本,
 //! 供 MCP (手机 Agent) 等不经过浏览器的入口使用.
 //!
-//! 规则逐条对照前端 `domain/resolvedCoal.ts` 的 `resolveCoal` / `toBlendCoal` /
-//! `toPriceOnlyCoal`, 与今日屏 `TodayScreen.tsx` 的请求拼装:
+//! 规则逐条对照前端 `domain/resolvedCoal.ts` 的 `resolveCoal` / `toEstimateCoal`,
+//! 与今日屏 `TodayScreen.tsx` 的请求拼装:
 //! - 已停用 (archived) 一票否决, 偏好拉不回来; 隐藏的滤掉; 未启用的滤掉
 //!   (默认只有 verified 启用, 偏好的 `enabled` 覆盖);
-//! - 化验项 = master + `props_override`; 价格 = `fob_override`/`frt_override` 优先;
-//!   偏好结构非法、数值非法、重名 (忽略大小写与全角空格) 的煤都不进求解;
-//! - 有出厂价和运费的进 `coals`; 缺价的进 `price_factor.extra_coals` (fob 缺记 0, frt 记 0),
-//!   并打开 `estimate_unpriced` 按估算价求解, 市场价取现货指数.
+//! - 化验项 = master + `props_override`; 偏好结构非法、数值非法、重名 (忽略大小写与
+//!   全角空格) 的煤都不进求解;
+//! - 单煤真实报价拿不到, 煤价一律按质量估算: 不读 master 的 fob/frt, 也不读偏好里旧版本
+//!   录过的价格; 所有煤进 `price_factor.extra_coals` (fob/frt 记 0), 打开 `estimate_unpriced`.
+//!   真实报价是在估算之后去谈的, 不进求解.
 //!
 //! 与网页的差异 (在 `notes` 里如实告诉调用方): 采购扣款模板只存在浏览器本地,
-//! 服务端拿不到, 所以不计买入侧扣款; 锚点煤涨跌推算 (旧报价现价化) 不做 ——
-//! 系统已不用报价, 全部按估算价.
+//! 服务端拿不到, 所以不计买入侧扣款.
 use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
@@ -55,14 +55,6 @@ fn normalize(name: &str) -> String {
 
 fn valid_number(value: &Value) -> Option<f64> {
     value.as_f64().filter(|x| x.is_finite() && *x >= 0.0)
-}
-
-/// 一个价格字段: 覆盖值非空就用覆盖值 (必须合法), 否则用 master. Err = 覆盖值非法.
-fn resolve_price(base: Option<&Value>, override_value: Option<&Value>) -> Result<Option<f64>, ()> {
-    match override_value.filter(|v| !v.is_null()) {
-        Some(v) => valid_number(v).map(Some).ok_or(()),
-        None => Ok(base.and_then(valid_number)),
-    }
 }
 
 /// 单煤解析. Ok(None) = 不参与 (停用/隐藏/未启用); Err = 数据非法, 同样不参与.
@@ -121,9 +113,8 @@ fn resolve_coal(entry: &Value, pref: Option<&Value>) -> Result<Option<Value>, ()
         }
     }
 
-    let fob = resolve_price(entry.get("fob"), pref.and_then(|p| p.get("fob_override")))?;
-    let frt = resolve_price(entry.get("frt"), pref.and_then(|p| p.get("frt_override")))?;
-    let mut coal = json!({ "name": name, "props": props, "fob": fob, "frt": frt });
+    // 不带报价: 核心按估算价并入煤池.
+    let mut coal = json!({ "name": name, "props": props, "fob": 0.0, "frt": 0.0 });
     // 煤种、形态、地区不进 LP, 估价按它们逐层对标基准.
     for key in ["coal_type", "form", "region"] {
         if let Some(text) = entry.get(key).and_then(Value::as_str) {
@@ -159,8 +150,7 @@ pub fn build(
     }
     let excluded: Vec<String> = options.exclude.iter().map(|n| normalize(n)).collect();
 
-    let mut lp = Vec::new();
-    let mut unpriced = Vec::new();
+    let mut estimated = Vec::new();
     let mut skipped_invalid = Vec::new();
     for entry in entries {
         let Some(name) = entry.get("name").and_then(Value::as_str) else {
@@ -171,23 +161,18 @@ pub fn build(
             continue;
         }
         match resolve_coal(entry, prefs.get(name)) {
-            Ok(Some(coal)) => {
-                if coal["fob"].is_number() && coal["frt"].is_number() {
-                    lp.push(coal);
-                } else {
-                    let mut extra = coal.clone();
-                    extra["fob"] = json!(coal["fob"].as_f64().unwrap_or(0.0));
-                    extra["frt"] = json!(0.0);
-                    unpriced.push(extra);
-                }
-            }
+            Ok(Some(coal)) => estimated.push(coal),
             Ok(None) => {}
             Err(()) => skipped_invalid.push(name.to_string()),
         }
     }
 
-    let price_factor = master.get("price_factor").filter(|v| v.is_object());
-    if lp.is_empty() && (price_factor.is_none() || unpriced.is_empty()) {
+    let mut factor = master
+        .get("price_factor")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or("缺少估价参数 (price_factor), 无法估算煤价")?;
+    if estimated.is_empty() {
         return Err("没有可参与求解的煤: 请在煤池启用煤种".into());
     }
 
@@ -203,31 +188,26 @@ pub fn build(
     };
 
     let mut request = json!({
-        "coals": lp,
+        "coals": [],
         "specs": specs,
         "total_quantity": options.total_quantity.unwrap_or(storage.quantity),
         "shovel_tons": storage.shovel_tons.unwrap_or(crate::database::DEFAULT_SHOVEL_TONS),
         "truncate_decimal": true,
     });
-    if let Some(factor) = price_factor {
-        let mut factor = factor.clone();
-        let object = factor.as_object_mut().expect("已判定为对象");
-        for key in crate::benchmarks::MASTER_ONLY_KEYS {
-            object.remove(key);
-        }
-        if !market.benchmarks.is_empty() {
-            object.insert("benchmarks".into(), json!(market.benchmarks));
-        } else if let Some(price) = market.market_price {
-            object.insert("market_price".into(), json!(price));
-        }
-        object.insert("extra_coals".into(), Value::Array(unpriced));
-        object.insert("estimate_unpriced".into(), json!(true));
-        request["price_factor"] = factor;
+    for key in crate::benchmarks::MASTER_ONLY_KEYS {
+        factor.remove(key);
     }
-    match &options.fixed_ratios {
-        Some(ratios) => request["fixed_ratios"] = Value::Object(ratios.clone()),
-        // 估算价不准时配方靠不靠得住: 翻转门槛 + 更稳的配方 (验算模式不需要).
-        None => request["price_robustness"] = json!({}),
+    if !market.benchmarks.is_empty() {
+        factor.insert("benchmarks".into(), json!(market.benchmarks));
+    } else if let Some(price) = market.market_price {
+        factor.insert("market_price".into(), json!(price));
+    }
+    factor.insert("extra_coals".into(), Value::Array(estimated));
+    factor.insert("estimate_unpriced".into(), json!(true));
+    request["price_factor"] = Value::Object(factor);
+    // 不带 price_robustness: 今日页已不做估价可靠度分析, 这里与网页一致.
+    if let Some(ratios) = &options.fixed_ratios {
+        request["fixed_ratios"] = Value::Object(ratios.clone());
     }
 
     let mut notes = Vec::new();
@@ -241,9 +221,7 @@ pub fn build(
         notes.push("采购扣款模板只存在浏览器, 本次未计买入侧扣款".into());
     }
     if market.benchmarks.is_empty() && market.market_price.is_none() {
-        notes.push(
-            "没有基准报价, 现货指数也取不到, 市场价改由煤池报价反推 (没有报价则估不出价)".into(),
-        );
+        notes.push("没有基准报价, 现货指数也取不到, 估不出煤价".into());
     }
     Ok(TodayRequest {
         request,
@@ -306,16 +284,18 @@ mod tests {
         )
         .unwrap();
         let req = &built.request;
-        assert_eq!(names(&req["coals"]), ["有价"]);
-        // 无价煤: fob 记 0, 运费也记 0 (出厂口径), 按估算价求解
+        // 煤价一律按估算: 求解煤池为空, 所有启用的煤进 extra_coals, master 里的 fob/frt 不带.
+        assert_eq!(req["coals"], json!([]));
         assert_eq!(
             req["price_factor"]["extra_coals"],
-            json!([{"name": "无价", "props": {"S": 0.5}, "fob": 0.0, "frt": 0.0, "coal_type": "瘦煤",
-                    "form": "筛选精煤", "region": "山西临汾"}])
+            json!([
+                {"name": "有价", "props": {"S": 1.0}, "fob": 0.0, "frt": 0.0, "coal_type": "焦煤"},
+                {"name": "无价", "props": {"S": 0.5}, "fob": 0.0, "frt": 0.0, "coal_type": "瘦煤",
+                 "form": "筛选精煤", "region": "山西临汾"}
+            ])
         );
-        assert_eq!(req["coals"][0]["coal_type"], "焦煤");
-        // 求最优时顺带做价格稳健性分析
-        assert_eq!(req["price_robustness"], json!({}));
+        // 与网页一致: 不做价格稳健性分析
+        assert!(req.get("price_robustness").is_none());
         assert_eq!(req["price_factor"]["estimate_unpriced"], true);
         assert_eq!(req["price_factor"]["market_price"], 1907.0);
         assert!(req["price_factor"].get("description").is_none());
@@ -328,7 +308,8 @@ mod tests {
     #[test]
     fn test_overrides_hidden_and_exclude() {
         let prefs = json!({
-            "有价": {"fob_override": 900, "props_override": {"S": 1.2}},
+            // 旧版本录过的价格: 忽略, 不算坏数据
+            "有价": {"fob_override": 900, "frt_override": 24, "props_override": {"S": 1.2}},
             "无价": {"enabled": true, "hidden": true},
         });
         let built = build(
@@ -342,9 +323,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(built.request["coals"][0]["fob"], 900.0);
-        assert_eq!(built.request["coals"][0]["props"]["S"], 1.2);
-        assert_eq!(built.request["price_factor"]["extra_coals"], json!([]));
+        let extra = &built.request["price_factor"]["extra_coals"];
+        assert_eq!(names(extra), ["有价"]);
+        assert_eq!(extra[0]["fob"], 0.0);
+        assert_eq!(extra[0]["frt"], 0.0);
+        assert_eq!(extra[0]["props"]["S"], 1.2);
         assert_eq!(built.request["total_quantity"], 100.0);
         assert!(built.notes.iter().any(|n| n.contains("现货指数")));
 
@@ -361,19 +344,32 @@ mod tests {
     }
 
     #[test]
+    fn test_no_price_factor_is_an_error() {
+        let mut m = master();
+        m.as_object_mut().unwrap().remove("price_factor");
+        let built = build(
+            &m,
+            &storage(json!({})),
+            &index_only(1907.0),
+            &TodayOptions::default(),
+        );
+        assert!(built.unwrap_err().contains("估价参数"));
+    }
+
+    #[test]
     fn test_invalid_and_duplicate_coals_skipped() {
         let mut m = master();
         m["coals"].as_array_mut().unwrap().push(
             json!({"name": "有价 ", "status": "verified", "props": {"S": 1.0}, "fob": 1, "frt": 1}),
         );
-        let prefs = json!({"无价": {"enabled": true, "fob_override": -5}});
+        let prefs = json!({"无价": {"enabled": true, "props_override": {"S": -5}}});
         let built = build(
             &m,
             &storage(prefs),
             &index_only(1907.0),
             &TodayOptions::default(),
         );
-        // 有价与"有价 "重名整组排除, 无价覆盖价非法 → 无煤可解
+        // 有价与"有价 "重名整组排除, 无价覆盖的化验值非法 → 无煤可解
         assert!(built.is_err());
     }
 

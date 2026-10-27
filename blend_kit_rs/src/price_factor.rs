@@ -52,7 +52,7 @@ pub(crate) fn with_estimated_prices(
         return Ok(None);
     };
     let Some(market) = eval.market else {
-        return Err("无报价的煤要按估算价求解, 但没有市场价 (也没有可反推的报价), 估不出价".into());
+        return Err("没有基准报价, 也没有市场价, 估不出煤价".into());
     };
     let mut priced = request.clone();
     let mut count = 0;

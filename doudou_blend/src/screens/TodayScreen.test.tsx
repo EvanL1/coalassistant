@@ -19,7 +19,6 @@ const mocks = vi.hoisted(() => ({
   loadMaster: vi.fn(),
   setQuantity: vi.fn(),
   writeText: vi.fn(),
-  fetchCoalIndexRatioSince: vi.fn(),
   fetchLatestCoalIndex: vi.fn(),
   fetchBenchmarks: vi.fn(),
   fetchMcci: vi.fn(),
@@ -28,7 +27,6 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../coal_index", () => ({
-  fetchCoalIndexRatioSince: mocks.fetchCoalIndexRatioSince,
   fetchLatestCoalIndex: mocks.fetchLatestCoalIndex,
 }));
 
@@ -59,6 +57,19 @@ vi.mock("../storage", () => ({
   setQuantity: mocks.setQuantity,
 }));
 
+/** 估价参数: 单煤不带报价, 煤价一律按它估. */
+const basePriceFactor = {
+  adjusts: [
+    {
+      indicator: "S",
+      direction: "Upper" as const,
+      base: 1.3,
+      premium_rate: 150,
+      discount_rate: 250,
+    },
+  ],
+};
+
 const master: CoalMaster = {
   version: "test",
   updated_at: "2026-07-17",
@@ -72,10 +83,11 @@ const master: CoalMaster = {
       name: "测试煤",
       status: "verified",
       props: { S: 0.5 },
-      fob: 900,
-      frt: 100,
+      fob: null,
+      frt: null,
     },
   ],
+  price_factor: basePriceFactor,
 };
 
 function deferred<T>() {
@@ -139,8 +151,6 @@ beforeEach(() => {
   });
   mocks.loadMaster.mockResolvedValue(master);
   mocks.writeText.mockResolvedValue(undefined);
-  mocks.fetchCoalIndexRatioSince.mockReset();
-  mocks.fetchCoalIndexRatioSince.mockResolvedValue(null);
   mocks.fetchLatestCoalIndex.mockReset();
   mocks.fetchLatestCoalIndex.mockResolvedValue(null);
   mocks.fetchBenchmarks.mockReset();
@@ -414,12 +424,8 @@ describe("TodayScreen 求解快照", () => {
   });
 });
 
-describe("TodayScreen 报价时效提示", () => {
-  /**
-   * 回归: 早先只在"锚点推算生效后"才显示说明, 而真正危险的是没推算的默认态 ——
-   * 卡片印着两位小数的到厂价和总额, 底下是几十天前的报价, 界面却一言不发.
-   */
-  it("没有锚点推算时也必须显示报价日与未校正提示", async () => {
+describe("TodayScreen 只按估算价", () => {
+  it("不再提示报价时效, 也不按现货指数推算旧报价", async () => {
     mocks.getBackend.mockResolvedValue({
       solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
       saveHistory: vi.fn(),
@@ -428,39 +434,10 @@ describe("TodayScreen 报价时效提示", () => {
     render(<TodayScreen onNavigate={vi.fn()} />);
     await screen.findByText("1000", { selector: ".cost-int" });
 
-    const note = await screen.findByText(/报价停留在 2026-07-17/);
-    expect(note.textContent).toContain("未按市场校正");
-    expect(note.className).toContain("cost-warn");
-  });
-
-  it("拿到现货指数比例时补一条参考估算, 主显示仍是实际求解值", async () => {
-    mocks.fetchCoalIndexRatioSince.mockResolvedValue(1.152);
-    mocks.getBackend.mockResolvedValue({
-      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
-      saveHistory: vi.fn(),
-    });
-
-    render(<TodayScreen onNavigate={vi.fn()} />);
-    await screen.findByText("1000", { selector: ".cost-int" });
-
-    // fob 900 * 1.152 + frt 100 = 1136.8 -> 1137; 运费不参与漂移
-    const estimate = await screen.findByText(/随焦煤现货指数/);
-    expect(estimate.textContent).toContain("+15.2%");
-    expect(estimate.textContent).toContain("1137");
-  });
-
-  it("现货指数拿不到时只显示时效提示, 不编造估算", async () => {
-    mocks.fetchCoalIndexRatioSince.mockResolvedValue(null);
-    mocks.getBackend.mockResolvedValue({
-      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
-      saveHistory: vi.fn(),
-    });
-
-    render(<TodayScreen onNavigate={vi.fn()} />);
-    await screen.findByText("1000", { selector: ".cost-int" });
-    await screen.findByText(/报价停留在 2026-07-17/);
-
+    expect(screen.queryByText(/报价停留在/)).toBeNull();
     expect(screen.queryByText(/随焦煤现货指数/)).toBeNull();
+    // 参与求解的煤数 = 启用的煤 (全部按估算价), 不再是"有报价的煤"
+    expect(screen.getByText(/参与求解 1 种煤/)).toBeTruthy();
   });
 });
 
@@ -622,8 +599,8 @@ describe("TodayScreen 采购条款单次扫描 (BLOCKING 1+2: 一次算, 两处�
 
     const request = JSON.parse(
       backend.solveJson.mock.calls[0][0] as string,
-    ) as { coals: SentCoal[] };
-    const coal = request.coals.find((c) => c.name === "测试煤");
+    ) as { price_factor: { extra_coals: SentCoal[] } };
+    const coal = request.price_factor.extra_coals.find((c) => c.name === "测试煤");
 
     // 这里只能验证"字段正确送到了请求里" —— purchase_adjust_per_ton 是不是
     // 真的非零是 Rust 求解器(blend_kit)算出来的, 不在前端测试覆盖范围内.
@@ -648,8 +625,8 @@ describe("TodayScreen 采购条款单次扫描 (BLOCKING 1+2: 一次算, 两处�
 
     const request = JSON.parse(
       backend.solveJson.mock.calls[0][0] as string,
-    ) as { coals: SentCoal[] };
-    const coal = request.coals.find((c) => c.name === "测试煤");
+    ) as { price_factor: { extra_coals: SentCoal[] } };
+    const coal = request.price_factor.extra_coals.find((c) => c.name === "测试煤");
 
     expect(coal?.purchase_terms).toBeUndefined();
   });
@@ -792,33 +769,24 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     },
   ];
 
-  it("master 有 price_factor 时求解请求带上它, 没有时不带", async () => {
-    mocks.loadMaster.mockResolvedValue({ ...master, price_factor: priceFactor });
-    const backend = {
-      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
-      saveHistory: vi.fn(),
-    };
+  it("master 没有估价参数时不求解, 说明原因", async () => {
+    mocks.loadMaster.mockResolvedValue({ ...master, price_factor: null });
+    const backend = { solveJson: vi.fn(), saveHistory: vi.fn() };
     mocks.getBackend.mockResolvedValue(backend);
     render(<TodayScreen onNavigate={vi.fn()} />);
-    await screen.findByText("今日配方");
-    const sent = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
-    expect(sent.price_factor.adjusts).toEqual(priceFactor.adjusts);
-    cleanup();
-
-    mocks.loadMaster.mockResolvedValue(master);
-    backend.solveJson.mockClear();
-    render(<TodayScreen onNavigate={vi.fn()} />);
-    await screen.findByText("今日配方");
-    const plain = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
-    expect("price_factor" in plain).toBe(false);
+    expect(await screen.findByText(/缺少估价参数/)).toBeTruthy();
+    expect(backend.solveJson).not.toHaveBeenCalled();
   });
 
-  it("没报价的煤只进 price_factor.extra_coals, 不进求解煤池", async () => {
+  it("所有煤只进 price_factor.extra_coals 按估算价求解; master 与旧偏好里的价格都不带", async () => {
+    mocks.coalPrefs.value = {
+      测试煤: { enabled: true, fob_override: 1_200, frt_override: 24 } as CoalPrefs[string],
+    };
     mocks.loadMaster.mockResolvedValue({
       ...master,
       coals: [
         ...master.coals,
-        { name: "无价煤", status: "verified", props: { S: 0.8 }, fob: null, frt: 50 },
+        { name: "带价煤", status: "verified", props: { S: 0.8 }, fob: 1_500, frt: 50 },
       ],
       price_factor: priceFactor,
     });
@@ -830,9 +798,10 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     render(<TodayScreen onNavigate={vi.fn()} />);
     await screen.findByText("今日配方");
     const sent = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
-    expect(sent.coals.map((c: { name: string }) => c.name)).toEqual(["测试煤"]);
+    expect(sent.coals).toEqual([]);
     expect(sent.price_factor.extra_coals).toEqual([
-      { name: "无价煤", props: { S: 0.8 }, fob: 0, frt: 0 },
+      { name: "测试煤", props: { S: 0.5 }, fob: 0, frt: 0 },
+      { name: "带价煤", props: { S: 0.8 }, fob: 0, frt: 0 },
     ]);
     // 说明文字与服务端配置 (指数序列) 不进求解请求, 与服务端去掉的字段一致.
     expect("description" in sent.price_factor).toBe(false);
@@ -915,11 +884,11 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     expect(sent.price_factor.extra_coals[0].coal_type).toBe("瘦煤");
   });
 
-  it("全池无报价且没有价格因子时, 仍提示无可求解的煤", async () => {
+  it("一种煤都没启用时, 提示无可求解的煤", async () => {
     mocks.loadMaster.mockResolvedValue({
       ...master,
       coals: [
-        { name: "无价煤", status: "active", props: { S: 0.8 }, fob: null, frt: 50 },
+        { name: "无价煤", status: "active", props: { S: 0.8 }, fob: null, frt: null },
       ],
     });
     const backend = { solveJson: vi.fn(), saveHistory: vi.fn() };
