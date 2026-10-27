@@ -10,7 +10,7 @@ import { changeOver, fetchMcci, lastYear, specText, staleDays } from "../mcci";
 import type { McciPoint, McciSeries } from "../types";
 
 /** 超过这么多个日历天没新值就提示 (周末 + 一天假期以内不算). */
-const STALE_AFTER_DAYS = 4;
+export const STALE_AFTER_DAYS = 4;
 const CHART_W = 120;
 const CHART_H = 28;
 /** 两端留白, 末端圆点与悬停圆点不被裁掉. */
@@ -24,7 +24,7 @@ const numCell = { ...cell, textAlign: "right" as const, whiteSpace: "nowrap" as 
 const shortDate = (date: string) => date.slice(5);
 
 /** 国内习惯: 红涨绿跌, 平盘中性. */
-function ChangeText({ pct }: { pct: number | null }) {
+export function ChangeText({ pct }: { pct: number | null }) {
   if (pct == null) return <span style={small}>—</span>;
   const rounded = Number(pct.toFixed(2));
   const color =
