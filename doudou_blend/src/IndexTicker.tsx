@@ -5,8 +5,10 @@
  * 界面不标数据来源. 停更超过几天时在值后标出数据日期. 没数据的品种不显示,
  * 全都没有 (离线、服务异常) 时整条不渲染. 只做展示, 不进任何求解逻辑.
  * 七个品种一行放不下, 用网格换行 (手机两列、不画走势; 宽屏自动排、带走势), 见 App.css.
+ * 每个品种可点开, 看完整的可交互走势 (IndexChartDialog).
  */
 import { useEffect, useState } from "react";
+import { IndexChartDialog } from "./IndexChartDialog";
 import { changeOver, fetchMcci, staleDays } from "./mcci";
 import { ChangeText, STALE_AFTER_DAYS } from "./screens/McciCard";
 import type { McciSeries } from "./types";
@@ -38,7 +40,7 @@ function Sparkline({ prices, color }: { prices: number[]; color: string }) {
   );
 }
 
-function SeriesItem({ series }: { series: McciSeries }) {
+function SeriesItem({ series, onOpen }: { series: McciSeries; onOpen: () => void }) {
   const points = series.points;
   const latest = points[points.length - 1];
   const pct = changeOver(points, 0);
@@ -49,7 +51,12 @@ function SeriesItem({ series }: { series: McciSeries }) {
   const stale = staleDays(latest.date) > STALE_AFTER_DAYS;
 
   return (
-    <div className="index-ticker-item">
+    <button
+      type="button"
+      className="index-ticker-item"
+      aria-label={`${series.type_name} 最新 ${latest.price.toFixed(0)}, 查看走势`}
+      onClick={onOpen}
+    >
       <span>{shortName(series.type_name)}</span>
       <span style={{ fontWeight: 700, fontSize: 14, color: "var(--c-text)" }}>
         {latest.price.toFixed(0)}
@@ -62,12 +69,13 @@ function SeriesItem({ series }: { series: McciSeries }) {
           color={color}
         />
       )}
-    </div>
+    </button>
   );
 }
 
 export function IndexTicker() {
   const [series, setSeries] = useState<McciSeries[] | null>(null);
+  const [open, setOpen] = useState<McciSeries | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -82,10 +90,13 @@ export function IndexTicker() {
   if (!series || series.length === 0) return null;
 
   return (
-    <div className="index-ticker">
-      {series.map((row) => (
-        <SeriesItem key={row.code} series={row} />
-      ))}
-    </div>
+    <>
+      <div className="index-ticker">
+        {series.map((row) => (
+          <SeriesItem key={row.code} series={row} onOpen={() => setOpen(row)} />
+        ))}
+      </div>
+      {open && <IndexChartDialog series={open} onClose={() => setOpen(null)} />}
+    </>
   );
 }

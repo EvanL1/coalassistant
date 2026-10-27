@@ -916,3 +916,28 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     expect(screen.queryByText("炼焦煤价格指数")).toBeNull();
   });
 });
+
+describe("TodayScreen 精简", () => {
+  it("不再请求价格稳健性, 也不显示估价可靠度卡; 解出来时不显示求解提示框", async () => {
+    const result = makeResult(1_000, 3_700);
+    result.warnings = ["剔除 兴家沟: 缺指标 胶质", "107 种煤无报价, 按分煤种基准估价求解"];
+    result.price_robustness = {
+      price_error: 124,
+      swings: [],
+      ask_first: [],
+    } as unknown as BlendResult["price_robustness"];
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    const request = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
+    expect(request).not.toHaveProperty("price_robustness");
+    expect(screen.queryByText("估价可靠度")).toBeNull();
+    expect(screen.queryByText("提示")).toBeNull();
+    expect(screen.queryByText(/剔除 兴家沟/)).toBeNull();
+  });
+});

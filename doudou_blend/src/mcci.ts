@@ -56,12 +56,17 @@ export function staleDays(latest: string, now: Date = new Date()): number {
   return today - dayNumber(latest);
 }
 
-/** 只留最新一天往前一年. */
-export function lastYear(points: McciPoint[]): McciPoint[] {
+/** 只留最新一天往前 days 个日历天 (按最新数据日算, 不按今天, 停更时不会一下子变空). */
+export function lastDays(points: McciPoint[], days: number): McciPoint[] {
   const last = points[points.length - 1];
   if (!last) return [];
-  const since = dayNumber(last.date) - 365;
+  const since = dayNumber(last.date) - days;
   return points.filter((point) => dayNumber(point.date) > since);
+}
+
+/** 只留最新一天往前一年. */
+export function lastYear(points: McciPoint[]): McciPoint[] {
+  return lastDays(points, 365);
 }
 
 /** 标准品指标, 如 "A10 V30 S1.8 G90 Mt10". */

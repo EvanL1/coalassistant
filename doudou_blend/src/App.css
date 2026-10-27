@@ -780,6 +780,121 @@ button {
   align-items: center;
   gap: 6px;
   white-space: nowrap;
+  /* 做成按钮可点开走势, 外观仍是一行文字 */
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  margin: 0 -4px;
+  border-radius: 6px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.index-ticker-item:hover {
+  background: var(--c-border);
+}
+
+.index-ticker-item:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 1px;
+}
+
+/* ========== 指数走势弹层 ========== */
+.index-chart-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.index-chart-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  font-size: 12px;
+  color: var(--c-text-3);
+}
+
+.index-chart-price {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--c-text);
+}
+
+.index-chart-ranges {
+  display: flex;
+  gap: 6px;
+}
+
+.index-chart-ranges button {
+  appearance: none;
+  border: 1px solid var(--c-border);
+  background: var(--c-card);
+  color: var(--c-text-2);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.index-chart-ranges button.active {
+  border-color: var(--c-primary);
+  color: var(--c-primary);
+  font-weight: 600;
+}
+
+.index-chart {
+  position: relative;
+  width: 100%;
+  background: var(--c-card);
+  border-radius: 10px;
+}
+
+.index-chart svg {
+  display: block;
+  cursor: crosshair;
+  touch-action: pan-y;
+}
+
+.index-chart svg:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+.index-chart-axis {
+  font-size: 10px;
+  fill: var(--c-text-3);
+}
+
+.index-chart-tooltip {
+  position: absolute;
+  top: 8px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-card);
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--c-text-3);
+}
+
+.index-chart-tooltip strong {
+  font-size: 14px;
+  color: var(--c-text);
+}
+
+.index-chart-empty {
+  font-size: 12px;
+  color: var(--c-text-3);
 }
 
 .index-ticker-spark {
