@@ -88,10 +88,10 @@ describe("BenchmarkCard", () => {
     expect(screen.getAllByRole("button", { name: "删除" })).toHaveLength(1);
   });
 
-  it("钢铁网指数行单独标出, 推算过的价注明按哪条指数推的, 指数行不能删", async () => {
+  it("指数行单独标出 (不写来源), 推算过的价注明按哪条指数推的, 指数行不能删", async () => {
     mocks.fetchBenchmarks.mockResolvedValue([
       {
-        name: "钢铁网肥煤指数",
+        name: "肥煤指数",
         coal_type: "肥煤",
         props: { S: 1.8, A: 10, G: 90 },
         price: 2188.7,
@@ -107,12 +107,13 @@ describe("BenchmarkCard", () => {
         date: "2026-10-09",
         current_price: 2151,
         origin: "master",
-        index_source: "钢铁网 LJM_FM",
+        index_source: "肥煤指数",
       },
     ]);
     render(<BenchmarkCard />);
-    expect(await screen.findByText("钢铁网指数")).toBeTruthy();
-    expect(screen.getByText("按 钢铁网 LJM_FM")).toBeTruthy();
+    expect(await screen.findByText("指数")).toBeTruthy();
+    expect(screen.getByText("按 肥煤指数")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("钢铁网");
     expect(screen.queryAllByRole("button", { name: "删除" })).toHaveLength(0);
   });
 });

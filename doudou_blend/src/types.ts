@@ -215,7 +215,7 @@ export interface BenchmarkEntry extends Benchmark {
   id?: string;
   index_ratio?: number;
   index_date?: string;
-  /** 推算用的指数: "钢铁网 LJM_xx" (同煤种序列) 或 "CCP". */
+  /** 推算用的指数: 同煤种指数序列的名字, 或 "CCP". */
   index_source?: string;
   /** origin=mcci 时的钢铁网品种代码. */
   index_code?: string;

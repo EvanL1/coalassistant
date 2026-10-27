@@ -54,8 +54,6 @@ import {
   getUserCoals,
   setQuantity,
 } from "../storage";
-import { CoalValueCard } from "./CoalValueCard";
-import { McciCard } from "./McciCard";
 import { fetchBenchmarks, solverPriceFactor, toRequestBenchmark } from "../benchmarks";
 import { PriceRobustnessCard } from "./PriceRobustnessCard";
 import { coalTypeMap } from "../domain/coalTypes";
@@ -572,16 +570,12 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   }
   if (state.status === "error") {
     return (
-      <>
-        <div className="empty">
-          <p style={{ marginBottom: 16 }}>{state.error}</p>
-          <button className="btn btn-primary" onClick={() => runSolve(true)}>
-            重试
-          </button>
-        </div>
-        {/* 指数与求解成败无关; 缺价求解不了时正是要看参考价的时候. */}
-        <McciCard />
-      </>
+      <div className="empty">
+        <p style={{ marginBottom: 16 }}>{state.error}</p>
+        <button className="btn btn-primary" onClick={() => runSolve(true)}>
+          重试
+        </button>
+      </div>
     );
   }
 
@@ -944,10 +938,6 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </>
       )}
 
-      {/* 煤价对比与配方无关, 有解无解都显示 (没有 coal_values 时组件不渲染). */}
-      <CoalValueCard result={result} drifted={(price?.driftedCount ?? 0) > 0} />
-      {/* 估价对标的钢铁网指数: 规格、当天值与近一年走势. */}
-      <McciCard />
 
       {result.warnings.length > 0 && (
         <div

@@ -1,5 +1,5 @@
 /**
- * 钢铁网炼焦煤指数卡片: 每条序列一行 —— 品种与标准品指标、最新值与日期、涨跌、近一年走势.
+ * 炼焦煤价格指数卡片 (界面不标数据来源): 每条序列一行 —— 品种与标准品指标、最新值与日期、涨跌、近一年走势.
  *
  * 估价按同煤种的指数对标, 这张卡让人看得到"对标的是什么规格、今天多少、最近怎么走".
  * 走势是每行各自缩放的小图 (只看形状), 旁边写出一年高低, 幅度不靠目测.
@@ -10,7 +10,7 @@ import { changeOver, fetchMcci, lastYear, specText, staleDays } from "../mcci";
 import type { McciPoint, McciSeries } from "../types";
 
 /** 超过这么多个日历天没新值就提示 (周末 + 一天假期以内不算). */
-const STALE_AFTER_DAYS = 4;
+export const STALE_AFTER_DAYS = 4;
 const CHART_W = 120;
 const CHART_H = 28;
 /** 两端留白, 末端圆点与悬停圆点不被裁掉. */
@@ -24,7 +24,7 @@ const numCell = { ...cell, textAlign: "right" as const, whiteSpace: "nowrap" as 
 const shortDate = (date: string) => date.slice(5);
 
 /** 国内习惯: 红涨绿跌, 平盘中性. */
-function ChangeText({ pct }: { pct: number | null }) {
+export function ChangeText({ pct }: { pct: number | null }) {
   if (pct == null) return <span style={small}>—</span>;
   const rounded = Number(pct.toFixed(2));
   const color =
@@ -153,7 +153,7 @@ export function McciCard() {
 
   return (
     <div className="card" style={{ marginTop: 12 }}>
-      <div className="card-title">钢铁网炼焦煤指数</div>
+      <div className="card-title">炼焦煤价格指数</div>
       <div style={{ ...small, marginBottom: 8 }}>
         每个品种是一个固定规格的标准品 (山西, 元/湿吨, 现金). 估价按同煤种的指数对标,
         每晚 17:30 后更新.

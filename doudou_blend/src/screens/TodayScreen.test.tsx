@@ -889,12 +889,12 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     expect(backend.solveJson).not.toHaveBeenCalled();
   });
 
-  it("求解不了时也显示钢铁网指数卡 (缺价时最需要看参考价)", async () => {
+  it("今日页只放配方: 不列单矿煤价对比 (拿不到真实矿价), 也不重复放指数卡 (行情条已有)", async () => {
     mocks.fetchMcci.mockResolvedValue([
       {
         code: "LJM_FM",
         type_name: "肥煤",
-        name: "钢铁网肥煤指数",
+        name: "肥煤指数",
         coal_type: "肥煤",
         props: { S: 1.8 },
         points: [
@@ -903,65 +903,16 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
         ],
       },
     ]);
-    mocks.loadMaster.mockResolvedValue({
-      ...master,
-      coals: [
-        { name: "无价煤", status: "active", props: { S: 0.8 }, fob: null, frt: 50 },
-      ],
-    });
-    mocks.getBackend.mockResolvedValue({ solveJson: vi.fn(), saveHistory: vi.fn() });
-    render(<TodayScreen onNavigate={vi.fn()} />);
-    expect(await screen.findByText(/没有可参与求解的煤/)).toBeTruthy();
-    expect(await screen.findByText("钢铁网炼焦煤指数")).toBeTruthy();
-  });
-
-  it("结果带 coal_values 时显示煤价对比卡, 不带时不显示", async () => {
     const result = makeResult(1_000, 3_700);
     result.coal_values = coalValues;
     result.market_price = 768;
-    result.market_price_from_group = true;
     mocks.getBackend.mockResolvedValue({
       solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
       saveHistory: vi.fn(),
     });
     render(<TodayScreen onNavigate={vi.fn()} />);
     await screen.findByText("今日配方");
-    expect(screen.getByText("煤价对比 (按质量)")).toBeTruthy();
-    expect(screen.getByText("偏贵 40")).toBeTruthy();
-    cleanup();
-
-    mocks.getBackend.mockResolvedValue({
-      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
-      saveHistory: vi.fn(),
-    });
-    render(<TodayScreen onNavigate={vi.fn()} />);
-    await screen.findByText("今日配方");
     expect(screen.queryByText("煤价对比 (按质量)")).toBeNull();
-  });
-
-  it("无解时也显示煤价对比卡", async () => {
-    const infeasible: BlendResult = {
-      ok: false,
-      reason: "约束冲突, LP 不可行",
-      infeasible_bounds: [],
-      recipe: {},
-      cost: null,
-      orders: [],
-      indicator_check: [],
-      warnings: [],
-      quality_status: "NeedsReview",
-      coal_values: coalValues.map((v) => ({ ...v, gap: -15 })),
-      market_price: 2000,
-      market_price_from_group: false,
-    };
-    mocks.getBackend.mockResolvedValue({
-      solveJson: vi.fn().mockResolvedValue(JSON.stringify(infeasible)),
-      saveHistory: vi.fn(),
-    });
-    render(<TodayScreen onNavigate={vi.fn()} />);
-    await screen.findByText("✗ 不可行");
-    expect(screen.getByText("煤价对比 (按质量)")).toBeTruthy();
-    expect(screen.getByText("划算 15")).toBeTruthy();
-    expect(screen.getByText(/\(指定\)/)).toBeTruthy();
+    expect(screen.queryByText("炼焦煤价格指数")).toBeNull();
   });
 });

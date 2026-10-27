@@ -765,6 +765,38 @@ button {
 }
 
 /* ========== Tablet / Web ========== */
+/* 行情窄条 (炼焦煤价格指数): 手机两列、不画走势; 宽屏自动排、带走势. 七个品种不横向滚动, 一眼看全. */
+.index-ticker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  padding: 6px 2px;
+  font-size: 12px;
+  color: var(--c-text-3);
+}
+
+.index-ticker-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.index-ticker-spark {
+  display: none;
+}
+
+@media (min-width: 720px) {
+  .index-ticker {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 6px 16px;
+  }
+
+  .index-ticker-spark {
+    display: block;
+  }
+}
+
 @media (min-width: 720px) {
   .app {
     max-width: 760px;

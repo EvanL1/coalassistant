@@ -19,7 +19,7 @@ afterEach(() => {
 const fat = {
   code: "LJM_FM",
   type_name: "肥煤",
-  name: "钢铁网肥煤指数",
+  name: "肥煤指数",
   coal_type: "肥煤",
   form: "精煤",
   region: "山西",
@@ -38,6 +38,9 @@ describe("McciCard", () => {
     render(<McciCard />);
     expect(await screen.findByText("肥煤")).toBeTruthy();
     expect(screen.getByText("A10 V30 S1.8 G90 Mt10")).toBeTruthy();
+    // 界面不标数据来源.
+    expect(screen.getByText("炼焦煤价格指数")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("钢铁网");
     expect(screen.getByText("2200")).toBeTruthy();
     expect(screen.getByText("▲+0.52%")).toBeTruthy();
     expect(screen.getByText("10-26")).toBeTruthy();
@@ -72,7 +75,7 @@ describe("McciCard", () => {
     vi.useFakeTimers({ now: new Date("2026-11-05T20:00:00+08:00"), toFake: ["Date"] });
     mocks.fetchMcci.mockResolvedValue([
       fat,
-      { ...fat, code: "LJM_QM", type_name: "气煤", name: "钢铁网气煤指数", points: [] },
+      { ...fat, code: "LJM_QM", type_name: "气煤", name: "气煤指数", points: [] },
     ]);
     render(<McciCard />);
     expect(await screen.findByText("已 10 天未更新")).toBeTruthy();
