@@ -24,6 +24,7 @@ mod admin;
 mod api_key;
 mod benchmarks;
 mod coal_index;
+mod coal_prices;
 mod database;
 mod master_data;
 mod mcci;
@@ -54,7 +55,8 @@ pub async fn app(public_dir: PathBuf) -> Router {
     if let Some(pool) = database.clone() {
         let master: serde_json::Value =
             serde_json::from_str(blend_kit::master_json()).unwrap_or_default();
-        mcci::spawn_daily(pool, &master);
+        mcci::spawn_daily(pool.clone(), &master);
+        coal_prices::spawn_hourly(pool);
     }
     app_with_state(
         public_dir,
@@ -228,6 +230,7 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         .route("/api/auth/logout", post(logout))
         .route("/api/solve", post(solve))
         .route("/api/price", post(benchmarks::estimate))
+        .route("/api/coal-prices", get(coal_prices::list))
         .route("/api/benchmarks", get(benchmarks::list))
         .route("/api/mcci", get(mcci::list))
         .route("/api/admin/benchmarks", post(benchmarks::create))
@@ -446,17 +449,27 @@ async fn master(State(state): State<AppState>, headers: HeaderMap) -> Response {
 /// 基线 (编译期嵌入, 进 git) + 覆盖层 (PG, 由数据更新接口写入).
 /// 没连库或读失败时退回纯基线 —— 煤库能少几个补充指标, 但不能整个不可用.
 async fn merged_master_json(state: &AppState) -> std::borrow::Cow<'static, str> {
-    if let Some(pool) = state.database.as_ref() {
-        match database::list_coal_overrides(pool).await {
-            Ok(overrides) if !overrides.is_empty() => match master_data::merge(&overrides) {
-                Ok(merged) => return merged.into(),
-                Err(error) => tracing::error!(%error, "煤库覆盖层合并失败, 退回基线"),
-            },
-            Ok(_) => {}
-            Err(error) => tracing::error!(%error, "读取煤库覆盖层失败, 退回基线"),
+    merged_master_json_from_pool(state.database.as_ref())
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "读取或合并煤库覆盖层失败, 退回基线");
+            blend_kit::master_json().into()
+        })
+}
+
+/// 快照生成必须知道读库是否成功, 不能把降级基线写成当天的全量快照.
+async fn merged_master_json_from_pool(
+    pool: Option<&PgPool>,
+) -> Result<std::borrow::Cow<'static, str>, String> {
+    if let Some(pool) = pool {
+        let overrides = database::list_coal_overrides(pool)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !overrides.is_empty() {
+            return master_data::merge(&overrides).map(Into::into);
         }
     }
-    blend_kit::master_json().into()
+    Ok(blend_kit::master_json().into())
 }
 
 async fn version(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1177,6 +1190,31 @@ mod tests {
                 "admin-session-token-0123456789abcdef",
             ),
         )
+    }
+
+    #[tokio::test]
+    async fn test_coal_prices_requires_login_and_database() {
+        for (token, expected) in [
+            ("forged", StatusCode::UNAUTHORIZED),
+            ("test-session-token", StatusCode::SERVICE_UNAVAILABLE),
+            (
+                "admin-session-token-0123456789abcdef",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let response = test_app()
+                .oneshot(session_request(
+                    "GET",
+                    "/api/coal-prices",
+                    token,
+                    Body::empty(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
+            assert_eq!(body["ok"], false);
+        }
     }
 
     /// 未配置管理员的应用 (对应 ADMIN_* 缺失).

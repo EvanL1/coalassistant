@@ -83,7 +83,7 @@ pub(crate) fn configured_series(master: &Value) -> Vec<Series> {
         .unwrap_or_default()
 }
 
-fn beijing() -> FixedOffset {
+pub(crate) fn beijing() -> FixedOffset {
     FixedOffset::east_opt(8 * 3600).expect("UTC+8 是合法时区")
 }
 

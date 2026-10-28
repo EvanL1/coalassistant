@@ -122,9 +122,12 @@ function collectSourceFiles(directory) {
 const rustModelSource = readRepositoryFile("blend_kit_rs/src/model.rs");
 const rustSeedSource = readRepositoryFile("blend_kit_rs/src/seed.rs");
 const rustPetrographySource = readRepositoryFile("blend_kit_rs/src/petrography.rs");
+const rustCoalPricesSource = readRepositoryFile("blend_kit_server/src/coal_prices.rs");
 const typescriptSource = readRepositoryFile("doudou_blend/src/types.ts");
 
 const sharedStructs = [
+  [rustCoalPricesSource, "CoalPriceEntry", "CoalPriceEntry"],
+  [rustCoalPricesSource, "CoalPriceSnapshot", "CoalPriceSnapshot"],
   [rustModelSource, "Coal", "Coal"],
   [rustModelSource, "AcceptanceRule", "AcceptanceRule"],
   [rustModelSource, "Spec", "Spec"],
