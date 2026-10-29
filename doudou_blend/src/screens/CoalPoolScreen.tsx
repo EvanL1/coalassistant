@@ -9,7 +9,9 @@ import {
 } from "../domain/resolvedCoal";
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL } from "../types";
-import type { CoalMaster, CoalStatus, MasterCoalEntry } from "../types";
+import type { CoalMaster, CoalPriceSnapshot, CoalStatus, CoalValue, MasterCoalEntry } from "../types";
+import { cardPrice, coalsToEstimate, estimateLive, fetchCoalPrices, type CardPrice } from "../coalPrices";
+import { CoalPriceLine } from "../CoalPriceLine";
 import { CoalEditor } from "../CoalEditor";
 import { NewCoalDialog } from "../NewCoalDialog";
 import { coalTag } from "../domain/coalTypes";
@@ -43,6 +45,12 @@ export function CoalPoolScreen() {
   const [master, setMaster] = useState<CoalMaster | null>(null);
   const [prefs, setPrefs] = useState<CoalPrefs>({});
   const [userCoals, setUserCoals] = useState<MasterCoalEntry[]>([]);
+  const [snapshot, setSnapshot] = useState<CoalPriceSnapshot | null>(null);
+  const [snapshotLoaded, setSnapshotLoaded] = useState(false);
+  const [live, setLive] = useState<{
+    coals: ResolvedCoal[];
+    values: Map<string, CoalValue> | null;
+  } | null>(null);
   const [filter, setFilter] = useState<CoalStatus | "all" | "enabled" | "hidden">("all");
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<ResolvedCoal | null>(null);
@@ -52,7 +60,13 @@ export function CoalPoolScreen() {
   );
 
   useEffect(() => {
-    loadMaster().then(setMaster).catch(console.error);
+    let active = true;
+    loadMaster().then((value) => { if (active) setMaster(value); }).catch(console.error);
+    fetchCoalPrices().then((value) => {
+      if (!active) return;
+      setSnapshot(value);
+      setSnapshotLoaded(true);
+    });
     setPrefs(getCoalPrefs());
     setUserCoals(getUserCoals());
 
@@ -64,6 +78,7 @@ export function CoalPoolScreen() {
     window.addEventListener("doudou:user_coals_changed", onUserCoals);
     window.addEventListener(PENALTY_TEMPLATE_EVENT, onTemplate);
     return () => {
+      active = false;
       window.removeEventListener("doudou:prefs_changed", onPrefs);
       window.removeEventListener("doudou:user_coals_changed", onUserCoals);
       window.removeEventListener(PENALTY_TEMPLATE_EVENT, onTemplate);
@@ -81,6 +96,17 @@ export function CoalPoolScreen() {
       resolveCoalPool(master?.coals ?? [], userCoals, prefs),
     [master, prefs, userCoals],
   );
+  useEffect(() => {
+    if (!master || !snapshotLoaded) return;
+    let active = true;
+    // 快照到齐后, 修改煤与缺快照的煤合成一次请求, 停用煤也参加.
+    estimateLive(coalsToEstimate(allCoals, snapshot)).then((values) => {
+      if (active) setLive({ coals: allCoals, values });
+    });
+    return () => { active = false; };
+  }, [allCoals, master, snapshot, snapshotLoaded]);
+  // 当前化验值一变, 旧估价立即失效; 迟到的请求由 effect 清理函数丢弃.
+  const currentLive = live?.coals === allCoals ? live.values : null;
   const masterCoalNames = useMemo(
     () =>
       new Set(
@@ -140,6 +166,7 @@ export function CoalPoolScreen() {
             {hiddenCount > 0 && ` · 隐藏 ${hiddenCount}`}
             {" · 今日启用 "}
             {visibleCoals.filter(isEnabled).length} 种
+            {snapshot?.day && ` · 估价 ${snapshot.day.slice(5)}`}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -282,6 +309,7 @@ export function CoalPoolScreen() {
             <CoalCard
               key={`${coal.origin}:${coal.name}:${index}`}
               coal={coal}
+              price={cardPrice(coal, snapshot, currentLive)}
               onClick={() => setEditing(coal)}
             />
           ))}
@@ -340,9 +368,11 @@ function FilterChip({
 
 function CoalCard({
   coal,
+  price,
   onClick,
 }: {
   coal: ResolvedCoal;
+  price: CardPrice;
   onClick: () => void;
 }) {
   const PROP_ORDER_TOP = ["S", "A", "V", "G"];
@@ -428,6 +458,8 @@ function CoalCard({
           })}
         </div>
       )}
+
+      <CoalPriceLine price={price} />
 
       <div className="coal-status-row">
         <span className={`status-pill status-${coal.status}`}>

@@ -46,6 +46,8 @@ export interface ResolvedCoal {
   effectiveEnabled: boolean;
   hasOverrides: boolean;
   overriddenProps: Partial<Record<string, true>>;
+  /** 独立保留数据有效性, 不能被停用、隐藏或重名状态遮蔽. */
+  invalidOverride: boolean;
   readiness: CoalReadiness;
 }
 
@@ -159,6 +161,7 @@ export function resolveCoal(
     effectiveEnabled,
     hasOverrides,
     overriddenProps,
+    invalidOverride,
     readiness,
   };
 }

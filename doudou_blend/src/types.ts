@@ -261,6 +261,25 @@ export interface PriceResult {
   market_price?: number | null;
 }
 
+/** /api/coal-prices 的共享煤库日快照; 没有历史时省略 prev_price. */
+export interface CoalPriceEntry {
+  name: string;
+  price: number;
+  prev_price?: number;
+  points: number;
+  benchmark: string | null;
+  missing: string[];
+}
+
+/** 没有快照时 day 为 null, prev_day 与 computed_at 省略. */
+export interface CoalPriceSnapshot {
+  ok: boolean;
+  day: string | null;
+  prev_day?: string | null;
+  computed_at?: string;
+  prices: CoalPriceEntry[];
+}
+
 /** 煤价典型误差 (元/吨, 约等于平均绝对误差). */
 export interface PriceUncertainty {
   /** 估算价, 煤种没单列时. */

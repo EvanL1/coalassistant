@@ -233,14 +233,25 @@ fn stored_row(row: sqlx::postgres::PgRow) -> Result<Value, sqlx::Error> {
 /// 同煤种的指数序列推算到今天, 没有同煤种序列的按 CCP.
 /// 库读失败只记日志, 退回 master 的那一层 —— 估价不该因为补录表坏了就停摆.
 pub(crate) async fn current(state: &AppState, master: &Value) -> Vec<Value> {
-    let (stored, history) = match &state.database {
+    current_from_pool(state.database.as_ref(), master).await.0
+}
+
+/// 保留交互接口逐层降级的结果, 同时把读库失败交给后台任务, 避免覆盖旧快照.
+pub(crate) async fn current_from_pool(
+    pool: Option<&PgPool>,
+    master: &Value,
+) -> (Vec<Value>, Option<String>) {
+    let mut read_error = None;
+    let (stored, history) = match pool {
         Some(pool) => {
             let stored = latest_stored(pool).await.unwrap_or_else(|error| {
                 tracing::error!(%error, "读取基准报价失败, 只用 master 默认值");
+                read_error = Some(error.to_string());
                 Vec::new()
             });
             let history = mcci::history(pool).await.unwrap_or_else(|error| {
                 tracing::error!(%error, "读取钢铁网指数失败, 不用指数基准");
+                read_error = Some(error.to_string());
                 HashMap::new()
             });
             (stored, history)
@@ -257,7 +268,7 @@ pub(crate) async fn current(state: &AppState, master: &Value) -> Vec<Value> {
     apply_drift(&mut merged, |benchmark| {
         drift_series(benchmark, &config, &history, ccp.as_deref())
     });
-    merged
+    (merged, read_error)
 }
 
 async fn master_value(state: &AppState) -> Value {
