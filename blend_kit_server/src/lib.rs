@@ -5,7 +5,7 @@ use std::time::Duration;
 use axum::{
     body::Body,
     extract::{Json, Path, State},
-    http::{header, HeaderMap, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
     Router,
@@ -16,7 +16,8 @@ use sqlx::PgPool;
 use subtle::ConstantTimeEq;
 use tower_http::{
     compression::CompressionLayer,
-    services::{ServeDir, ServeFile},
+    services::{fs::ServeFileSystemResponseBody, ServeDir, ServeFile},
+    set_header::SetResponseHeader,
     trace::TraceLayer,
 };
 
@@ -217,10 +218,24 @@ pub fn app_with_auth(public_dir: PathBuf, auth: AuthConfig) -> Router {
 }
 
 fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
+    // 不发 Cache-Control 时浏览器按 Last-Modified 自行估算缓存时长, 部署后几小时还在跑旧前端.
+    // 打包产物文件名带内容哈希, 成功的可以永久缓存; 页面每次向服务器确认 (没变就回 304).
+    let assets = SetResponseHeader::overriding(
+        ServeDir::new(public_dir.join("assets")),
+        header::CACHE_CONTROL,
+        |response: &Response<ServeFileSystemResponseBody>| {
+            let cache = HeaderValue::from_static("public, max-age=31536000, immutable");
+            response.status().is_success().then_some(cache)
+        },
+    );
     let index_file = public_dir.join("index.html");
-    let static_files = ServeDir::new(public_dir)
-        .append_index_html_on_directories(true)
-        .fallback(ServeFile::new(index_file));
+    let static_files = SetResponseHeader::overriding(
+        ServeDir::new(public_dir)
+            .append_index_html_on_directories(true)
+            .fallback(ServeFile::new(index_file)),
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
 
     Router::new()
         .route("/api/health", get(health))
@@ -264,6 +279,7 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         // MCP (手机 Agent): mcp 用途密钥, 只读 + 求解
         .route("/mcp", post(mcp_post).get(mcp_get))
         .route("/mcp/{key}", post(mcp_post_with_key).get(mcp_get))
+        .nest_service("/assets", assets)
         .fallback_service(static_files)
         .with_state(state)
         .layer(CompressionLayer::new())
@@ -2040,5 +2056,53 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_text(response).await, "<html>豆哥配煤</html>");
+    }
+
+    async fn static_response(uri: &str) -> Response {
+        let public_dir = tempdir().unwrap();
+        std::fs::write(public_dir.path().join("index.html"), "<html></html>").unwrap();
+        std::fs::create_dir(public_dir.path().join("assets")).unwrap();
+        std::fs::write(public_dir.path().join("assets/index-abc123.js"), "1").unwrap();
+        app_with_auth(
+            public_dir.path().to_path_buf(),
+            AuthConfig::new("tester", "secret", "test-session-token", false),
+        )
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+    }
+
+    fn cache_control(response: &Response) -> Option<&str> {
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .map(|value| value.to_str().unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_index_is_revalidated_after_every_deploy() {
+        for uri in ["/", "/index.html", "/history"] {
+            let response = static_response(uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(cache_control(&response), Some("no-cache"), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hashed_assets_cache_forever_but_missing_ones_do_not() {
+        let response = static_response("/assets/index-abc123.js").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            cache_control(&response),
+            Some("public, max-age=31536000, immutable")
+        );
+
+        // 上一版的资源已不在镜像里: 回 404, 不能把 index.html 当 JS 回, 也不能被长期缓存.
+        let response = static_response("/assets/index-old999.js").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_ne!(
+            cache_control(&response),
+            Some("public, max-age=31536000, immutable")
+        );
     }
 }
