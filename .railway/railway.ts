@@ -23,9 +23,9 @@ export default defineRailway(() => {
       // 重启策略取 Railway 默认的 ON_FAILURE (失败时重启)。不写 restartPolicyType:
       // 默认值在线上存为空, 显式写上会让 plan 每次都报一条 null → ON_FAILURE 的假差异.
       restartPolicyMaxRetries: 3,
-      // 无流量时休眠, 有请求再唤醒: 计算只在请求那一刻发生, 常驻内存不计费.
-      // 代价是休眠后的第一次访问要等几秒唤醒 (Rust 服务启动快, 主要是连数据库).
-      sleepApplication: true,
+      // 不休眠: 服务端有到点自己跑的后台任务 (每小时重算当天估价快照, 北京时间 17:30 后拉钢铁网指数),
+      // 休眠时进程停掉, 两者都不跑, 估价跟着停在旧指数上. 常驻只占约 9 MB 内存, 每月花费不到 1 美元.
+      sleepApplication: false,
     },
     env: {
       AUTH_USERNAME: preserve(),
