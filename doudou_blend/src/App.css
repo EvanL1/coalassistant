@@ -478,7 +478,7 @@ button {
   font-size: 12px;
   font-weight: 600;
 }
-.coal-prop.empty {
+.coal-prop-empty {
   border: 1px dashed var(--c-border);
   color: var(--c-text-3);
 }

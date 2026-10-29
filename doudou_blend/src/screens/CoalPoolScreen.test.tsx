@@ -126,3 +126,16 @@ describe("煤池卡片估价", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("煤池卡片指标格", () => {
+  it("缺值格不能带页面空状态的 empty 类, 否则被撑高", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => reply(snapshot)));
+    render(<CoalPoolScreen />);
+    await waitFor(() => expect(card("共享煤")).toBeTruthy());
+    const cell = [...card("共享煤").querySelectorAll(".coal-prop-label")]
+      .find((label) => label.textContent === "挥发")!.parentElement!;
+    expect(cell.textContent).toContain("—");
+    expect(cell.classList.contains("empty")).toBe(false);
+    expect(cell.classList.contains("coal-prop-empty")).toBe(true);
+  });
+});

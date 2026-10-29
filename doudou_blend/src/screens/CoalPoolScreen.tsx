@@ -423,7 +423,7 @@ function CoalCard({
             const v = coal.props[k];
             if (v == null)
               return (
-                <div key={k} className="coal-prop empty">
+                <div key={k} className="coal-prop coal-prop-empty">
                   <div className="coal-prop-label">{INDICATOR_LABEL[k]}</div>
                   <div className="coal-prop-value">—</div>
                 </div>
@@ -444,7 +444,7 @@ function CoalCard({
             const v = coal.props[k];
             if (v == null)
               return (
-                <div key={k} className="coal-prop empty">
+                <div key={k} className="coal-prop coal-prop-empty">
                   <div className="coal-prop-label">{INDICATOR_LABEL[k]}</div>
                   <div className="coal-prop-value">—</div>
                 </div>
