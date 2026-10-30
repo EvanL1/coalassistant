@@ -65,15 +65,18 @@ ALTER TABLE coal_price_daily
 ### `coal_prices.rs`: 补算
 
 - `write_snapshot` (实时, 当天整份删了重写) 写入的行 `source = 'live'`, 其余不变。
-- `backfill(pool) -> Result<BackfillReport, String>`:
-  1. 读合并煤库与 `load_inputs` **一次**, 后面每天复用;
+- `backfill(pool, today) -> Result<BackfillReport, String>`:
+  1. 读合并煤库与 `load_inputs` **一次**, 后面每天复用; 输入读不全 (库表或指数读库失败、CCP 取不到)
+     → 整轮不写, 下个小时重试 —— 补下去就定格了, 不能拿缺料的结果填;
   2. 范围: 起点 = `max(今天 − 400 天, 最早一条可用输入的日期)` (400 天即 `mcci::HISTORY_DAYS`, 与指数读库的窗口一致; 输入 = 指数各序列首日、master 与库表报价日),
      终点 = 昨天 (北京时间) —— **永远不碰今天**, 今天归实时快照管;
   3. 一条查询读出范围内已有的 `(day, name)`; 只对还有缺的那些天算: `snapshot_rows(master, as_of(day))`,
      只留缺的煤;
   4. 批量 `INSERT ... ON CONFLICT (day, name) DO NOTHING`, `source = 'backfill'` (按若干天一批的 UNNEST,
      不用一个大事务 —— 每批本身幂等, 中途失败下次接着补);
-  5. 某天估价失败 (`snapshot_rows` 返回 `Err`, 如那天一个基准都没有) → 跳过这天, 计入报告, 汇总记一条日志。
+  5. 某天 `as_of` 一个基准都没有 → 跳过这天 (不能交给 `snapshot_rows`: `fill_price_request` 在基准为空时会
+     退回 master 自带的基准, 那里有晚于这天的报价, 等于偷看未来); 某天估价失败 (`snapshot_rows` 返回 `Err`)
+     → 同样跳过; 跳过的天计入报告, 汇总记一条日志。
   - 估价是同步的 CPU 活 (约 368 天 × 一次 `estimate_json`), 放进 `tokio::task::spawn_blocking`, 不占异步线程。
 - 调度: 并进现有的 `spawn_hourly` 循环。每一轮先 `refresh` (实时, 卡片价优先), 再看"上次补算成功的北京日期"
   是不是今天, 不是就跑 `backfill` —— 即**启动时一次 + 每过零点一次**; 补算失败不记日期, 下个小时重试。
