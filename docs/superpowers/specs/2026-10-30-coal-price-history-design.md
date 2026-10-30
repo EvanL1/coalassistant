@@ -67,7 +67,7 @@ ALTER TABLE coal_price_daily
 - `write_snapshot` (实时, 当天整份删了重写) 写入的行 `source = 'live'`, 其余不变。
 - `backfill(pool) -> Result<BackfillReport, String>`:
   1. 读合并煤库与 `load_inputs` **一次**, 后面每天复用;
-  2. 范围: 起点 = `max(今天 − HISTORY_DAYS (400 天, 与 `mcci::history` 读库的窗口一致), 最早一条可用输入的日期)` (输入 = 指数各序列首日、master 与库表报价日),
+  2. 范围: 起点 = `max(今天 − 400 天, 最早一条可用输入的日期)` (400 天即 `mcci::HISTORY_DAYS`, 与指数读库的窗口一致; 输入 = 指数各序列首日、master 与库表报价日),
      终点 = 昨天 (北京时间) —— **永远不碰今天**, 今天归实时快照管;
   3. 一条查询读出范围内已有的 `(day, name)`; 只对还有缺的那些天算: `snapshot_rows(master, as_of(day))`,
      只留缺的煤;
