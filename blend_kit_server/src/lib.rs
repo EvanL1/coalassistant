@@ -246,6 +246,7 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         .route("/api/solve", post(solve))
         .route("/api/price", post(benchmarks::estimate))
         .route("/api/coal-prices", get(coal_prices::list))
+        .route("/api/coal-prices/history", get(coal_prices::history))
         .route("/api/benchmarks", get(benchmarks::list))
         .route("/api/mcci", get(mcci::list))
         .route("/api/admin/benchmarks", post(benchmarks::create))
@@ -1228,6 +1229,40 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), expected);
+            let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
+            assert_eq!(body["ok"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coal_price_history_checks_login_then_name_then_database() {
+        for (token, uri, expected) in [
+            (
+                "forged",
+                "/api/coal-prices/history?name=%E4%B8%B4%E5%8C%97",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "test-session-token",
+                "/api/coal-prices/history",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "test-session-token",
+                "/api/coal-prices/history?name=",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "test-session-token",
+                "/api/coal-prices/history?name=%E4%B8%B4%E5%8C%97",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let response = test_app()
+                .oneshot(session_request("GET", uri, token, Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{uri}");
             let body: Value = serde_json::from_str(&response_text(response).await).unwrap();
             assert_eq!(body["ok"], false);
         }

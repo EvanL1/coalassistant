@@ -280,6 +280,21 @@ export interface CoalPriceSnapshot {
   prices: CoalPriceEntry[];
 }
 
+/** /api/coal-prices/history 的一天: live = 当天实时快照定格, backfill = 事后按当天能拿到的指数与报价补算. */
+export interface CoalPricePoint {
+  day: string;
+  price: number;
+  benchmark: string | null;
+  source: "live" | "backfill";
+}
+
+/** 一种煤的历史估价, 按日升序; 煤库里没有这种煤时为空. */
+export interface CoalPriceHistory {
+  ok: boolean;
+  name: string;
+  points: CoalPricePoint[];
+}
+
 /** 煤价典型误差 (元/吨, 约等于平均绝对误差). */
 export interface PriceUncertainty {
   /** 估算价, 煤种没单列时. */

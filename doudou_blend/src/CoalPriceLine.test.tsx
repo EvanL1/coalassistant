@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CoalPriceLine } from "./CoalPriceLine";
 import type { CardPrice } from "./coalPrices";
 
@@ -28,4 +28,24 @@ describe("煤池估价行", () => {
     const { container } = render(<CoalPriceLine price={price} />);
     expect(container.textContent).toBe(expected);
   });
+  it("给了 onOpen 时是按钮, 点击只触发 onOpen 不冒泡; 文案不变", () => {
+    const onOpen = vi.fn();
+    const onCard = vi.fn();
+    const { getByRole } = render(
+      <div onClick={onCard}>
+        <CoalPriceLine name="临北" price={{ kind: "snapshot", price: 2214, change: 0, missing: [] }} onOpen={onOpen} />
+      </div>,
+    );
+    const button = getByRole("button", { name: "查看临北估价走势" });
+    expect(button.textContent).toBe("估价 2,214 元/吨  持平");
+    fireEvent.click(button);
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(onCard).not.toHaveBeenCalled();
+  });
+
+  it("估价不可用时即使给了 onOpen 也不是按钮", () => {
+    const { queryByRole } = render(<CoalPriceLine name="临北" price={{ kind: "unavailable" }} onOpen={() => {}} />);
+    expect(queryByRole("button")).toBeNull();
+  });
+
 });
