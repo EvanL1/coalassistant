@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CoalPoolScreen } from "./CoalPoolScreen";
 import { addUserCoal, setCoalPref } from "../storage";
@@ -137,5 +137,30 @@ describe("煤池卡片指标格", () => {
     expect(cell.textContent).toContain("—");
     expect(cell.classList.contains("empty")).toBe(false);
     expect(cell.classList.contains("coal-prop-empty")).toBe(true);
+  });
+});
+
+describe("煤池估价走势", () => {
+  it("点共享煤的估价行打开走势弹层, 不打开编辑器; Esc 关闭; 自建煤不可点", async () => {
+    addUserCoal({ name: "自建煤", status: "verified", props: { S: 1.4 } });
+    const history = { ok: true, name: "共享煤", points: [
+      { day: "2026-10-27", price: 2190.1, benchmark: "基准", source: "backfill" },
+      { day: "2026-10-28", price: 2202.4, benchmark: "基准", source: "live" },
+    ] };
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/coal-prices") return reply(snapshot);
+      if (url.startsWith("/api/coal-prices/history?")) return reply(history);
+      const { coals } = JSON.parse(init!.body as string) as { coals: Coal[] };
+      return reply({ ok: true, coal_values: coals.map((coal) => value(coal.name, 2180)) });
+    }));
+    render(<CoalPoolScreen />);
+    const open = await screen.findByRole("button", { name: "查看共享煤估价走势" });
+    await waitFor(() => expect(card("自建煤").textContent).toContain("估价 2,180 元/吨"));
+    expect(screen.queryByRole("button", { name: "查看自建煤估价走势" })).toBeNull();
+    fireEvent.click(open);
+    expect(await screen.findByRole("dialog", { name: "共享煤" })).toBeTruthy();
+    expect(screen.queryByLabelText(/保证值/)).toBeNull();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });

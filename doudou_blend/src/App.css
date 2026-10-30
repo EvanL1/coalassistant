@@ -887,6 +887,31 @@ button {
   color: var(--c-text-3);
 }
 
+.coal-price-line {
+  display: block;
+  width: 100%;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--c-text-2);
+  text-align: left;
+  cursor: pointer;
+}
+
+.coal-price-line::after {
+  content: " 走势 ›";
+  color: var(--c-text-3);
+}
+
+.price-chart-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--c-text-3);
+}
+
 .index-ticker-spark {
   display: none;
 }

@@ -65,8 +65,10 @@ benchmark whose props are the standard product in master `price_factor.index_ser
 `current_price` by the same-coal-type MCCI series (nearest S grade) when it can, else by CCP. CCP is index points
 (2017-01 = 1000) — never use it as a price. Master-only `price_factor` keys (`*_note`, `index_series`) are stripped before
 reaching the core (`MASTER_ONLY_KEYS`, mirrored in `doudou_blend/src/benchmarks.ts`).
-`blend_kit_server/src/coal_prices.rs` 在服务启动后每小时重算当天 (北京时间) 的共享煤库估价快照,
-`GET /api/coal-prices` 返回最新日与前一日价格; 煤池卡片据此显示估价与涨跌, 用户修改或新增的煤按当前值现算.
+`blend_kit_server/src/coal_prices.rs` 在服务启动后每小时重算当天 (北京时间) 的共享煤库估价快照, 并在启动时与每过零点
+按"当天能拿到的指数与报价" (`benchmarks::as_of`) 补算今天以前缺的 (日期, 煤) —— 存下就不改, 只补空 (`source` 区分
+live / backfill); `GET /api/coal-prices` 返回最新日与前一日价格, `GET /api/coal-prices/history?name=` 返回单煤全部历史;
+煤池卡片据此显示估价与涨跌, 点估价行看走势; 用户修改或新增的煤按当前值现算.
 `robustness.rs` is the opt-in price-robustness analysis (`BlendRequest.price_robustness`): prices are mostly
 estimates and the LP optimum is flat, so it re-solves with perturbed prices to report per-coal flip thresholds (how
 many 元 before ≥10% of tonnage moves, vs. that coal's price uncertainty from `price_factor.uncertainty`, keyed by

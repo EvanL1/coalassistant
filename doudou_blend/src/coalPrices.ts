@@ -1,5 +1,5 @@
 import type { ResolvedCoal } from "./domain/resolvedCoal";
-import type { Coal, CoalPriceSnapshot, CoalValue, PriceResult } from "./types";
+import type { Coal, CoalPriceHistory, CoalPriceSnapshot, CoalValue, PriceResult } from "./types";
 
 export type CardPrice =
   | { kind: "snapshot"; price: number; change: number | null; missing: string[] }
@@ -20,6 +20,30 @@ export async function fetchCoalPrices(): Promise<CoalPriceSnapshot | null> {
   }
 }
 
+export async function fetchCoalPriceHistory(name: string): Promise<CoalPriceHistory | null> {
+  try {
+    const response = await fetch(`/api/coal-prices/history?name=${encodeURIComponent(name)}`, {
+      credentials: "same-origin", cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const result = (await response.json()) as CoalPriceHistory;
+    return result?.ok === true && result.name === name && Array.isArray(result.points)
+      && result.points.every((point) => point
+        && typeof point.day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(point.day)
+        && Number.isFinite(point.price)
+        && (point.benchmark === null || typeof point.benchmark === "string")
+        && (point.source === "live" || point.source === "backfill"))
+      ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 历史按共享煤库记; 用户自己新增的煤 (哪怕同名) 没有自己的历史. */
+export function hasPriceHistory(coal: ResolvedCoal, snapshot: CoalPriceSnapshot | null): boolean {
+  return coal.origin !== "user" && !!snapshot?.prices.some((entry) => entry.name === coal.name);
+}
+
 export async function estimateLive(coals: Coal[]): Promise<Map<string, CoalValue> | null> {
   if (coals.length === 0) return new Map();
   try {
@@ -36,7 +60,7 @@ export async function estimateLive(coals: Coal[]): Promise<Map<string, CoalValue
   }
 }
 
-function isModified(coal: ResolvedCoal): boolean {
+export function isModified(coal: ResolvedCoal): boolean {
   return coal.origin === "user" || Object.keys(coal.overriddenProps).length > 0;
 }
 

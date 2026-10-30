@@ -57,7 +57,7 @@ const BACKFILL_DAYS: u64 = 366;
 /// 历史最早一天晚于"回填起点 + 这么多天"就算没回填完 (年初几天本来就是节假日).
 const BACKFILL_SLACK_DAYS: u64 = 30;
 /// 推算旧报价只用得着这么久的历史.
-const HISTORY_DAYS: u64 = 400;
+pub(crate) const HISTORY_DAYS: u64 = 400;
 
 /// 要拉的一条序列: 钢铁网的品种代码与品种名 (接口两个都要).
 #[derive(Debug, Clone, PartialEq)]

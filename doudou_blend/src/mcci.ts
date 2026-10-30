@@ -57,7 +57,7 @@ export function staleDays(latest: string, now: Date = new Date()): number {
 }
 
 /** 只留最新一天往前 days 个日历天 (按最新数据日算, 不按今天, 停更时不会一下子变空). */
-export function lastDays(points: McciPoint[], days: number): McciPoint[] {
+export function lastDays<T extends McciPoint>(points: T[], days: number): T[] {
   const last = points[points.length - 1];
   if (!last) return [];
   const since = dayNumber(last.date) - days;

@@ -10,7 +10,8 @@ import {
 import { loadMaster } from "../master_loader";
 import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalPriceSnapshot, CoalStatus, CoalValue, MasterCoalEntry } from "../types";
-import { cardPrice, coalsToEstimate, estimateLive, fetchCoalPrices, type CardPrice } from "../coalPrices";
+import { cardPrice, coalsToEstimate, estimateLive, fetchCoalPrices, hasPriceHistory, isModified, type CardPrice } from "../coalPrices";
+import { CoalPriceDialog } from "../CoalPriceDialog";
 import { CoalPriceLine } from "../CoalPriceLine";
 import { CoalEditor } from "../CoalEditor";
 import { NewCoalDialog } from "../NewCoalDialog";
@@ -54,6 +55,7 @@ export function CoalPoolScreen() {
   const [filter, setFilter] = useState<CoalStatus | "all" | "enabled" | "hidden">("all");
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<ResolvedCoal | null>(null);
+  const [chartCoal, setChartCoal] = useState<ResolvedCoal | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [templateClauseCount, setTemplateClauseCount] = useState(
     () => getPenaltyTemplate()?.clauses.length ?? 0,
@@ -311,9 +313,18 @@ export function CoalPoolScreen() {
               coal={coal}
               price={cardPrice(coal, snapshot, currentLive)}
               onClick={() => setEditing(coal)}
+              onOpenPrice={hasPriceHistory(coal, snapshot) ? () => setChartCoal(coal) : undefined}
             />
           ))}
         </div>
+      )}
+
+      {chartCoal && (
+        <CoalPriceDialog
+          name={chartCoal.name}
+          modified={isModified(chartCoal)}
+          onClose={() => setChartCoal(null)}
+        />
       )}
 
       {editing && (
@@ -370,10 +381,12 @@ function CoalCard({
   coal,
   price,
   onClick,
+  onOpenPrice,
 }: {
   coal: ResolvedCoal;
   price: CardPrice;
   onClick: () => void;
+  onOpenPrice?: () => void;
 }) {
   const PROP_ORDER_TOP = ["S", "A", "V", "G"];
   const PROP_ORDER_BOTTOM = ["M", "petro", "Y", "CSR"];
@@ -459,7 +472,7 @@ function CoalCard({
         </div>
       )}
 
-      <CoalPriceLine price={price} />
+      <CoalPriceLine price={price} name={coal.name} onOpen={onOpenPrice} />
 
       <div className="coal-status-row">
         <span className={`status-pill status-${coal.status}`}>

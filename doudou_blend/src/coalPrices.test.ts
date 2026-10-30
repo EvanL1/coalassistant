@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cardPrice, coalsToEstimate, estimateLive, fetchCoalPrices } from "./coalPrices";
+import { cardPrice, coalsToEstimate, estimateLive, fetchCoalPrices, fetchCoalPriceHistory, hasPriceHistory } from "./coalPrices";
 import { resolveCoal, resolveCoalPool } from "./domain/resolvedCoal";
 import type { CoalPriceSnapshot, CoalValue, MasterCoalEntry } from "./types";
 
@@ -144,5 +144,51 @@ describe("估价接口", () => {
     vi.stubGlobal("fetch", fetch);
     expect(await estimateLive([])).toEqual(new Map());
     expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("单煤历史估价", () => {
+  it("煤名做 URL 编码, 返回升序的点", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true, name: "1/3焦 临北", points: [{ day: "2026-10-29", price: 2214, benchmark: "安泽低硫主焦", source: "live" }],
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+    const history = await fetchCoalPriceHistory("1/3焦 临北");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/coal-prices/history?name=1%2F3%E7%84%A6%20%E4%B8%B4%E5%8C%97");
+    expect(history?.points).toHaveLength(1);
+  });
+
+  it.each([
+    ["服务异常", () => Promise.resolve(new Response("{}", { status: 503 }))],
+    ["形状不对", () => Promise.resolve(new Response(JSON.stringify({ ok: true })))],
+    ["离线", () => Promise.reject(new TypeError("offline"))],
+  ])("%s 时返回 null", async (_, impl) => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(impl));
+    expect(await fetchCoalPriceHistory("临北")).toBeNull();
+  });
+
+  it("只有共享煤库里有快照的煤才有历史; 用户自己新增的没有", () => {
+    expect(hasPriceHistory(coal, snapshot)).toBe(true);
+    expect(hasPriceHistory(coal, null)).toBe(false);
+    expect(hasPriceHistory(resolveCoal(base, null, "user"), snapshot)).toBe(false);
+    expect(hasPriceHistory(resolveCoal({ ...base, name: "别的" }, null, "master"), snapshot)).toBe(false);
+  });
+});
+
+describe("历史响应校验", () => {
+  it.each([
+    null,
+    { ok: true, name: "别的煤", points: [] },
+    { ok: true, name: "临北", points: [null] },
+    { ok: true, name: "临北", points: [{ day: "2026-10-29", price: "2214", benchmark: null, source: "live" }] },
+    { ok: true, name: "临北", points: [{ day: "2026-10-29", price: 2214, benchmark: null, source: "未知" }] },
+    { ok: true, name: "临北", points: [{ price: 2214, benchmark: null, source: "live" }] },
+  ])("错误煤名或无效点返回 null, 不送入图表", async (body) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(body))));
+    expect(await fetchCoalPriceHistory("临北")).toBeNull();
+  });
+
+  it("改过化验值的共享煤仍可查看共享历史", () => {
+    expect(hasPriceHistory(resolveCoal(base, { props_override: { S: 1.2 } }, "master"), snapshot)).toBe(true);
   });
 });

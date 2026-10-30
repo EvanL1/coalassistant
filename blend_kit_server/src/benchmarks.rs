@@ -17,7 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -194,14 +194,14 @@ fn master_benchmarks(master: &Value) -> Vec<Value> {
         .collect()
 }
 
-/// 库表里每个名字最新的一条.
-async fn latest_stored(pool: &PgPool) -> Result<Vec<Value>, sqlx::Error> {
+/// 库表全部报价 (按日回放要看到每一条, 不止最新). 升序排: merge 同名同日时后来者胜,
+/// 所以同日仍是 created_at 最新的那条生效.
+async fn all_stored(pool: &PgPool) -> Result<Vec<Value>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (name)
-               id, name, coal_type, form, region, props, price, quoted_on, source, created_by
+        SELECT id, name, coal_type, form, region, props, price, quoted_on, source, created_by
         FROM price_benchmarks
-        ORDER BY name, quoted_on DESC, created_at DESC
+        ORDER BY name, quoted_on, created_at
         "#,
     )
     .fetch_all(pool)
@@ -229,22 +229,24 @@ fn stored_row(row: sqlx::postgres::PgRow) -> Result<Value, sqlx::Error> {
     Ok(benchmark)
 }
 
-/// 当前生效的基准报价: master ∪ 库表 (同名取最新) ∪ 钢铁网指数各序列的最新值; 旧报价按
-/// 同煤种的指数序列推算到今天, 没有同煤种序列的按 CCP.
-/// 库读失败只记日志, 退回 master 的那一层 —— 估价不该因为补录表坏了就停摆.
+/// 当前生效的基准; 交互接口读库失败时逐层降级, 仍可估价.
 pub(crate) async fn current(state: &AppState, master: &Value) -> Vec<Value> {
     current_from_pool(state.database.as_ref(), master).await.0
 }
 
-/// 保留交互接口逐层降级的结果, 同时把读库失败交给后台任务, 避免覆盖旧快照.
-pub(crate) async fn current_from_pool(
-    pool: Option<&PgPool>,
-    master: &Value,
-) -> (Vec<Value>, Option<String>) {
+/// 定基准要的全部原料, 一次读齐; 按日回放时每天复用.
+pub(crate) struct BenchmarkInputs {
+    pub stored: Vec<Value>,
+    pub history: HashMap<String, Vec<IndexPoint>>,
+    pub ccp: Option<Vec<IndexPoint>>,
+}
+
+/// 读库失败只记日志、退回 master 那一层, 错误另行交给后台任务 (它们不能拿降级的结果写库).
+pub(crate) async fn load_inputs(pool: Option<&PgPool>) -> (BenchmarkInputs, Option<String>) {
     let mut read_error = None;
     let (stored, history) = match pool {
         Some(pool) => {
-            let stored = latest_stored(pool).await.unwrap_or_else(|error| {
+            let stored = all_stored(pool).await.unwrap_or_else(|error| {
                 tracing::error!(%error, "读取基准报价失败, 只用 master 默认值");
                 read_error = Some(error.to_string());
                 Vec::new()
@@ -258,17 +260,71 @@ pub(crate) async fn current_from_pool(
         }
         None => (Vec::new(), HashMap::new()),
     };
+    let ccp = coal_index::get_spot_series().await;
+    (
+        BenchmarkInputs {
+            stored,
+            history,
+            ccp,
+        },
+        read_error,
+    )
+}
+
+fn known_by(day: &str) -> impl Fn(&Value) -> bool + '_ {
+    move |benchmark| benchmark["date"].as_str().is_some_and(|date| date <= day)
+}
+
+fn points_until(points: &[IndexPoint], day: &str) -> Vec<IndexPoint> {
+    points
+        .iter()
+        .filter(|point| point.date.as_str() <= day)
+        .cloned()
+        .collect()
+}
+
+/// 某天 (北京时间) 能拿到的基准: 报价日、指数期都不晚于这天, 旧报价也只推算到这天.
+/// 三层来源: master ∪ 库表 (同名取最新) ∪ 钢铁网指数各序列; 旧报价按同煤种指数推算, 没有则用 CCP.
+/// 实时快照就是 as_of(今天); 补算历史逐日调用, 两边一套口径.
+pub(crate) fn as_of(master: &Value, inputs: &BenchmarkInputs, day: NaiveDate) -> Vec<Value> {
+    let day = day.format("%Y-%m-%d").to_string();
+    let known = known_by(&day);
+    let master_layer: Vec<Value> = master_benchmarks(master)
+        .into_iter()
+        .filter(|b| known(b))
+        .collect();
+    let stored: Vec<Value> = inputs.stored.iter().filter(|b| known(b)).cloned().collect();
+    let history: HashMap<String, Vec<IndexPoint>> = inputs
+        .history
+        .iter()
+        .map(|(code, points)| (code.clone(), points_until(points, &day)))
+        .filter(|(_, points)| !points.is_empty())
+        .collect();
+    let ccp = inputs
+        .ccp
+        .as_deref()
+        .map(|points| points_until(points, &day))
+        .filter(|points| !points.is_empty());
     let config = master["price_factor"]["index_series"]
         .as_array()
         .cloned()
         .unwrap_or_default();
     let indexed = index_benchmarks(&config, &history);
-    let mut merged = merge(&[&master_benchmarks(master), &stored, &indexed]);
-    let ccp = coal_index::get_spot_series().await;
+    let mut merged = merge(&[&master_layer, &stored, &indexed]);
     apply_drift(&mut merged, |benchmark| {
         drift_series(benchmark, &config, &history, ccp.as_deref())
     });
-    (merged, read_error)
+    merged
+}
+
+/// 当前生效的基准 = as_of(北京时间今天). 读库失败的降级见 [`load_inputs`].
+pub(crate) async fn current_from_pool(
+    pool: Option<&PgPool>,
+    master: &Value,
+) -> (Vec<Value>, Option<String>) {
+    let (inputs, read_error) = load_inputs(pool).await;
+    let today = Utc::now().with_timezone(&mcci::beijing()).date_naive();
+    (as_of(master, &inputs, today), read_error)
 }
 
 async fn master_value(state: &AppState) -> Value {
@@ -672,5 +728,129 @@ mod tests {
             json!({"coals": [], "price_factor": {"adjusts": [], "benchmarks": [{"name": "自带"}]}});
         fill_price_request(&mut own, &master, &benchmarks);
         assert_eq!(own["price_factor"]["benchmarks"][0]["name"], "自带");
+    }
+
+    fn inputs_fixture() -> (Value, BenchmarkInputs) {
+        let master = json!({"price_factor": {
+            "adjusts": [],
+            "index_series": index_config(),
+            "benchmarks": [
+                {"name": "晋中", "coal_type": "焦煤", "props": {"S": 0.6}, "date": "2026-10-16", "price": 2300.0}
+            ]
+        }});
+        let inputs = BenchmarkInputs {
+            stored: vec![
+                json!({"name": "孝义高硫", "coal_type": "焦煤", "props": {"S": 2.9},
+                                "date": "2026-10-16", "price": 2039.0, "origin": "stored"}),
+            ],
+            history: HashMap::from([
+                (
+                    "LJM_DLZJM".to_string(),
+                    vec![point("2026-10-15", 2294.0), point("2026-10-20", 2300.0)],
+                ),
+                (
+                    "LJM_GLZJM".to_string(),
+                    vec![point("2026-10-15", 2118.6), point("2026-10-20", 2110.0)],
+                ),
+            ]),
+            ccp: Some(vec![
+                point("2026-10-08", 1907.0),
+                point("2026-10-15", 1900.0),
+            ]),
+        };
+        (master, inputs)
+    }
+
+    fn find<'a>(benchmarks: &'a [Value], name: &str) -> &'a Value {
+        benchmarks.iter().find(|b| b["name"] == name).unwrap()
+    }
+
+    fn day(text: &str) -> NaiveDate {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn test_as_of_ignores_everything_after_the_day() {
+        let (master, inputs) = inputs_fixture();
+        let before = as_of(&master, &inputs, day("2026-10-20"));
+        let mut future = BenchmarkInputs {
+            stored: inputs.stored.clone(),
+            history: inputs.history.clone(),
+            ccp: inputs.ccp.clone(),
+        };
+        // 晚于 10-20 的: 新报价、同名的新一期报价、指数新一期、CCP 新一期.
+        future.stored.push(
+            json!({"name": "未来报价", "coal_type": "焦煤", "props": {"S": 1.0},
+                                  "date": "2026-10-25", "price": 9999.0, "origin": "stored"}),
+        );
+        future.stored.push(
+            json!({"name": "孝义高硫", "coal_type": "焦煤", "props": {"S": 2.9},
+                                  "date": "2026-10-26", "price": 1.0, "origin": "stored"}),
+        );
+        future
+            .history
+            .get_mut("LJM_GLZJM")
+            .unwrap()
+            .push(point("2026-10-26", 1.0));
+        future
+            .history
+            .get_mut("LJM_DLZJM")
+            .unwrap()
+            .push(point("2026-10-26", 1.0));
+        future.ccp.as_mut().unwrap().push(point("2026-10-23", 1.0));
+        let mut master_future = master.clone();
+        master_future["price_factor"]["benchmarks"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "master 未来", "props": {}, "date": "2026-10-30", "price": 1.0}));
+        assert_eq!(as_of(&master_future, &future, day("2026-10-20")), before);
+    }
+
+    #[test]
+    fn test_as_of_truncates_index_and_drift_at_the_day() {
+        let (master, inputs) = inputs_fixture();
+        let on_17 = as_of(&master, &inputs, day("2026-10-17"));
+        // 10-17 时指数最新一期是 10-15: 指数基准取 10-15 的值.
+        assert_eq!(find(&on_17, "高硫主焦煤指数")["price"], 2118.6);
+        assert_eq!(find(&on_17, "高硫主焦煤指数")["date"], "2026-10-15");
+        // 10-16 的报价, 10-17 时还没有更新一期的指数: 不推算.
+        assert!(find(&on_17, "孝义高硫").get("current_price").is_none());
+        let on_20 = as_of(&master, &inputs, day("2026-10-20"));
+        // 10-20 时: 高硫档 10-15 → 10-20 推算, 比例只到 10-20.
+        assert_eq!(find(&on_20, "孝义高硫")["index_date"], "2026-10-20");
+        assert_eq!(
+            find(&on_20, "孝义高硫")["current_price"],
+            json!((2039.0 * (2110.0 / 2118.6) * 100.0_f64).round() / 100.0)
+        );
+        // 报价日晚于这天的不出现.
+        assert!(as_of(&master, &inputs, day("2026-10-15"))
+            .iter()
+            .all(|b| b["name"] != "孝义高硫" && b["name"] != "晋中"));
+    }
+
+    #[test]
+    fn test_as_of_today_matches_untruncated_pipeline() {
+        let (master, inputs) = inputs_fixture();
+        let config = master["price_factor"]["index_series"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let indexed = index_benchmarks(&config, &inputs.history);
+        let mut expected = merge(&[&master_benchmarks(&master), &inputs.stored, &indexed]);
+        apply_drift(&mut expected, |b| {
+            drift_series(b, &config, &inputs.history, inputs.ccp.as_deref())
+        });
+        assert_eq!(as_of(&master, &inputs, day("2026-10-30")), expected);
+    }
+
+    #[test]
+    fn test_same_day_stored_quotes_latest_created_wins() {
+        // all_stored 按 name, quoted_on, created_at 升序给出; merge 同日后来者胜.
+        let stored = [
+            json!({"name": "晋中", "date": "2026-10-10", "price": 2000, "id": "先录"}),
+            json!({"name": "晋中", "date": "2026-10-10", "price": 2010, "id": "后录"}),
+        ];
+        let merged = merge(&[&stored]);
+        assert_eq!(merged[0]["id"], "后录");
     }
 }

@@ -126,6 +126,8 @@ const rustCoalPricesSource = readRepositoryFile("blend_kit_server/src/coal_price
 const typescriptSource = readRepositoryFile("doudou_blend/src/types.ts");
 
 const sharedStructs = [
+  [rustCoalPricesSource, "CoalPricePoint", "CoalPricePoint"],
+  [rustCoalPricesSource, "CoalPriceHistory", "CoalPriceHistory"],
   [rustCoalPricesSource, "CoalPriceEntry", "CoalPriceEntry"],
   [rustCoalPricesSource, "CoalPriceSnapshot", "CoalPriceSnapshot"],
   [rustModelSource, "Coal", "Coal"],
