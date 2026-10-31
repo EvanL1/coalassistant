@@ -518,6 +518,8 @@ function QuoteComparison({ snapshot }: { snapshot: SolveSnapshot }) {
 
 function formatGap(gap: number | null | undefined): string {
   if (gap == null || !Number.isFinite(gap)) return "—";
-  if (gap === 0) return "持平";
-  return `${gap > 0 ? "高" : "低"} ${Math.round(Math.abs(gap))} 元`;
+  // 先取整再判高低: 差 0.3 元显示"持平", 不能是"高 0 元".
+  const rounded = Math.round(gap);
+  if (rounded === 0) return "持平";
+  return `${rounded > 0 ? "高" : "低"} ${Math.abs(rounded)} 元`;
 }

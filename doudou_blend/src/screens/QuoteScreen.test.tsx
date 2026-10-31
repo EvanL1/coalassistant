@@ -334,3 +334,18 @@ it("精算页开着时今日页后台重算失败, 已填的报价不丢", async
   expect(screen.queryByText(/网络断了/)).toBeNull();
   expect(input("甲 出厂价").value).toBe("2150");
 });
+
+it("差额四舍五入到 0 元时显示持平, 不写高 0 元", async () => {
+  const solved = result();
+  solved.coal_values = [
+    { ...value("甲", 2000), fob: 2000.3, gap: 0.3 },
+    { ...value("乙", 2000), fob: 1999.6, gap: -0.4 },
+  ];
+  mocks.solve.mockResolvedValue(JSON.stringify(solved));
+  await open();
+  priceBoth();
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  const table = await screen.findByRole("table", { name: "报价对比" });
+  expect(within(table).getAllByText("持平")).toHaveLength(2);
+  expect(within(table).queryByText(/[高低] 0 元/)).toBeNull();
+});

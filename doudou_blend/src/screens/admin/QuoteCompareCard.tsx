@@ -13,8 +13,12 @@ const DETAIL_COLUMNS = [
 ];
 const tableStyle = { width: "100%", borderCollapse: "collapse", fontSize: 12 } as const;
 
-const signed = (value: number | null) =>
-  value == null ? "—" : `${value > 0 ? "+" : ""}${Math.round(value)}`;
+/** 带正负号的整数差额; 先取整再定符号, 0.3 显示 "0" 而不是 "+0". */
+function signed(value: number | null): string {
+  if (value == null) return "—";
+  const rounded = Math.round(value);
+  return rounded === 0 ? "0" : `${rounded > 0 ? "+" : ""}${rounded}`;
+}
 
 export function QuoteCompareCard() {
   const [data, setData] = useState<Omit<QuoteComparisonResponse, "ok"> | null>(null);
