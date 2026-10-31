@@ -755,21 +755,28 @@ button {
 }
 
 /* ========== Tablet / Web ========== */
-/* 行情窄条 (炼焦煤价格指数): 手机两列、不画走势; 宽屏自动排、带走势. 七个品种不横向滚动, 一眼看全. */
+/* 行情窄条 (炼焦煤价格指数), 页面顶部常驻. 手机压成一行、左右滑动、不画走势 —— 常驻时排成
+   四行会一直占掉约 120px 屏幕; 宽屏自动排、带走势, 七个品种一眼看全. */
 .index-ticker {
   position: sticky;
   top: 0;
   z-index: 10;
   background: var(--c-bg);
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 12px;
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  scrollbar-width: none;
   padding: 6px 2px;
   font-size: 12px;
   color: var(--c-text-3);
 }
 
+.index-ticker::-webkit-scrollbar {
+  display: none;
+}
+
 .index-ticker-item {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -922,8 +929,10 @@ button {
 
 @media (min-width: 720px) {
   .index-ticker {
+    display: grid;
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
     gap: 6px 16px;
+    overflow-x: visible;
   }
 
   .index-ticker-spark {
@@ -1214,23 +1223,34 @@ button {
 
 
 /* ========== 询价精算 ========== */
-/* 价格与指标只保留在当前页面, 不进煤池. */
+/* 价格与指标只保留在当前页面, 不进煤池. 手机优先: 卡片紧凑, 精算按钮贴底常驻. */
+.quote-back {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 4px 0;
+  margin-bottom: 6px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--c-primary);
+  cursor: pointer;
+}
+
 .quote-list {
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
 .quote-row {
   min-width: 0;
   margin-bottom: 0;
+  padding: 14px 16px;
 }
 
 .quote-heading {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
-  margin-bottom: 12px;
 }
 
 .quote-heading span,
@@ -1239,8 +1259,29 @@ button {
   color: var(--c-text-3);
 }
 
-.quote-heading button {
+.quote-hint {
+  margin: 4px 0 0;
+}
+
+.quote-remove,
+.quote-toggle {
+  appearance: none;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.quote-remove {
   margin-left: auto;
+  padding: 4px 0 4px 8px;
+  color: var(--c-text-3);
+}
+
+.quote-toggle {
+  padding: 6px 0 0;
+  color: var(--c-primary);
 }
 
 .quote-prices,
@@ -1248,7 +1289,7 @@ button {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  margin: 10px 0;
+  margin: 10px 0 0;
 }
 
 .quote-prices label,
@@ -1267,16 +1308,22 @@ button {
   padding: 8px;
   margin-top: 4px;
   border: 1px solid var(--c-border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--c-card, #fff);
   color: var(--c-text-1);
+  font-size: 16px; /* 手机上小于 16px 会触发 iOS 自动放大 */
 }
 
 .quote-add {
-  margin: 12px 0;
+  height: 44px;
+  margin: 10px 0 0;
+  border-style: dashed;
+  color: var(--c-text-2);
+  font-size: 14px;
 }
 
 .quote-warning {
+  margin: 4px 0 0;
   color: #92400e;
   font-size: 12px;
 }
@@ -1285,8 +1332,49 @@ button {
   color: var(--c-primary);
 }
 
+/* 贴底操作条: 手机上停在底部标签栏之上, 宽屏 (侧栏布局) 停在窗口底部. */
+.quote-actionbar {
+  position: sticky;
+  bottom: calc(var(--tab-height) + 8px);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+  padding: 8px 8px 8px 16px;
+  border-radius: 14px;
+  background: var(--c-card);
+  box-shadow: 0 6px 24px rgba(15, 23, 42, 0.14);
+}
+
+.quote-actionbar-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--c-text-2);
+}
+
+.quote-actionbar .btn {
+  flex: none;
+  width: 132px;
+  height: 44px;
+}
+
+.quote-result-section {
+  margin-top: 28px;
+  /* 算完滚到结果时, 标题停在常驻行情条下方 (手机一行约 36px, 宽屏两行约 76px) */
+  scroll-margin-top: 52px;
+}
+
+.quote-section-title {
+  margin: 0 0 12px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
 .quote-comparison {
   min-width: 0;
+  margin-top: 12px;
 }
 
 .quote-comparison table {
@@ -1311,5 +1399,17 @@ button {
 
   .quote-props {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 720px) {
+  .quote-result-section {
+    scroll-margin-top: 90px;
+  }
+}
+
+@media (min-width: 960px) {
+  .quote-actionbar {
+    bottom: 16px;
   }
 }

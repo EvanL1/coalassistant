@@ -303,7 +303,6 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
           {formatDate(entry.occurred_at)}
         </div>
         {entry.contract_name && <div className="contract-chip">{entry.contract_name}</div>}
-        {entry.quoted && <span className="badge">询价</span>}
       </div>
       <div
         style={{

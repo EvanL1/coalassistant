@@ -570,8 +570,6 @@ export interface MeasuredQuality {
 
 /** 历史方案 (跨后端统一形状). mixed/实测各列支撑「回填实测焦质」数据闭环. */
 export interface HistoryRecord {
-  /** 本次配方含现场询价, 从结果派生. */
-  quoted: boolean;
   id: string;
   occurred_at: string;
   contract_name: string;

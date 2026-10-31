@@ -2,6 +2,7 @@
  * 询价精算: 用户当场填几种煤的出厂价与运费 (可改这批指标), 只用这几种煤求解.
  *
  * 询价当场有效: 不写煤池、偏好或本地存储, 下次进来输入框为空 (上次询价只作占位提示).
+ * 精算只给客户算配方, 不提供保存; 询价的存档是后台自动的, 客户不用操作.
  * 每次精算按批存档 (同一会话同一 batchId, 服务端以最后一次为准), 估价由服务端重算.
  */
 import { useEffect, useRef, useState } from "react";
@@ -100,11 +101,9 @@ export function QuoteScreen({
   const [solving, setSolving] = useState(false);
   const [solveError, setSolveError] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const tracker = useRef(new LatestRequestTracker());
   const archiveQueue = useRef<Promise<unknown>>(Promise.resolve());
-  const savingRef = useRef(false);
+  const resultRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -139,6 +138,11 @@ export function QuoteScreen({
     };
   }, []);
 
+  // 算完滚到结果: 手机上结果在操作条下方屏幕外, 不滚过去看不出算完了.
+  useEffect(() => {
+    if (snapshot) resultRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [snapshot]);
+
   /** 改了输入, 旧结果就不再对应当前报价: 作废在途求解并清掉结果. */
   function changeRows(update: (previous: QuoteRow[]) => QuoteRow[]) {
     tracker.current.invalidate();
@@ -147,7 +151,6 @@ export function QuoteScreen({
     setSolving(false);
     setSolveError(null);
     setArchiveError(null);
-    setSaveMsg(null);
   }
 
   function edit(name: string, patch: Partial<QuoteRow>) {
@@ -204,7 +207,6 @@ export function QuoteScreen({
     setSnapshot(null);
     setSolveError(null);
     setArchiveError(null);
-    setSaveMsg(null);
     // 同批存档按点击顺序发送, 防止慢的旧请求最后覆盖新报价; 不等待求解, 也不阻塞结果.
     const archive = archiveQueue.current
       .catch(() => undefined)
@@ -238,37 +240,17 @@ export function QuoteScreen({
     }
   }
 
-  async function saveToHistory() {
-    if (!snapshot?.result.ok || !snapshot.result.cost || savingRef.current) return;
-    const current = snapshot;
-    savingRef.current = true;
-    setSaving(true);
-    setSaveMsg(null);
-    try {
-      const backend = await getBackend();
-      if (!tracker.current.isCurrent(current.requestId)) return;
-      await backend.saveHistory(
-        current.result,
-        current.contractName,
-        current.request.total_quantity!,
-      );
-      tracker.current.accept(current.requestId, () => setSaveMsg("✓ 已保存"));
-    } catch {
-      tracker.current.accept(current.requestId, () => setSaveMsg("保存失败"));
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
-  }
-
   const inRecipe = new Set(todayResult.orders.map((order) => order.coal));
   return (
-    <>
-      <button className="btn btn-secondary" onClick={onBack}>
+    <div className="quote-screen">
+      <button className="quote-back" onClick={onBack}>
         ← 返回今日
       </button>
       <div className="page-header">
-        <h1 className="page-title">询价精算</h1>
+        <div>
+          <h1 className="page-title">询价精算</h1>
+          <div className="page-subtitle">填上问到的出厂价, 只用这些煤算配方</div>
+        </div>
       </div>
       {loadError && <div role="alert">煤池加载失败: {loadError}</div>}
       {!data && !loadError && <div className="loading">加载煤池...</div>}
@@ -301,7 +283,7 @@ export function QuoteScreen({
               if (coal) changeRows((previous) => [...previous, emptyRow(coal)]);
             }}
           >
-            <option value="">添加煤</option>
+            <option value="">＋ 添加煤</option>
             {data.pool
               .filter((coal) => !rows.some((row) => row.coal.name === coal.name))
               .map((coal) => (
@@ -313,16 +295,6 @@ export function QuoteScreen({
           {!data.master.price_factor && (
             <p role="alert">缺少估价参数 (price_factor), 无法精算</p>
           )}
-          {pricedRows.length < 2 && <p className="quote-hint">至少填两种煤的出厂价</p>}
-          <div className="action-row">
-            <button
-              className="btn btn-primary"
-              disabled={!canSolve || solving}
-              onClick={() => void runSolve()}
-            >
-              {solving ? "精算中..." : "精算"}
-            </button>
-          </div>
         </>
       )}
       {solveError && <p role="alert">精算失败: {solveError}</p>}
@@ -331,48 +303,61 @@ export function QuoteScreen({
           询价未存档: {archiveError}
         </p>
       )}
-      {snapshot &&
-        (snapshot.result.ok && snapshot.result.cost ? (
-          <>
-            <div className="today-dashboard quote-result">
-              <div className="today-cost">
-                <CostCard
-                  cost={snapshot.result.cost}
-                  orphanedGuarantees={snapshot.orphanedGuarantees}
+      {snapshot && (
+        <section className="quote-result-section" ref={resultRef} aria-label="精算结果">
+          <h2 className="quote-section-title">精算结果</h2>
+          {snapshot.result.ok && snapshot.result.cost ? (
+            <>
+              <div className="today-dashboard">
+                <div className="today-cost">
+                  <CostCard
+                    cost={snapshot.result.cost}
+                    orphanedGuarantees={snapshot.orphanedGuarantees}
+                  />
+                </div>
+                <RecipeCard
+                  result={snapshot.result}
+                  coalTypes={coalTypeMap(snapshot.request)}
+                  title="精算配方"
                 />
+                <IndicatorCard result={snapshot.result} />
               </div>
-              <RecipeCard
-                result={snapshot.result}
-                coalTypes={coalTypeMap(snapshot.request)}
-                title="精算配方"
-              />
-              <IndicatorCard result={snapshot.result} />
-            </div>
-            <QuoteComparison snapshot={snapshot} />
-            <div className="action-row">
-              <button
-                className="btn btn-primary"
-                disabled={saving}
-                onClick={() => void saveToHistory()}
-              >
-                {saving ? "保存中..." : saveMsg ?? "保存到历史"}
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <InfeasiblePanel result={snapshot.result} />
-            {snapshot.result.warnings.length > 0 && (
-              <div className="binding-list quote-warning">
-                <div className="binding-list-title">提示</div>
-                {snapshot.result.warnings.map((warning, index) => (
-                  <div key={index}>{warning}</div>
-                ))}
-              </div>
-            )}
-          </>
-        ))}
-    </>
+              <QuoteComparison snapshot={snapshot} />
+            </>
+          ) : (
+            <>
+              <InfeasiblePanel result={snapshot.result} />
+              {snapshot.result.warnings.length > 0 && (
+                <div className="binding-list quote-warning">
+                  <div className="binding-list-title">提示</div>
+                  {snapshot.result.warnings.map((warning, index) => (
+                    <div key={index}>{warning}</div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </section>
+      )}
+      {/* 操作条放在整页最后、贴底常驻: 煤一多要翻好几屏, 看完结果回头改价也随手能再算;
+          放最后它就不会随滚动跑到顶部行情条底下. */}
+      {data && (
+        <div className="quote-actionbar">
+          <span className="quote-actionbar-text">
+            {pricedRows.length < 2
+              ? "至少填两种煤的出厂价"
+              : `已填 ${pricedRows.length} 种煤的出厂价`}
+          </span>
+          <button
+            className="btn btn-primary"
+            disabled={!canSolve || solving}
+            onClick={() => void runSolve()}
+          >
+            {solving ? "精算中..." : "精算"}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -405,7 +390,7 @@ function QuoteRowCard({
       <div className="quote-heading">
         <strong>{name}</strong>
         <span>今日估价 {finitePositive(today?.fair) ? Math.round(today.fair) : "—"} 元</span>
-        <button className="btn btn-secondary" aria-label={`去掉 ${name}`} onClick={onRemove}>
+        <button className="quote-remove" aria-label={`去掉 ${name}`} onClick={onRemove}>
           去掉
         </button>
       </div>
@@ -443,12 +428,12 @@ function QuoteRowCard({
         </p>
       )}
       <button
-        className="btn btn-secondary"
+        className="quote-toggle"
         aria-label={`改这批指标 ${name}`}
         aria-expanded={row.expanded}
         onClick={onToggle}
       >
-        改这批指标
+        {row.expanded ? "收起指标 ▴" : "改这批指标 ▾"}
       </button>
       {row.expanded && (
         <div className="quote-props">
