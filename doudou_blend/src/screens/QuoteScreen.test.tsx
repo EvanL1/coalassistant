@@ -346,3 +346,16 @@ it("差额四舍五入到 0 元时显示持平, 不写高 0 元", async () => {
   expect(within(table).getAllByText("持平")).toHaveLength(2);
   expect(within(table).queryByText(/[高低] 0 元/)).toBeNull();
 });
+
+it("操作条显示已填几种煤, 算完滚到精算结果", async () => {
+  const scroll = vi.fn();
+  Element.prototype.scrollIntoView = scroll;
+  await open();
+  expect(screen.getByText("至少填两种煤的出厂价")).toBeTruthy();
+  priceBoth();
+  expect(screen.getByText("已填 2 种煤的出厂价")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  const section = await screen.findByRole("region", { name: "精算结果" });
+  await waitFor(() => expect(scroll).toHaveBeenCalled());
+  expect(scroll.mock.contexts[0]).toBe(section);
+});
