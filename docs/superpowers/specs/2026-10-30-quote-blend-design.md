@@ -101,7 +101,7 @@
 -- 询价存档: 用户当场询来的出厂价与运费, 附服务端按这批指标 + 当天基准重算的同口径估价.
 -- 只用于对比与以后校准估价, 不进煤池、不跨次沿用. 同一批 (batch_id) 多次精算以最后一次为准.
 CREATE TABLE IF NOT EXISTS coal_quotes (
-    id BIGSERIAL PRIMARY KEY,
+    id TEXT PRIMARY KEY,                -- UUID, 同 price_benchmarks
     username TEXT NOT NULL,
     batch_id TEXT NOT NULL,
     quoted_on DATE NOT NULL,             -- 北京时间
@@ -126,7 +126,7 @@ CREATE INDEX IF NOT EXISTS coal_quotes_day ON coal_quotes (quoted_on);
 
 `POST /api/quotes` (登录会话):
 - 请求 `{ "batch_id": "...", "items": [{ "name", "fob", "frt"?, "coal_type"?, "form"?, "region"?, "props", "changed"? }] }`。
-- 检查顺序: 401 → 400 (请求体) → 503 (没有数据库)。
+- 检查顺序: 401 → 415 (须为 JSON, 防跨站表单) → 400 (请求体) → 503 (没有数据库)。
 - 校验: `batch_id` 1–64 位 `[A-Za-z0-9-]`; `items` 1–50 条且煤名不重复、非空、≤100 字;
   `fob` 有限且 0 < fob < 100000; `frt` 有限且 0 ≤ frt < 10000; `changed` 只能是 `INDICATORS` 里的名字;
   指标交给核心估价校验 (估价返回错误 → 400 并带核心的错误信息)。
@@ -135,16 +135,25 @@ CREATE INDEX IF NOT EXISTS coal_quotes_day ON coal_quotes (quoted_on);
 - 写库: 一个事务里 `DELETE ... WHERE username = $1 AND batch_id = $2`, 再插入本批 (按批覆盖)。
 - 返回 `{ "ok": true, "items": [{ "name", "estimate", "gap", "ratio", "benchmark" }] }`。
 
+`GET /api/quotes/latest` (登录会话): 本账号每种煤最近一次询价 `{ ok, quotes: [{ name, fob, frt, quoted_on }] }`,
+只给精算页作输入框的灰色占位提示, 不作为值。检查顺序 401 → 503。
+
 `GET /api/admin/quotes?limit=` (管理员):
 - 明细: 最新在前, 默认 200 条, 上限 1000; 字段同表 + `gap = fob − estimate`、`ratio = fob / estimate`。
-- 汇总 `by_type`: 按 `coal_type` (空记"未标煤种") 分组, 只算有估价的行; 与 `admin::calibration` 同口径,
-  **不算管理员账号自己的询价** (管理员试用时的假价不进汇总; 明细仍全部列出, 带用户列)。
-  每组 `count`、`median_ratio`、`median_gap`。
+- 汇总 `by_type`: 按 `coal_type` (空记"未标煤种") 分组, 只算有估价的行; 每组 `count`、`median_ratio`、
+  `median_gap`。取中位数, 个别手误不至于带偏。
+
+`DELETE /api/admin/quotes/{id}` (管理员): 删掉一条试用或填错的询价, 让它不进汇总 (写法同
+`DELETE /api/admin/benchmarks/{id}`: 非法 id 当不存在 → 404)。
+
+> 修正 (2026-10-31, 写计划时发现): 设计稿原写"汇总不算管理员账号自己的询价"。实际网页端只有一个共用的
+> 普通账号, 管理员登录只进后台、进不了配煤页面, 按账号排除是空操作。改为: 管理员可以在明细里删掉试用或
+> 填错的询价。
 - 路由加在 `lib.rs`; 新的共享结构登记到 `scripts/check_repository_consistency.mjs`。
 
 `doudou` 命令行不加子命令, 用 `doudou --profile admin api GET /api/admin/quotes` 即可。
 
-**后台页**: `AdminScreen` 加「询价对比」卡片: 按煤种汇总表 + 明细表。
+**后台页**: `AdminScreen` 加「询价对比」卡片: 按煤种汇总表 + 明细表 (每行可删, 删前确认)。
 
 ## 错误处理
 
@@ -155,8 +164,8 @@ CREATE INDEX IF NOT EXISTS coal_quotes_day ON coal_quotes (quoted_on);
 ## 测试
 
 - 服务端 (fixture, 不断言 master 内容): 请求校验各分支; 估价由服务端算 (传入伪造估价字段被忽略);
-  按批覆盖 (同批第二次少一条 → 库里也少一条); 401/400/503 顺序; admin 汇总排除管理员、中位数正确、
-  估价为 NULL 的行不进汇总。真实 PostgreSQL 联调 (docker) 跑一遍迁移与写读。
+  按批覆盖 (同批第二次少一条 → 库里也少一条); 401/415/400/503 顺序; admin 汇总中位数正确、估价为 NULL 的行不进汇总;
+  admin 删除 (401/403/404)。真实 PostgreSQL 联调 (docker) 跑一遍迁移与写读。
 - 前端: `blendRequest` 抽取后今日页现有测试原样通过; 精算页: 默认带出今日配方的煤、少于 2 种不能精算、
   只把填了价的煤放进 `coals` 且 `extra_coals` 为空、改指标只进本次请求不改煤池、偏离 30% 提示、
   "低于 X 才会配进去"只对未入选的煤显示、每次精算都存档且同一 `batch_id`; 历史「询价」标记;
@@ -170,6 +179,6 @@ CREATE INDEX IF NOT EXISTS coal_quotes_day ON coal_quotes (quoted_on);
 
 ## 风险
 
-- 用户在精算页填的价进入公共汇总前没有人工审核: 30% 提示 + 汇总取中位数 + 排除管理员账号, 先这样;
-  校准那一期再加剔除。
+- 用户在精算页填的价进入公共汇总前没有人工审核: 30% 提示 + 汇总取中位数 + 管理员可删,
+  先这样; 校准那一期再加离群剔除。
 - `TodayScreen.tsx` 已近 900 行, 抽 `blendRequest` 与配方/指标卡组件是为精算页复用, 不做别的重构。
