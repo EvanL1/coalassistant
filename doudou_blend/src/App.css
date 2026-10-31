@@ -755,21 +755,28 @@ button {
 }
 
 /* ========== Tablet / Web ========== */
-/* 行情窄条 (炼焦煤价格指数): 手机两列、不画走势; 宽屏自动排、带走势. 七个品种不横向滚动, 一眼看全. */
+/* 行情窄条 (炼焦煤价格指数), 页面顶部常驻. 手机压成一行、左右滑动、不画走势 —— 常驻时排成
+   四行会一直占掉约 120px 屏幕; 宽屏自动排、带走势, 七个品种一眼看全. */
 .index-ticker {
   position: sticky;
   top: 0;
   z-index: 10;
   background: var(--c-bg);
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 12px;
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  scrollbar-width: none;
   padding: 6px 2px;
   font-size: 12px;
   color: var(--c-text-3);
 }
 
+.index-ticker::-webkit-scrollbar {
+  display: none;
+}
+
 .index-ticker-item {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -922,8 +929,10 @@ button {
 
 @media (min-width: 720px) {
   .index-ticker {
+    display: grid;
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
     gap: 6px 16px;
+    overflow-x: visible;
   }
 
   .index-ticker-spark {
@@ -1353,8 +1362,8 @@ button {
 
 .quote-result-section {
   margin-top: 28px;
-  /* 算完滚到结果时, 标题停在常驻行情条 (手机约 120px 高) 下方 */
-  scroll-margin-top: 132px;
+  /* 算完滚到结果时, 标题停在常驻行情条下方 (手机一行约 36px, 宽屏两行约 76px) */
+  scroll-margin-top: 52px;
 }
 
 .quote-section-title {
@@ -1393,12 +1402,14 @@ button {
   }
 }
 
+@media (min-width: 720px) {
+  .quote-result-section {
+    scroll-margin-top: 90px;
+  }
+}
+
 @media (min-width: 960px) {
   .quote-actionbar {
     bottom: 16px;
-  }
-
-  .quote-result-section {
-    scroll-margin-top: 90px;
   }
 }
