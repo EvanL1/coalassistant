@@ -265,20 +265,17 @@ it("连续精算按点击顺序存档, 旧存档失败不覆盖新反馈", async
   expect(screen.queryByText(/旧请求失败/)).toBeNull();
 });
 
-it("保存用求解快照的合同和吨数, 编辑后不可保存旧结果", async () => {
-  await open(); priceBoth(); fireEvent.click(screen.getByRole("button", { name: "精算" }));
-  fireEvent.click(await screen.findByRole("button", { name: "保存到历史" }));
-  expect(await screen.findByText("✓ 已保存")).toBeTruthy();
-  expect(mocks.save).toHaveBeenCalledWith(result(), "测试合同", 900);
-  fill("甲 出厂价", "2190");
-  expect(screen.queryByRole("button", { name: "保存到历史" })).toBeNull();
+it("精算只给配方与报价对比, 不提供保存入口", async () => {
+  await open();
+  priceBoth();
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  await screen.findByRole("table", { name: "报价对比" });
+  expect(screen.queryByRole("button", { name: /保存/ })).toBeNull();
+  expect(mocks.save).not.toHaveBeenCalled();
 });
 
-it("保存失败展示反馈, 返回调用 onBack", async () => {
-  mocks.save.mockRejectedValue(new Error("断网"));
-  const { back } = await open(); priceBoth(); fireEvent.click(screen.getByRole("button", { name: "精算" }));
-  fireEvent.click(await screen.findByRole("button", { name: "保存到历史" }));
-  expect(await screen.findByText("保存失败")).toBeTruthy();
+it("返回调用 onBack", async () => {
+  const { back } = await open();
   fireEvent.click(screen.getByRole("button", { name: "← 返回今日" }));
   expect(back).toHaveBeenCalledTimes(1);
 });

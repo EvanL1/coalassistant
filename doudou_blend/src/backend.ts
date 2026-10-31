@@ -125,9 +125,6 @@ async function makeHttpBackend(): Promise<Backend> {
           // 这时回退服务端存的 cost_cif 列 (历史上就是 cif_per_ton).
           cost_cif: row.result?.cost?.net_per_ton ?? row.cost_cif,
           recipe: row.recipe ?? {},
-          quoted: Array.isArray(row.result?.coal_values) && row.result.coal_values.some(
-            (coal) => coal != null && typeof coal.fob === 'number' && Number.isFinite(coal.fob) && coal.fob > 0,
-          ),
           mixed,
           csr_measured: row.csr_measured ?? null,
           s_measured: row.s_measured ?? null,

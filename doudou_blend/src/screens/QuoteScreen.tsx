@@ -2,6 +2,7 @@
  * 询价精算: 用户当场填几种煤的出厂价与运费 (可改这批指标), 只用这几种煤求解.
  *
  * 询价当场有效: 不写煤池、偏好或本地存储, 下次进来输入框为空 (上次询价只作占位提示).
+ * 精算只给客户算配方, 不提供保存; 询价的存档是后台自动的, 客户不用操作.
  * 每次精算按批存档 (同一会话同一 batchId, 服务端以最后一次为准), 估价由服务端重算.
  */
 import { useEffect, useRef, useState } from "react";
@@ -100,11 +101,8 @@ export function QuoteScreen({
   const [solving, setSolving] = useState(false);
   const [solveError, setSolveError] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const tracker = useRef(new LatestRequestTracker());
   const archiveQueue = useRef<Promise<unknown>>(Promise.resolve());
-  const savingRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -147,7 +145,6 @@ export function QuoteScreen({
     setSolving(false);
     setSolveError(null);
     setArchiveError(null);
-    setSaveMsg(null);
   }
 
   function edit(name: string, patch: Partial<QuoteRow>) {
@@ -204,7 +201,6 @@ export function QuoteScreen({
     setSnapshot(null);
     setSolveError(null);
     setArchiveError(null);
-    setSaveMsg(null);
     // 同批存档按点击顺序发送, 防止慢的旧请求最后覆盖新报价; 不等待求解, 也不阻塞结果.
     const archive = archiveQueue.current
       .catch(() => undefined)
@@ -235,29 +231,6 @@ export function QuoteScreen({
       tracker.current.accept(requestId, () => setSolveError(errorText(error)));
     } finally {
       tracker.current.accept(requestId, () => setSolving(false));
-    }
-  }
-
-  async function saveToHistory() {
-    if (!snapshot?.result.ok || !snapshot.result.cost || savingRef.current) return;
-    const current = snapshot;
-    savingRef.current = true;
-    setSaving(true);
-    setSaveMsg(null);
-    try {
-      const backend = await getBackend();
-      if (!tracker.current.isCurrent(current.requestId)) return;
-      await backend.saveHistory(
-        current.result,
-        current.contractName,
-        current.request.total_quantity!,
-      );
-      tracker.current.accept(current.requestId, () => setSaveMsg("✓ 已保存"));
-    } catch {
-      tracker.current.accept(current.requestId, () => setSaveMsg("保存失败"));
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
     }
   }
 
@@ -349,15 +322,6 @@ export function QuoteScreen({
               <IndicatorCard result={snapshot.result} />
             </div>
             <QuoteComparison snapshot={snapshot} />
-            <div className="action-row">
-              <button
-                className="btn btn-primary"
-                disabled={saving}
-                onClick={() => void saveToHistory()}
-              >
-                {saving ? "保存中..." : saveMsg ?? "保存到历史"}
-              </button>
-            </div>
           </>
         ) : (
           <>

@@ -107,7 +107,7 @@ master 或偏好里的价格键, 启用煤放进 `price_factor.extra_coals`, `co
 下次进入时输入为空, 最近询价只作 placeholder. 每次精算按批存档到 `coal_quotes`, 同一会话后一次覆盖前一次.
 存档估价由 `blend_kit_server/src/quotes.rs` 按这批指标与当天基准重算, 运费不进估价; 没匹配基准记 NULL,
 不拿本批报价反推的价格做对比. 存档失败不影响精算结果, 精算不可行仍存档. 后台「询价对比」按煤种汇总
-报价/估价中位数与差额中位数, 可删除填错的记录, 供以后校准估价系数. 历史以结果中的正数 fob 派生「询价」标记.
+报价/估价中位数与差额中位数, 可删除填错的记录, 供以后校准估价系数. 精算只给客户算配方, 不提供保存到历史.
 旧偏好价格键 (`fob_override`/`frt_override`/`fob_history`/`is_price_anchor` 等) 仍在读取时剔除;
 `check:data` 仍禁止 master 带 `fob`/`frt`. 行情条在今日 (含精算页) 与煤池页顶部常驻.
 
