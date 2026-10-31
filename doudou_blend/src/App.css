@@ -757,6 +757,10 @@ button {
 /* ========== Tablet / Web ========== */
 /* 行情窄条 (炼焦煤价格指数): 手机两列、不画走势; 宽屏自动排、带走势. 七个品种不横向滚动, 一眼看全. */
 .index-ticker {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--c-bg);
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px 12px;
@@ -1117,6 +1121,7 @@ button {
   .index-ticker {
     margin-bottom: 6px;
     padding-inline: 0 !important;
+    background: #eef1f5;
   }
 
   .today-dashboard {
@@ -1207,3 +1212,104 @@ button {
   }
 }
 
+
+/* ========== 询价精算 ========== */
+/* 价格与指标只保留在当前页面, 不进煤池. */
+.quote-list {
+  display: grid;
+  gap: 12px;
+}
+
+.quote-row {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.quote-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.quote-heading span,
+.quote-hint {
+  font-size: 12px;
+  color: var(--c-text-3);
+}
+
+.quote-heading button {
+  margin-left: auto;
+}
+
+.quote-prices,
+.quote-props {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.quote-prices label,
+.quote-props label {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--c-text-2);
+}
+
+.quote-prices input,
+.quote-props input,
+.quote-add {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-card, #fff);
+  color: var(--c-text-1);
+}
+
+.quote-add {
+  margin: 12px 0;
+}
+
+.quote-warning {
+  color: #92400e;
+  font-size: 12px;
+}
+
+.quote-changed {
+  color: var(--c-primary);
+}
+
+.quote-comparison {
+  min-width: 0;
+}
+
+.quote-comparison table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.quote-comparison th,
+.quote-comparison td {
+  padding: 8px 3px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--c-border);
+}
+
+@media (min-width: 720px) {
+  .quote-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .quote-props {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}

@@ -76,10 +76,10 @@
 (若 App 因登录门挂载成本过高, 可改为把"哪些标签显示行情条"抽成导出常量 `TICKER_TABS` 并对它与 `IndexTicker`
 的渲染位置写测试; 两种都不行就在实施记录里说明, 改由 Task 12 的浏览器验证覆盖)。
 
-- [ ] **Step 1: 失败测试** —— 登录后切到「煤池」标签, 页面里有行情条 (`IndexTicker` 的根元素, 可用其 `aria-label`
+- [x] **Step 1: 失败测试** —— 登录后切到「煤池」标签, 页面里有行情条 (`IndexTicker` 的根元素, 可用其 `aria-label`
   或 `.index-ticker` 查询); 切到「合同」没有。`fetchMcci` 照 `IndexTicker.test.tsx` 的方式 mock。
-- [ ] **Step 2: 跑出 RED**: `npx vitest run src/App.test.tsx`。
-- [ ] **Step 3: 实现**
+- [x] **Step 2: 跑出 RED**: `npx vitest run src/App.test.tsx`。
+- [x] **Step 3: 实现**
 
 `App.tsx`:
 ```tsx
@@ -115,7 +115,7 @@
   }
 }
 ```
-- [ ] **Step 4: GREEN** + `npx vitest run src/IndexTicker.test.tsx` 原样通过。
+- [x] **Step 4: GREEN** + `npx vitest run src/IndexTicker.test.tsx` 原样通过。
 
 ---
 
@@ -124,7 +124,7 @@
 **Files:** Create `blend_kit_server/migrations/0013_coal_quotes.sql`, `blend_kit_server/src/quotes.rs`;
 Modify `blend_kit_server/src/lib.rs` (`mod quotes;`)
 
-- [ ] **Step 1: 迁移** (照抄, 不改列名):
+- [x] **Step 1: 迁移** (照抄, 不改列名):
 ```sql
 -- 询价存档: 用户当场询来的出厂价与运费, 附服务端按这批指标 + 当天基准重算的同口径估价.
 -- 只用于对比与以后校准估价, 不进煤池、不跨次沿用. 同一批 (batch_id) 多次精算以最后一次为准.
@@ -151,7 +151,7 @@ CREATE INDEX IF NOT EXISTS coal_quotes_day ON coal_quotes (quoted_on);
 CREATE INDEX IF NOT EXISTS coal_quotes_user_name ON coal_quotes (username, name, created_at);
 ```
 
-- [ ] **Step 2: 失败测试** (`quotes.rs` 里 `#[cfg(test)] mod tests`):
+- [x] **Step 2: 失败测试** (`quotes.rs` 里 `#[cfg(test)] mod tests`):
 ```rust
 fn item(name: &str, fob: f64) -> QuoteItem {
     QuoteItem {
@@ -210,8 +210,8 @@ fn test_batch_ignores_client_estimate_fields() {
     assert_eq!(parsed.items[0].frt, 0.0);
 }
 ```
-- [ ] **Step 3: RED**: `cargo test --locked quotes::` (编译失败即 RED)。
-- [ ] **Step 4: 实现** (模块头 + 类型 + `validate`):
+- [x] **Step 3: RED**: `cargo test --locked quotes::` (编译失败即 RED)。
+- [x] **Step 4: 实现** (模块头 + 类型 + `validate`):
 ```rust
 //! 询价存档: 询价精算时用户当场填的出厂价与运费 (每次精算存一次, 同一批以最后一次为准),
 //! 附服务端按这批指标 + 线上当前基准重算的同口径估价; 后台按煤种对比"报价 / 估价".
@@ -283,7 +283,7 @@ fn validate(batch: &QuoteBatch) -> Result<(), String> {
 }
 ```
 (`INDICATORS` 用 `blend_kit::INDICATORS`。)
-- [ ] **Step 5: GREEN**。
+- [x] **Step 5: GREEN**。
 
 ---
 
@@ -291,7 +291,7 @@ fn validate(batch: &QuoteBatch) -> Result<(), String> {
 
 **Files:** Modify `blend_kit_server/src/quotes.rs`
 
-- [ ] **Step 1: 失败测试** —— 用 fixture master (`price_factor` 带 1 条 S 规则 + 1 条主焦煤基准; 写法参照
+- [x] **Step 1: 失败测试** —— 用 fixture master (`price_factor` 带 1 条 S 规则 + 1 条主焦煤基准; 写法参照
   `coal_prices.rs` / `benchmarks.rs` 测试里已有的 master fixture), 不用 `coal_master.json`:
 ```rust
 #[test]
@@ -329,8 +329,8 @@ fn test_estimate_reports_core_validation_errors() {
     assert!(estimate_items(&[bad], &fixture_master(), &[]).is_err());
 }
 ```
-- [ ] **Step 2: RED**。
-- [ ] **Step 3: 实现**:
+- [x] **Step 2: RED**。
+- [x] **Step 3: 实现**:
 ```rust
 #[derive(Debug, Clone, PartialEq, Default)]
 struct Estimate {
@@ -386,7 +386,7 @@ fn price_coal(item: &QuoteItem) -> Value {
     coal
 }
 ```
-- [ ] **Step 4: GREEN**。
+- [x] **Step 4: GREEN**。
 
 ---
 
@@ -394,7 +394,7 @@ fn price_coal(item: &QuoteItem) -> Value {
 
 **Files:** Modify `blend_kit_server/src/quotes.rs`, `blend_kit_server/src/lib.rs`
 
-- [ ] **Step 1: 失败的路由测试** (`lib.rs` 的 `mod tests`, 用现成的 `test_app()` / `session_request` / `response_text`;
+- [x] **Step 1: 失败的路由测试** (`lib.rs` 的 `mod tests`, 用现成的 `test_app()` / `session_request` / `response_text`;
   若 `session_request` 不带 Content-Type, 照它的写法加一个带 `application/json` 的变体):
 ```rust
 #[tokio::test]
@@ -417,8 +417,8 @@ async fn test_latest_quotes_requires_login_and_database() {
     // forged → 401; test-session-token → 503
 }
 ```
-- [ ] **Step 2: RED**。
-- [ ] **Step 3: 实现**
+- [x] **Step 2: RED**。
+- [x] **Step 3: 实现**
 
 DTO (都 `Serialize`, 登记到一致性脚本):
 ```rust
@@ -546,7 +546,7 @@ ORDER BY name, created_at DESC
 ```
 `authenticated_username` / `require_json_content_type` / `merged_master_json` 是 `lib.rs` 的私有函数, 子模块可直接
 `use super::{...}` 引用 (`admin.rs` 就是这么做的)。
-- [ ] **Step 4: GREEN**: `cargo test --locked quotes` 与 `cargo test --locked test_archive_quotes test_latest_quotes`。
+- [x] **Step 4: GREEN**: `cargo test --locked quotes` 与 `cargo test --locked test_archive_quotes test_latest_quotes`。
 
 ---
 
@@ -554,7 +554,7 @@ ORDER BY name, created_at DESC
 
 **Files:** Modify `blend_kit_server/src/quotes.rs`, `blend_kit_server/src/lib.rs`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 纯函数:
 ```rust
@@ -591,8 +591,8 @@ async fn test_admin_quotes_guards() {
     // DELETE /api/admin/quotes/x: forged → 401; test-session-token → 403; 管理员 → 503
 }
 ```
-- [ ] **Step 2: RED**。
-- [ ] **Step 3: 实现**
+- [x] **Step 2: RED**。
+- [x] **Step 3: 实现**
 ```rust
 const DEFAULT_LIMIT: i64 = 200;
 const MAX_LIMIT: i64 = 1000;
@@ -649,10 +649,10 @@ pub struct QuoteTypeSummary {
         .route("/api/admin/quotes", get(quotes::list))
         .route("/api/admin/quotes/{id}", delete(quotes::delete))
 ```
-- [ ] **Step 4: 一致性登记** —— `scripts/check_repository_consistency.mjs` 照 `CoalPricePoint` 那两行, 登记
+- [x] **Step 4: 一致性登记** —— `scripts/check_repository_consistency.mjs` 照 `CoalPricePoint` 那两行, 登记
   `ArchivedQuote` / `LatestQuote` / `QuoteRecord` / `QuoteTypeSummary` (新增 `rustQuotesSource` 指向 `quotes.rs`);
   `types.ts` 加同名 interface (字段一一对应, `NaiveDate` / `DateTime` → `string`, `Option<T>` → `T | null`)。
-- [ ] **Step 5: GREEN**: `cargo test --locked`; `cd doudou_blend && npm run check:consistency`。
+- [x] **Step 5: GREEN**: `cargo test --locked`; `cd doudou_blend && npm run check:consistency`。
 
 ---
 
@@ -660,7 +660,7 @@ pub struct QuoteTypeSummary {
 
 **Files:** Create `doudou_blend/src/quotes.ts` + `quotes.test.ts`; Modify `doudou_blend/src/admin.ts` + `admin.test.ts`
 
-- [ ] **Step 1: 失败测试** (mock `fetch`, 写法照 `coalPrices.test.ts`):
+- [x] **Step 1: 失败测试** (mock `fetch`, 写法照 `coalPrices.test.ts`):
   - `archiveQuotes(batchId, items)`: POST `/api/quotes`, `Content-Type: application/json`, body 原样; 返回 `ArchivedQuote[]`;
     非 2xx 时抛出带服务端 `reason` 的 `Error` (精算页据此显示"询价未存档: 原因"); 返回形状不对也抛。
   - `fetchLatestQuotes()`: GET `/api/quotes/latest`; 失败或形状不对返回空 `Map` (只是占位提示, 不该报错);
@@ -668,7 +668,7 @@ pub struct QuoteTypeSummary {
   - `fetchQuoteComparison()`: GET `/api/admin/quotes`; 返回 `{ quotes, by_type }`; 形状不对抛。
   - `deleteQuote(id)`: DELETE `/api/admin/quotes/${encodeURIComponent(id)}`。
   (`admin.ts` 里若已有统一的请求/报错封装, 两个新函数沿用它。)
-- [ ] **Step 2: RED → Step 3: 实现 → Step 4: GREEN**。
+- [x] **Step 2: RED → Step 3: 实现 → Step 4: GREEN**。
 
 `quotes.ts` 里定义精算页提交用的条目类型 (不是 Rust 镜像, 不登记一致性):
 ```ts
@@ -695,7 +695,7 @@ export interface QuoteItemInput {
 目标: `TodayScreen.runSolve` 里 "基准 → 价格因子 → 请求骨架" 那段 (现 `TodayScreen.tsx` 约 309–334 行) 抽成纯函数 +
 一个异步取价函数, 今日页与精算页共用。今日页的"用户输入在任何 await 前冻结"约束保持不变 (调用方先冻结输入再调)。
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 ```ts
 it("今日估价请求: 煤全在 extra_coals, 打开 estimate_unpriced", () => {
   const request = estimateRequest(base, [coalA, coalB]);
@@ -718,7 +718,7 @@ it("询价精算请求: 只含填了价的煤, extra_coals 为空, 关掉 estima
   expect(request.specs).toBe(base.specs);
 });
 ```
-- [ ] **Step 2: RED → Step 3: 实现**, API 形如:
+- [x] **Step 2: RED → Step 3: 实现**, API 形如:
 ```ts
 /** 今日页与询价精算共用的请求骨架: 合同、吨数、一铲、价格因子 (系数表 + 当前基准). */
 export interface BlendBase {
@@ -745,7 +745,7 @@ export interface QuotedCoal {
 
 export function quoteRequest(base: BlendBase, quoted: QuotedCoal[]): BlendRequest;
 ```
-- [ ] **Step 4: 改 `TodayScreen.runSolve` 用它们**; `npx vitest run src/screens/TodayScreen.test.tsx` 原样通过 (测试里对
+- [x] **Step 4: 改 `TodayScreen.runSolve` 用它们**; `npx vitest run src/screens/TodayScreen.test.tsx` 原样通过 (测试里对
   `fetchBenchmarks` / `fetchLatestCoalIndex` 的 mock 仍要生效 —— `blendRequest.ts` 从 `../benchmarks` / `../coal_index`
   引入同名函数即可)。
 
@@ -755,9 +755,9 @@ export function quoteRequest(base: BlendBase, quoted: QuotedCoal[]): BlendReques
 
 **Files:** Create `doudou_blend/src/screens/BlendCards.tsx`; Modify `TodayScreen.tsx`
 
-- [ ] **Step 1**: 把今日页 `.today-recipe` 卡 (配方条 + 列表) 与 `.today-indicators` 卡原样搬成
+- [x] **Step 1**: 把今日页 `.today-recipe` 卡 (配方条 + 列表) 与 `.today-indicators` 卡原样搬成
   `RecipeCard({ result, ... })` / `IndicatorCard({ result, ... })` (props 以实际需要为准, 不新增外观); 今日页改用它们。
-- [ ] **Step 2**: `npx vitest run src/screens/TodayScreen.test.tsx` 原样通过 (这一步是纯搬家, 现有测试就是它的测试)。
+- [x] **Step 2**: `npx vitest run src/screens/TodayScreen.test.tsx` 原样通过 (这一步是纯搬家, 现有测试就是它的测试)。
 
 ---
 
@@ -788,8 +788,8 @@ export function quoteRequest(base: BlendBase, quoted: QuotedCoal[]): BlendReques
 8. 「← 返回今日」调用 `onBack`。
 9. 询价数据不写任何本地存储 (测试: 精算前后 `localStorage` 不变; `storage` 模块的写函数未被调用)。
 
-- [ ] **Step 1: 按上面 1–9 写失败测试** (一条一个 `it`), 加今日页测试: 「询价精算」按钮出现、点开后渲染精算页、返回后仍是原估价结果。
-- [ ] **Step 2: RED → Step 3: 实现 → Step 4: GREEN**。样式写进 `App.css` (类名前缀 `quote-`), 手机宽度不出横向滚动。
+- [x] **Step 1: 按上面 1–9 写失败测试** (一条一个 `it`), 加今日页测试: 「询价精算」按钮出现、点开后渲染精算页、返回后仍是原估价结果。
+- [x] **Step 2: RED → Step 3: 实现 → Step 4: GREEN**。样式写进 `App.css` (类名前缀 `quote-`), 手机宽度不出横向滚动。
 
 ---
 
@@ -798,9 +798,9 @@ export function quoteRequest(base: BlendBase, quoted: QuotedCoal[]): BlendReques
 **Files:** Modify `doudou_blend/src/types.ts` (`HistoryRecord.quoted: boolean`), `backend.ts` (+ `backend.test.ts`),
 `screens/HistoryScreen.tsx` (+ test)
 
-- [ ] **Step 1: 失败测试**: `listHistory` 对 `result.coal_values` 里任一 `fob` 为正数的记录给 `quoted: true`, 否则 (含无 result、
+- [x] **Step 1: 失败测试**: `listHistory` 对 `result.coal_values` 里任一 `fob` 为正数的记录给 `quoted: true`, 否则 (含无 result、
   `coal_values` 缺失或损坏) `false`; 历史页对 `quoted` 记录显示 `询价` 小标 (用现有 `.badge`)。
-- [ ] **Step 2: RED → Step 3: 实现 → Step 4: GREEN** (其他使用 `HistoryRecord` 的测试夹具补上 `quoted: false`)。
+- [x] **Step 2: RED → Step 3: 实现 → Step 4: GREEN** (其他使用 `HistoryRecord` 的测试夹具补上 `quoted: false`)。
 
 ---
 
@@ -808,21 +808,21 @@ export function quoteRequest(base: BlendBase, quoted: QuotedCoal[]): BlendReques
 
 **Files:** Create `doudou_blend/src/screens/admin/QuoteCompareCard.tsx` + test; Modify `screens/AdminScreen.tsx`
 
-- [ ] **Step 1: 失败测试**: 加载中/失败/空 (`还没有询价`) 三态; 汇总表 (煤种 · 条数 · 报价/估价中位 (如 `1.10`) · 差额中位
+- [x] **Step 1: 失败测试**: 加载中/失败/空 (`还没有询价`) 三态; 汇总表 (煤种 · 条数 · 报价/估价中位 (如 `1.10`) · 差额中位
   (`+200`)); 明细表 (日期 · 煤 · 煤种 · 对标基准 · 出厂 · 运费 · 估价 · 差额 · 比例 · 改过的指标), 估价为 null 显示 `—`;
   每行「删除」先 `confirm("删除这条询价? 删除后不进汇总")`, 确认才调 `deleteQuote`, 成功后重新加载。
   卡片风格照 `screens/admin/CsrModelCard.tsx` 与 `admin/styles.ts`。
-- [ ] **Step 2: RED → Step 3: 实现 (挂到 `AdminScreen`, 放在 `BenchmarkCard` 之后) → Step 4: GREEN**。
+- [x] **Step 2: RED → Step 3: 实现 (挂到 `AdminScreen`, 放在 `BenchmarkCard` 之后) → Step 4: GREEN**。
 
 ---
 
 ### Task 12: 文档、全量校验、联调
 
-- [ ] **Step 1: `CLAUDE.md`**: 把 "Estimate-only pricing" 段改为: 求解默认全按估价; 唯一例外是今日页「询价精算」—— 用户当场
+- [x] **Step 1: `CLAUDE.md`**: 把 "Estimate-only pricing" 段改为: 求解默认全按估价; 唯一例外是今日页「询价精算」—— 用户当场
   填几种煤的出厂价与运费, 只用这几种煤求解, 询价不进煤池、不跨次沿用; 每次精算按批存档到 `coal_quotes` (估价由
   `blend_kit_server/src/quotes.rs` 用当天基准重算), 后台「询价对比」按煤种汇总, 供以后校准估价系数。同时在架构段
   `coal_prices.rs` 那句后补一句 `quotes.rs` 的职责。
-- [ ] **Step 2: 全量**:
+- [x] **Step 2: 全量**:
 ```bash
 cd blend_kit_server && cargo fmt && cargo clippy --release -- -D warnings && cargo test --locked
 cd doudou_blend && npm test && npm run build && npm run check:consistency && npm run check:data
@@ -841,3 +841,46 @@ cd doudou_blend && npm test && npm run build && npm run check:consistency && npm
 ## 实施记录
 
 (实施者逐 Task 填写: RED/GREEN 测试数、偏离计划之处与理由。)
+
+- 执行约定: 使用本节作唯一实施台账, 测试日志放 `/tmp/quote-blend-checks/`; 按用户要求留在当前分支, 不新建工作树、不提交.
+- 接口预检: Task 2–5 的 DTO → Task 6/11 的接口与后台; Task 7/8 的请求与卡片 → Task 9; Task 9 的结果 → Task 10 的派生标记. 无口径冲突.
+- Task 1: complete. RED: App 1 失败 (煤池无行情条); GREEN: App + IndexTicker 2 文件、7 测试通过. 保留指数弹层测试原文. 无偏离.
+- Task 2: complete. RED: 缺少 QuoteBatch/QuoteItem/validate, 编译失败; GREEN: 3 测试通过. 迁移列名按计划. 首次命令误在仓库根目录运行, 随即在 server crate 重跑取得真实 RED.
+- Task 3: complete. RED: estimate_items 缺失编译失败; GREEN: 7 测试通过 (新增 4). fixture 使用真实 S/Upper 系数结构, A=-5 确认触发核心校验. 无口径偏离.
+- Task 4: complete. RED: archived 缺失; 路由另跑得到 2 失败 (405/404 而非 401); GREEN: quotes 过滤 12 测试通过 (新增 3). Ruling: 原计划一个 cargo test 带两个过滤词不合法, 合并为 cargo test --locked quotes, 覆盖两个路由与纯函数.
+- Task 5: complete. RED: QuoteRecord/summarize/parse_limit 缺失编译失败; GREEN: server 库 134 测试通过、1 忽略, CLI 8 通过、1 受沙箱监听限制失败 (`test_two_profiles_against_live_server`, Operation not permitted), 未改该测试. 一致性检查通过. 新增空煤种/无估价/limit 边界覆盖.
+- Task 6: complete. RED: quotes 模块缺失 + admin 6 失败; GREEN: 2 文件、28 测试通过. API 同时校验条目字段, 损坏响应不会进入页面. Indicator 使用仓库既有 IndicatorKey.
+- Task 7: complete. RED: blendRequest 模块缺失; GREEN: 请求 4 + TodayScreen 原有 28 = 32 测试通过. Ruling: npm exec 实际使用 Node v26.13.0, 其内置 localStorage 遮蔽 jsdom, 导致 28 测试在 beforeEach 的 clear 失败; 仅命令设置 NODE_OPTIONS=--no-experimental-webstorage 后全绿, 不改既有测试或配置. 后续前端验证沿用该环境变量.
+- Task 8: complete. 按计划纯抽取, 用 Task 7 已通过的 28 项 TodayScreen 测试作基线; 抽取后原样 28/28 通过, 不人为制造 RED. 配方与指标 JSX/文案/判定保持原样.
+- Task 9: complete. RED: QuoteScreen 模块缺失; GREEN: QuoteScreen 17 + TodayScreen 原有 28 = 45 通过. 新增入口测试放在 QuoteScreen.test.tsx, TodayScreen.test.tsx 完全不改. Ruling: 同一会话的存档顺序发送, 求解独立并行, 防旧请求最后写库覆盖新价; 存档卡住时后续存档会排队, 结果不受影响. 构建发现新 fixture 的 map 推断过窄, 显式指定 MasterCoalEntry 类型修正构造, 断言不变.
+- Task 10: complete. RED: 8 失败、9 通过; GREEN: backend + HistoryScreen 共 17 通过. 仅补旧历史 fixture 的 quoted: false, 既有期望不变; 损坏 coal_values 与非数字 fob 不会误标.
+- Task 11: complete. RED: QuoteCompareCard 缺失; GREEN: 6 测试通过 (加载、空、失败、数值、删除确认/刷新/失败). 后台放在 BenchmarkCard 后.
+- Task 12: 文档完成; 第一轮全量: cargo fmt 无输出成功, cargo clippy --release -- -D warnings 成功 (`Finished release profile`, 2.16s); cargo test --locked: 库 134 passed/1 ignored, CLI 8 passed/1 failed (src/bin/doudou.rs:599, test_two_profiles_against_live_server, PermissionDenied: Operation not permitted), 退出码 101. 按用户授权只记录, 不改端口测试.
+- Task 12: 前端使用 `NODE_OPTIONS=--no-experimental-webstorage`: npm test 为 38 文件/408 测试通过; npm run build 为 81 modules transformed, built in 831ms; check:consistency 通过 (112 条, v0.1.1); check:data 通过 (112 条), 保留既有 1 条煤种判据和 24 种地区匹配提示, 未改 master.
+- Task 12 Step 3/4: 跳过真实 PostgreSQL 与本地服务浏览器联调. `docker info --format '{{.ServerVersion}}'` 返回 docker.sock permission denied; CLI 监听测试证明沙箱不允许启动测试服务. 用户在本机按上面的联调清单验收; jsdom 组件测试不能代替真实滚动、遮挡和 PostgreSQL 事务验证.
+- Task 1 补充 Ruling: 计划把宽屏底色规则写成 ≥720px, 真实仓库中 body 的 #eef1f5 与该行情条规则都在 ≥960px; 在原规则处加背景, 720–959px 保持 var(--c-bg), 使常驻条底色跟随实际页面. 代价: 与设计文字的断点数值不同, 手机和宽屏视觉均仍需浏览器确认.
+- Final review: 一次独立只读审查, 发现 3 项 Important、0 Critical、0 Minor. 无基准对比与不可行 warnings 已由新增测试重现: RED 2 失败/17 通过 → GREEN 19/19; 既有成功对比 fixture 补上真实基准字段, 原断言含义未改.
+- Final: fixed 同批并发覆盖竞态: DELETE 前新增按 (username, batch_id) 的事务级 advisory lock, 防止两个并发事务删到旧快照后留下并集. 新增 quotes_db_tests.rs 的隔离 schema 并发回归测试, 通过 pg_stat_activity 确认后到请求已等待后才提交先到请求.
+- Final: Ruling: PostgreSQL 并发回归无法实际跑 RED/GREEN (docker.sock 被沙箱拒绝), 测试仅编译并标记 ignored, 不能算通过. 按用户允许跳过真实 PG 联调的授权完成静态修复; 风险是数据库锁/事务行为仍需本机验证. 本机命令: 在 server crate 下 `DATABASE_URL=独立测试库 cargo test --locked test_replace_quote_batch_serializes_concurrent_writers -- --ignored`.
+- Final: Ruling: 审查列出的其余行为保持现状: 存档队列与输入失效防旧结果覆盖; 非法/空指标回退与最近询价静默失败符合设计; 成功结果不额外展示 warnings 跟随今日页; 960px 底色跟随实际 CSS; 全量汇总查询适合本期规模, 未加依赖. 代价: 存档挂起会使后续存档排队, 成功结果普通 warnings 不展示, 大量历史样本时汇总查询需再评估.
+- Final validation: 修复后再次跑完全部指定命令. cargo fmt exit 0 (无输出); cargo clippy --release -- -D warnings exit 0 (`Finished release profile`, 2.85s); cargo test --locked exit 101: 库 134 passed/0 failed/2 ignored (既有外网 MCCI + 新增本机 PG 并发测试), CLI 8 passed/1 failed, 唯一失败仍为端口监听权限. PostgreSQL 回归初次编译遇到 sqlx raw_sql 在 after_connect 中的生命周期限制, 改用绑定参数的 set_config 初始化连接后编译通过, 未改变测试断言.
+- Final validation: `NODE_OPTIONS=--no-experimental-webstorage` 下 npm test exit 0 (38 文件/410 passed), npm run build exit 0 (81 modules, built in 475ms), check:consistency exit 0 (112 条, 0.1.1), check:data exit 0 (112 条, 既有数据提示不变). `git diff --check` 通过. core/WASM/TodayScreen.test.tsx/IndexTicker.test.tsx 的 diff 全为空; HEAD 不变, 未提交、未推送、未触碰 research/. 无暂缓 Minor.
+
+### 审查 (Claude, 2026-10-31)
+
+- 修 bug: 精算页挂在今日页下, 今日页后台重算 (改煤池、云同步) 失败会切到错误页, 把精算页连同已填的报价一起卸掉。
+  改为 `quoting` 存进入时的估价结果, 在 loading/error 判断之前渲染精算页。补回归测试「精算页开着时今日页后台重算失败,
+  已填的报价不丢」: 旧写法下 RED (1 失败), 修后 GREEN。
+- 可读性: `QuoteScreen.tsx` 拆出 `QuoteRowCard` / `QuoteComparison` / `formatGap`, `QuoteCompareCard.tsx` 拆出
+  `HeaderRow` / `DetailRow`, 都改成逐行展开的 JSX; 询价 CSS 按文件既有风格逐条展开; `blendRequest.ts` 补回从今日页
+  搬走时丢掉的说明注释 (基准回退顺序、一铲、extra_coals 与 estimate_unpriced 的含义); `quotes.rs` 补项间空行。行为与文案不变。
+- 精算页配方卡标题改为「精算配方」(`RecipeCard` 加可选 `title`, 今日页默认不变), 测试补断言。
+- 本机联调 (docker postgres:16):
+  - `test_replace_quote_batch_serializes_concurrent_writers -- --ignored` 通过。
+  - 接口: 同批两次提交 2 行 → 1 行 (2120); 浏览器带的 `estimate` 被忽略, 服务端按这批指标重算并记基准; 换批并存,
+    `/api/quotes/latest` 每煤一条; 后台明细/汇总正确, 删除 200 → 再删 404, 汇总条数随之减 1; 普通账号调后台 403。
+  - 浏览器 (宽屏): 今日页 → 询价精算默认带出今日配方 4 种煤与今日估价, 上次询价只作占位; 偏离 50% 行内提示不拦;
+    精算 1969.04 元/吨 (含运费), 报价对比 4 行; 保存后历史有「询价」标记; 库里这批 4 行, 估价与页面一致;
+    今日页与煤池页滚动时行情条停在顶上, 走势弹层盖在其上。手机宽度未在真机上看。
+- 全量: server fmt/clippy (`--all-targets`) 通过, 库 134 passed + CLI 9 passed (本机无沙箱限制, 端口测试也过);
+  前端 Node 22: 38 文件 / 411 passed, build、check:consistency 通过。

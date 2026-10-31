@@ -69,6 +69,8 @@ reaching the core (`MASTER_ONLY_KEYS`, mirrored in `doudou_blend/src/benchmarks.
 按"当天能拿到的指数与报价" (`benchmarks::as_of`) 补算今天以前缺的 (日期, 煤) —— 存下就不改, 只补空 (`source` 区分
 live / backfill); `GET /api/coal-prices` 返回最新日与前一日价格, `GET /api/coal-prices/history?name=` 返回单煤全部历史;
 煤池卡片据此显示估价与涨跌, 点估价行看走势; 用户修改或新增的煤按当前值现算.
+`blend_kit_server/src/quotes.rs` 接收现场询价, 按这批指标与当天基准重算出厂估价, 在一个事务里按批覆盖存档,
+并提供最近询价占位提示、后台明细/按煤种汇总/删除.
 `robustness.rs` is the opt-in price-robustness analysis (`BlendRequest.price_robustness`): prices are mostly
 estimates and the LP optimum is flat, so it re-solves with perturbed prices to report per-coal flip thresholds (how
 many 元 before ≥10% of tonnage moves, vs. that coal's price uncertainty from `price_factor.uncertainty`, keyed by
@@ -98,12 +100,16 @@ frontend bundle. Screens read master data through `master_loader.ts`'s `loadMast
 `localStorage` acts as a synchronous cache (`doudou_blend/src/storage.ts`) and `cloudStorage.ts` mirrors it to
 PostgreSQL through `GET/PUT /api/storage` after login.
 
-**Estimate-only pricing.** Real per-coal quotes are unobtainable, so every coal is priced by the estimation
-module: neither the web (`domain/resolvedCoal.ts` `toEstimateCoal`) nor `today.rs` reads master `fob`/`frt` or
-user price overrides; all enabled coals go to `price_factor.extra_coals` with `estimate_unpriced`, `coals: []`.
-Real quotes are negotiated *after* the estimate and never enter the solve. Legacy price keys in stored prefs
-(`fob_override`/`frt_override`/`fob_history`/`is_price_anchor`…) are stripped on read; `check:data` fails if
-master carries `fob`/`frt`.
+**估价与询价精算.** 求解默认全按估价: `domain/resolvedCoal.ts` 的 `toEstimateCoal` 与 `today.rs` 都不读
+master 或偏好里的价格键, 启用煤放进 `price_factor.extra_coals`, `coals: []`, 打开 `estimate_unpriced`.
+唯一例外是今日页「询价精算」: 用户当场填几种煤的出厂价与运费, 只用填了出厂价的煤求解 (至少两种),
+按到厂价 = 出厂价 + 运费计算. 当场改的指标只进本次请求与存档, 询价不进煤池、不写本地或云端偏好、不跨次沿用;
+下次进入时输入为空, 最近询价只作 placeholder. 每次精算按批存档到 `coal_quotes`, 同一会话后一次覆盖前一次.
+存档估价由 `blend_kit_server/src/quotes.rs` 按这批指标与当天基准重算, 运费不进估价; 没匹配基准记 NULL,
+不拿本批报价反推的价格做对比. 存档失败不影响精算结果, 精算不可行仍存档. 后台「询价对比」按煤种汇总
+报价/估价中位数与差额中位数, 可删除填错的记录, 供以后校准估价系数. 历史以结果中的正数 fob 派生「询价」标记.
+旧偏好价格键 (`fob_override`/`frt_override`/`fob_history`/`is_price_anchor` 等) 仍在读取时剔除;
+`check:data` 仍禁止 master 带 `fob`/`frt`. 行情条在今日 (含精算页) 与煤池页顶部常驻.
 
 **Blend history & the CSR data loop.** Saved blends persist to PostgreSQL via `/api/history`, keeping the full
 `BlendResult` JSON. The History screen lets the user backfill the lab-measured coke CSR onto a past blend —

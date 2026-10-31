@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addOverrides,
+  fetchQuoteComparison,
+  deleteQuote,
   deleteOverride,
   getCalibration,
   getCsrModel,
@@ -18,6 +20,27 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
+});
+
+describe("询价对比", () => {
+  it("解包明细与汇总, 不缓存", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ ok: true, quotes: [], by_type: [] }));
+    await expect(fetchQuoteComparison()).resolves.toEqual({ quotes: [], by_type: [] });
+    expect(fetch).toHaveBeenCalledWith("/api/admin/quotes", { credentials: "same-origin", cache: "no-store" });
+  });
+
+  it.each([null, {}, { ok: true, quotes: {}, by_type: [] }, { ok: true, quotes: [], by_type: [null] }])("拒绝损坏的响应: %j", async (body) => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse(body));
+    await expect(fetchQuoteComparison()).rejects.toThrow();
+  });
+
+  it("删除询价编码 id, 服务端失败抛出原因", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ ok: true }))
+      .mockResolvedValueOnce(jsonResponse({ ok: false, reason: "询价不存在" }, 404));
+    await deleteQuote("a/b");
+    expect(fetch).toHaveBeenCalledWith("/api/admin/quotes/a%2Fb", { credentials: "same-origin", method: "DELETE" });
+    await expect(deleteQuote("missing")).rejects.toThrow("询价不存在");
+  });
 });
 
 afterEach(() => {

@@ -5,6 +5,8 @@
  * API 密钥的增删查在 apiKeys.ts, 这里不重复.
  */
 
+import type { QuoteComparisonResponse } from "./types";
+
 export interface AdminSettings {
   /** 煤阶交互罚项系数; null 或 0 = 不启用. 设置后服务端对所有求解自动生效. */
   rank_interaction_k: number | null;
@@ -138,4 +140,27 @@ export async function deleteOverride(coal: string, field: string): Promise<void>
     `master/coals/${encodeURIComponent(coal)}/${encodeURIComponent(field)}`,
     { method: "DELETE" },
   );
+}
+
+export async function fetchQuoteComparison(): Promise<Omit<QuoteComparisonResponse, "ok">> {
+  const result = await request("admin/quotes", { cache: "no-store" }) as QuoteComparisonResponse;
+  if (result?.ok !== true || !Array.isArray(result.quotes) || !Array.isArray(result.by_type)
+    || !result.quotes.every((quote) => quote
+      && [quote.id, quote.username, quote.batch_id, quote.quoted_on, quote.name, quote.created_at].every((value) => typeof value === "string")
+      && [quote.coal_type, quote.form, quote.region, quote.benchmark].every((value) => value === null || typeof value === "string")
+      && Number.isFinite(quote.fob) && Number.isFinite(quote.frt)
+      && [quote.estimate, quote.points, quote.gap, quote.ratio].every((value) => value === null || Number.isFinite(value))
+      && quote.props && typeof quote.props === "object" && !Array.isArray(quote.props)
+      && Object.values(quote.props).every((value) => value === null || Number.isFinite(value))
+      && Array.isArray(quote.changed) && quote.changed.every((key) => typeof key === "string"))
+    || !result.by_type.every((group) => group && typeof group.coal_type === "string"
+      && Number.isInteger(group.count) && group.count > 0
+      && Number.isFinite(group.median_ratio) && Number.isFinite(group.median_gap))) {
+    throw new Error("询价对比响应格式不对");
+  }
+  return { quotes: result.quotes, by_type: result.by_type };
+}
+
+export async function deleteQuote(id: string): Promise<void> {
+  await request(`admin/quotes/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

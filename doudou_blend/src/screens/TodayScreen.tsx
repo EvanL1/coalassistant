@@ -22,7 +22,6 @@ import {
   resolvePurchaseTerms,
 } from "../domain/purchaseTerms";
 import { hasCostAdjustments } from "../domain/costBreakdown";
-import { fetchLatestCoalIndex } from "../coal_index";
 import {
   isSnapshotActionable,
   LatestRequestTracker,
@@ -30,14 +29,8 @@ import {
 } from "../domain/solveSession";
 import { loadMaster } from "../master_loader";
 import { getPenaltyTemplate, PENALTY_TEMPLATE_EVENT } from "../penaltyStorage";
-import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
 import type {
-  BlendRequest,
   BlendResult,
-  EvaluationMethod,
-  EvaluationStatus,
-  IndicatorCheck,
-  QualityStatus,
   Spec,
 } from "../types";
 import type { TabId } from "../TabBar";
@@ -49,12 +42,12 @@ import {
   getUserCoals,
   setQuantity,
 } from "../storage";
-import { fetchBenchmarks, solverPriceFactor, toRequestBenchmark } from "../benchmarks";
+import { estimateRequest, loadPriceFactor } from "../domain/blendRequest";
 import { coalTypeMap } from "../domain/coalTypes";
 import { CostCard } from "./CostCard";
+import { QuoteScreen } from "./QuoteScreen";
+import { RecipeCard, IndicatorCard, QUALITY_STATUS_LABEL, isContractIndicator, isIndicatorPassing } from "./BlendCards";
 import { InfeasiblePanel } from "./InfeasiblePanel";
-
-const RECIPE_COLORS = ["#0a5fff", "#7c3aed", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#8b5cf6"];
 
 /** 输入摘要里的可点击链接 (跳合同/煤池). */
 const summaryLink: CSSProperties = {
@@ -66,52 +59,6 @@ const summaryLink: CSSProperties = {
   fontWeight: 600,
   fontSize: 12,
 };
-
-const QUALITY_STATUS_LABEL: Record<QualityStatus, string> = {
-  Verified: "已验证",
-  Estimated: "估算",
-  NeedsReview: "需复核",
-};
-
-const EVALUATION_STATUS_LABEL: Record<EvaluationStatus, string> = {
-  Pass: "通过",
-  TolerancePass: "容差通过",
-  Unverified: "未验证",
-  Fail: "未通过",
-};
-
-const EVALUATION_METHOD_LABEL: Record<EvaluationMethod, string> = {
-  Linear: "线性加权",
-  ProvisionalLinear: "暂行线性",
-  AffineCalibration: "仿射校准",
-  Histogram: "直方图复验",
-  Moments: "统计矩复验",
-  Regression: "回归预测",
-  Unavailable: "无法评估",
-};
-
-function legacyEvaluationStatus(check: IndicatorCheck): EvaluationStatus {
-  return check.slack != null && check.slack < -0.01 ? "Fail" : "Pass";
-}
-
-function evaluationStatus(check: IndicatorCheck): EvaluationStatus {
-  return check.status ?? legacyEvaluationStatus(check);
-}
-
-function isIndicatorPassing(check: IndicatorCheck): boolean {
-  const status = evaluationStatus(check);
-  return status !== "Fail" && check.method !== "Unavailable";
-}
-
-function isContractIndicator(check: IndicatorCheck): boolean {
-  return check.min != null || check.max != null;
-}
-
-function formatIndicatorValue(value: number): string {
-  return value
-    .toFixed(4)
-    .replace(/\.?0+$/, "");
-}
 
 /** 把求解结果格式化成可复制的采购清单文本 (纯函数). */
 function buildOrderText(
@@ -191,6 +138,9 @@ type SolveState =
   | { status: "error"; error: string };
 
 export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
+  // 询价精算开着时记下进入那一刻的估价结果: 后台重算 (同步、改煤池) 失败或重算中都不能把精算页
+  // 卸掉, 否则用户当场填的报价就丢了.
+  const [quoting, setQuoting] = useState<BlendResult | null>(null);
   const [state, setState] = useState<SolveState>({ status: "loading" });
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -306,33 +256,11 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         ? "用户自定义合同"
         : master.default_contract.name;
 
-      // 估价按基准报价 (分煤种、带报价日, 服务端已按现货指数推算到今天); 取不到就用
-      // master 自带的默认基准. 两样都没有才退回现货指数点位当标准品价 (只是相对尺度).
-      const priceFactor = master.price_factor;
-      const fetched = (await fetchBenchmarks()).map(toRequestBenchmark);
-      const benchmarks =
-        fetched.length > 0 ? fetched : (priceFactor.benchmarks ?? []);
-      const marketPrice =
-        benchmarks.length === 0 ? await fetchLatestCoalIndex() : null;
+      const priceFactor = await loadPriceFactor(master.price_factor);
       if (!tracker.isCurrent(requestId)) return;
-
-      const request: BlendRequest = {
-        coals: [],
-        specs,
-        total_quantity: totalQuantity,
-        // 现场铲车配煤: 每种煤要么不用、要么至少一铲, 按整铲配.
-        shovel_tons: getShovelTons(),
-        truncate_decimal: true,
-        // 价格因子系数表来自 master (数据不是代码). 煤全在 extra_coals 里,
-        // estimate_unpriced 让核心按估算价把它们并入煤池求解.
-        price_factor: {
-          ...solverPriceFactor(priceFactor),
-          ...(benchmarks.length > 0 ? { benchmarks } : {}),
-          ...(marketPrice != null ? { market_price: marketPrice } : {}),
-          extra_coals: estimated,
-          estimate_unpriced: true,
-        },
-      };
+      const request = estimateRequest({
+        specs, totalQuantity, shovelTons: getShovelTons(), priceFactor,
+      }, estimated);
 
       const json = await backend.solveJson(JSON.stringify(request));
       const result: BlendResult = JSON.parse(json);
@@ -518,6 +446,9 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
     }, 2000);
   }
 
+  if (quoting) {
+    return <QuoteScreen todayResult={quoting} onBack={() => setQuoting(null)} />;
+  }
   if (state.status === "loading") {
     return <div className="loading">求解中...</div>;
   }
@@ -552,7 +483,6 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   const today = new Date();
   const dateStr = `${today.getFullYear()} 年 ${today.getMonth() + 1} 月 ${today.getDate()} 日`;
 
-  const sortedRecipe = [...result.orders].sort((a, b) => b.ratio - a.ratio);
   const coalTypes = coalTypeMap(snapshot.request);
 
   return (
@@ -667,165 +597,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </div>
       </div>
 
-      <div className="card today-recipe">
-        <div
-          className="card-title"
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <span>今日配方</span>
-          <span style={{ fontSize: 11, color: "var(--c-text-3)" }}>
-            选用 {sortedRecipe.length} 种煤
-          </span>
-        </div>
-        <div className="recipe-bar">
-          {sortedRecipe.map((o, i) => (
-            <div
-              key={o.coal}
-              className="recipe-seg"
-              style={{
-                background: RECIPE_COLORS[i % RECIPE_COLORS.length],
-                width: `${o.ratio * 100}%`,
-              }}
-              title={`${o.coal} ${(o.ratio * 100).toFixed(1)}%`}
-            >
-              {o.ratio > 0.1 ? `${(o.ratio * 100).toFixed(0)}%` : ""}
-            </div>
-          ))}
-        </div>
-        <div className="recipe-list">
-          {sortedRecipe.map((o, i) => (
-            <div key={o.coal} className="recipe-row">
-              <div className="recipe-row-left">
-                <span
-                  className="recipe-dot"
-                  style={{ background: RECIPE_COLORS[i % RECIPE_COLORS.length] }}
-                />
-                <span>{o.coal}</span>
-                {coalTypes.get(o.coal) && (
-                  <span className="recipe-coal-type">{coalTypes.get(o.coal)}</span>
-                )}
-              </div>
-              <div className="recipe-amount">
-                {(o.ratio * 100).toFixed(2)}% ·{" "}
-                {o.tons != null ? `${o.tons.toFixed(0)} 吨` : "-"}
-                {o.shovels != null && ` · ${o.shovels} 铲`}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="card today-indicators">
-        <div
-          className="card-title"
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <span>混合指标</span>
-          <span style={{ fontSize: 11, color: "var(--c-text-3)" }}>
-            {QUALITY_STATUS_LABEL[qualityStatus]}
-            {result.evaluation_iterations != null
-              ? ` · ${result.evaluation_iterations} 轮评估`
-              : ""}
-          </span>
-        </div>
-        <div className="indicator-grid">
-          {INDICATOR_ORDER.map((key) => {
-            const ic = result.indicator_check.find((c) => c.indicator === key);
-            const label = INDICATOR_LABEL[key];
-            if (!ic) {
-              return (
-                <div key={key} className="indicator-cell unconstrained">
-                  <div className="indicator-label">{label}</div>
-                  <div className="indicator-value" style={{ color: "var(--c-text-3)" }}>
-                    —
-                  </div>
-                  <div className="indicator-meta">未约束</div>
-                </div>
-              );
-            }
-            const status = evaluationStatus(ic);
-            const violated = status === "Fail";
-            const unverified = status === "Unverified";
-            const className = `indicator-cell ${
-              violated
-                ? "violated"
-                : unverified
-                  ? "unverified"
-                  : ic.binding
-                    ? "binding"
-                    : ""
-            }`;
-            const rawValue = ic.evaluated_value ?? ic.value;
-            const judgedValue = ic.judged_value ?? rawValue;
-            const proxyValue = ic.proxy_value;
-            const method = ic.method ?? "Linear";
-            const unavailable =
-              method === "Unavailable" && ic.evaluated_value == null;
-            let rangeStr = "—";
-            if (ic.min != null && ic.max != null)
-              rangeStr = `${ic.min}-${ic.max}`;
-            else if (ic.min != null) rangeStr = `≥${ic.min}`;
-            else if (ic.max != null) rangeStr = `≤${ic.max}`;
-            return (
-              <div key={key} className={className}>
-                <div className="indicator-label">{label}</div>
-                <div className="indicator-value-row">
-                  <div className="indicator-value">
-                    {unavailable ? "—" : formatIndicatorValue(judgedValue)}
-                  </div>
-                  {ic.penalty_per_ton != null && ic.penalty_per_ton > 1e-6 ? (
-                    <span className="indicator-penalty">
-                      扣 {ic.penalty_per_ton.toFixed(2)} 元/吨
-                    </span>
-                  ) : (
-                    <span
-                      className={`evaluation-pill evaluation-${status.toLowerCase()}`}
-                    >
-                      {EVALUATION_STATUS_LABEL[status]}
-                    </span>
-                  )}
-                </div>
-                <div className="indicator-meta">
-                  {unavailable
-                    ? "缺少可用指标或评估输入"
-                    : `原始 ${formatIndicatorValue(rawValue)} · 判定 ${formatIndicatorValue(judgedValue)}`}
-                </div>
-                <div className="indicator-meta">
-                  {rangeStr}
-                  {ic.binding && !violated ? " · ★ 顶格" : ""}
-                  {ic.uncertainty != null
-                    ? ` · ±${formatIndicatorValue(ic.uncertainty)}`
-                    : ""}
-                </div>
-                <div className="indicator-meta indicator-method">
-                  {EVALUATION_METHOD_LABEL[method]}
-                  {proxyValue != null &&
-                  Math.abs(proxyValue - rawValue) > 0.000001
-                    ? ` · 代理 ${formatIndicatorValue(proxyValue)}`
-                    : ""}
-                  {ic.model?.version ? ` · ${ic.model.version}` : ""}
-                  {ic.model?.in_domain === false ? " · 训练域外" : ""}
-                </div>
-                {/* 第二个 CSR 估计: 按配合煤挥发/G/Y 推 (捣固), 与上面的单煤加权并列.
-                    公式精度在个位数, 只给一位小数. */}
-                {key === "CSR" && result.csr_stamp_estimate != null && (
-                  <div className="indicator-meta">
-                    捣固公式估算 {result.csr_stamp_estimate.toFixed(1)}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      <RecipeCard result={result} coalTypes={coalTypes} />
+      <IndicatorCard result={result} />
       </div>
       ) : (
         <>
@@ -858,6 +631,13 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       )}
 
       <div className="action-row">
+        <button
+          className="btn btn-secondary"
+          disabled={refreshing}
+          onClick={() => setQuoting(result)}
+        >
+          询价精算
+        </button>
         <button
           className="btn btn-secondary"
           onClick={() => runSolve(false)}
