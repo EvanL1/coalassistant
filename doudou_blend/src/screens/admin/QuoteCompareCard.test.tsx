@@ -72,3 +72,19 @@ it("删除失败显示原因并保留明细", async () => {
   expect(await screen.findByText("删除失败")).toBeTruthy();
   expect(screen.getByText("测试煤")).toBeTruthy();
 });
+
+it("差额四舍五入为 0 时显示 0, 不带正负号", async () => {
+  mocks.fetch.mockResolvedValue({
+    quotes: [{ ...row, gap: 0.3 }],
+    by_type: [{ coal_type: "主焦煤", count: 1, median_ratio: 1.0, median_gap: -0.4 }],
+  });
+  render(<QuoteCompareCard />);
+  const summary = await screen.findByRole("table", { name: "询价按煤种汇总" });
+  const details = screen.getByRole("table", { name: "询价明细" });
+  expect(within(summary).getByText("0")).toBeTruthy();
+  expect(within(details).getByText("0")).toBeTruthy();
+  for (const table of [summary, details]) {
+    expect(within(table).queryByText("+0")).toBeNull();
+    expect(within(table).queryByText("-0")).toBeNull();
+  }
+});
