@@ -1,13 +1,14 @@
 /**
  * 后台 - 管理员账号登录后看到的唯一页面 (不进五屏应用).
  *
- * 四张卡片各自加载各自的数据, 一张失败不拖累其他.
+ * 各卡片各自加载各自的数据, 一张失败不拖累其他.
  */
 import { logout } from "../auth";
 import { ApiKeyCard } from "./ApiKeyCard";
 import { BenchmarkCard } from "./BenchmarkCard";
 import { McciCard } from "./McciCard";
 import { CoalOverridesCard } from "./admin/CoalOverridesCard";
+import { QuoteCompareCard } from "./admin/QuoteCompareCard";
 import { CsrModelCard } from "./admin/CsrModelCard";
 import { RankInteractionCard } from "./admin/RankInteractionCard";
 
@@ -40,6 +41,7 @@ export function AdminScreen() {
       <CsrModelCard />
       <McciCard />
       <BenchmarkCard />
+      <QuoteCompareCard />
       <CoalOverridesCard />
       <ApiKeyCard />
     </div>

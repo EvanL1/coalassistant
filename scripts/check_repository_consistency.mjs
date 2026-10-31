@@ -123,9 +123,15 @@ const rustModelSource = readRepositoryFile("blend_kit_rs/src/model.rs");
 const rustSeedSource = readRepositoryFile("blend_kit_rs/src/seed.rs");
 const rustPetrographySource = readRepositoryFile("blend_kit_rs/src/petrography.rs");
 const rustCoalPricesSource = readRepositoryFile("blend_kit_server/src/coal_prices.rs");
+const rustQuotesSource = readRepositoryFile("blend_kit_server/src/quotes.rs");
 const typescriptSource = readRepositoryFile("doudou_blend/src/types.ts");
 
 const sharedStructs = [
+  [rustQuotesSource, "ArchivedQuote", "ArchivedQuote"],
+  [rustQuotesSource, "LatestQuote", "LatestQuote"],
+  [rustQuotesSource, "QuoteRecord", "QuoteRecord"],
+  [rustQuotesSource, "QuoteTypeSummary", "QuoteTypeSummary"],
+
   [rustCoalPricesSource, "CoalPricePoint", "CoalPricePoint"],
   [rustCoalPricesSource, "CoalPriceHistory", "CoalPriceHistory"],
   [rustCoalPricesSource, "CoalPriceEntry", "CoalPriceEntry"],

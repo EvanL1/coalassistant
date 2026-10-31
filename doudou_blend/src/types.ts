@@ -570,6 +570,8 @@ export interface MeasuredQuality {
 
 /** 历史方案 (跨后端统一形状). mixed/实测各列支撑「回填实测焦质」数据闭环. */
 export interface HistoryRecord {
+  /** 本次配方含现场询价, 从结果派生. */
+  quoted: boolean;
   id: string;
   occurred_at: string;
   contract_name: string;
@@ -640,3 +642,52 @@ export interface CoalMaster {
   price_factor?: MasterPriceFactor | null;
   coals: MasterCoalEntry[];
 }
+
+/** 服务端重算后的询价对比, 均为出厂口径. */
+export interface ArchivedQuote {
+  name: string;
+  fob: number;
+  estimate: number | null;
+  gap: number | null;
+  ratio: number | null;
+  benchmark: string | null;
+}
+
+export interface LatestQuote {
+  name: string;
+  fob: number;
+  frt: number;
+  quoted_on: string;
+}
+
+export interface QuoteRecord {
+  id: string;
+  username: string;
+  batch_id: string;
+  quoted_on: string;
+  name: string;
+  coal_type: string | null;
+  form: string | null;
+  region: string | null;
+  fob: number;
+  frt: number;
+  props: Partial<Record<IndicatorKey, number | null>>;
+  changed: IndicatorKey[];
+  estimate: number | null;
+  points: number | null;
+  benchmark: string | null;
+  created_at: string;
+  gap: number | null;
+  ratio: number | null;
+}
+
+export interface QuoteTypeSummary {
+  coal_type: string;
+  count: number;
+  median_ratio: number;
+  median_gap: number;
+}
+
+export interface ArchiveQuotesResponse { ok: boolean; items: ArchivedQuote[] }
+export interface LatestQuotesResponse { ok: boolean; quotes: LatestQuote[] }
+export interface QuoteComparisonResponse { ok: boolean; quotes: QuoteRecord[]; by_type: QuoteTypeSummary[] }

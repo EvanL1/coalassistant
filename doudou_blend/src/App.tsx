@@ -100,7 +100,12 @@ function App() {
               <TodayScreen onNavigate={setTab} />
             </>
           )}
-          {tab === "pool" && <CoalPoolScreen />}
+          {tab === "pool" && (
+            <>
+              <IndexTicker />
+              <CoalPoolScreen />
+            </>
+          )}
           {tab === "contract" && <ContractScreen />}
           {tab === "history" && <HistoryScreen />}
           {tab === "me" && <MeScreen />}

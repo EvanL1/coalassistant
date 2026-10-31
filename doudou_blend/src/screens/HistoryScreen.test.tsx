@@ -30,6 +30,7 @@ function deferred<T>() {
 }
 
 const oldRecord: HistoryRecord = {
+  quoted: false,
   id: "1",
   occurred_at: "2026-07-17T08:00:00.000Z",
   contract_name: "旧合同",
@@ -83,6 +84,14 @@ afterEach(() => {
 });
 
 describe("HistoryScreen 刷新顺序", () => {
+  it("只有带询价的历史记录显示询价标记", async () => {
+    mocks.getBackend.mockResolvedValue({ listHistory: async () => [oldRecord, { ...oldRecord, id: "quoted", quoted: true }] });
+    render(<HistoryScreen />);
+    const badge = await screen.findByText("询价");
+    expect(badge.classList.contains("badge")).toBe(true);
+    expect(screen.getAllByText("询价")).toHaveLength(1);
+  });
+
   it("清空后的新列表不会被更早的刷新结果覆盖", async () => {
     const staleRefresh = deferred<HistoryRecord[]>();
     const backend = {

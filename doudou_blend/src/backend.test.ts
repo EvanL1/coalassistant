@@ -40,6 +40,22 @@ afterEach(() => {
 });
 
 describe("Backend 历史契约", () => {
+  it.each([
+    [{ coal_values: [{ fob: 2150 }] }, true],
+    [{ coal_values: [{ fob: null }, { fob: 1980 }] }, true],
+    [null, false],
+    [{}, false],
+    [{ coal_values: [] }, false],
+    [{ coal_values: "坏数据" }, false],
+    [{ coal_values: [null, {}, { fob: "2150" }, { fob: 0 }, { fob: -1 }] }, false],
+  ])("历史询价标记安全地从正数 fob 派生: %j", async (result, expected) => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify([{
+      id: "quote", occurred_at: "2026-10-31", contract_name: "合同", cost_cif: 2000, recipe: {}, result,
+    }])));
+    const backend = await forceBackend();
+    expect((await backend.listHistory())[0].quoted).toBe(expected);
+  });
+
   it("Web 历史数量读取 PostgreSQL API", async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response('{"count":2}', {

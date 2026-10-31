@@ -30,6 +30,7 @@ mod database;
 mod master_data;
 mod mcci;
 mod mcp;
+mod quotes;
 mod today;
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
@@ -247,6 +248,10 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         .route("/api/price", post(benchmarks::estimate))
         .route("/api/coal-prices", get(coal_prices::list))
         .route("/api/coal-prices/history", get(coal_prices::history))
+        .route("/api/quotes", post(quotes::archive))
+        .route("/api/quotes/latest", get(quotes::latest))
+        .route("/api/admin/quotes", get(quotes::list))
+        .route("/api/admin/quotes/{id}", delete(quotes::delete))
         .route("/api/benchmarks", get(benchmarks::list))
         .route("/api/mcci", get(mcci::list))
         .route("/api/admin/benchmarks", post(benchmarks::create))
@@ -1207,6 +1212,148 @@ mod tests {
                 "admin-session-token-0123456789abcdef",
             ),
         )
+    }
+
+    #[tokio::test]
+    async fn test_admin_quotes_guards() {
+        for (method, uri) in [
+            ("GET", "/api/admin/quotes?limit=abc"),
+            ("DELETE", "/api/admin/quotes/x"),
+        ] {
+            for (token, expected) in [
+                ("forged", StatusCode::UNAUTHORIZED),
+                ("test-session-token", StatusCode::FORBIDDEN),
+            ] {
+                let response = test_app()
+                    .oneshot(session_request(method, uri, token, Body::empty()))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected);
+                let value: Value = serde_json::from_str(&response_text(response).await).unwrap();
+                assert_eq!(value["ok"], false);
+            }
+        }
+        for (method, uri, expected) in [
+            (
+                "GET",
+                "/api/admin/quotes?limit=abc",
+                StatusCode::BAD_REQUEST,
+            ),
+            ("GET", "/api/admin/quotes?limit=0", StatusCode::BAD_REQUEST),
+            ("GET", "/api/admin/quotes?limit=-1", StatusCode::BAD_REQUEST),
+            (
+                "GET",
+                "/api/admin/quotes?limit=1.5",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "GET",
+                "/api/admin/quotes?limit=1001",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            ("GET", "/api/admin/quotes", StatusCode::SERVICE_UNAVAILABLE),
+            (
+                "DELETE",
+                "/api/admin/quotes/x",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let response = test_app()
+                .oneshot(session_request(
+                    method,
+                    uri,
+                    "admin-session-token-0123456789abcdef",
+                    Body::empty(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{uri}");
+            let value: Value = serde_json::from_str(&response_text(response).await).unwrap();
+            assert_eq!(value["ok"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_archive_quotes_checks_login_type_body_then_database() {
+        let valid =
+            r#"{"batch_id":"abc-1","items":[{"name":"测试煤","fob":2150,"props":{"S":0.6}}]}"#;
+        let invalid_props =
+            r#"{"batch_id":"abc-1","items":[{"name":"测试煤","fob":2150,"props":{"A":-5}}]}"#;
+        for (token, json_type, body, expected) in [
+            ("forged", false, "not json", StatusCode::UNAUTHORIZED),
+            ("forged", true, valid, StatusCode::UNAUTHORIZED),
+            (
+                "test-session-token",
+                false,
+                valid,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ),
+            (
+                "test-session-token",
+                true,
+                "not json",
+                StatusCode::BAD_REQUEST,
+            ),
+            ("test-session-token", true, "[]", StatusCode::BAD_REQUEST),
+            (
+                "test-session-token",
+                true,
+                r#"{"batch_id":"abc-1","items":[]}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "test-session-token",
+                true,
+                invalid_props,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "test-session-token",
+                true,
+                valid,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let mut request = session_request("POST", "/api/quotes", token, Body::from(body));
+            if !json_type {
+                request.headers_mut().remove(header::CONTENT_TYPE);
+            }
+            let response = test_app().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected, "{token}, {body}");
+            let value: Value = serde_json::from_str(&response_text(response).await).unwrap();
+            assert_eq!(value["ok"], false);
+        }
+        let request = session_request(
+            "POST",
+            "/api/quotes",
+            "test-session-token",
+            Body::from(" ".repeat(256 * 1024 + 1)),
+        );
+        assert_eq!(
+            test_app().oneshot(request).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn test_latest_quotes_requires_login_and_database() {
+        for (token, expected) in [
+            ("forged", StatusCode::UNAUTHORIZED),
+            ("test-session-token", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let response = test_app()
+                .oneshot(session_request(
+                    "GET",
+                    "/api/quotes/latest",
+                    token,
+                    Body::empty(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let value: Value = serde_json::from_str(&response_text(response).await).unwrap();
+            assert_eq!(value["ok"], false);
+        }
     }
 
     #[tokio::test]
