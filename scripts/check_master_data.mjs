@@ -231,7 +231,7 @@ if (priceFactor != null) {
       .filter((ind, i, all) => all.indexOf(ind) !== i);
     if (duplicated.length) fail(`price_factor: 指标重复 ${[...new Set(duplicated)].join("/")}`);
   }
-  // 基准报价: 估价按同煤种、指标最接近的一条换算. 名字唯一、煤种在词表里、价为正、
+  // 基准报价: 估价按指标距离对多条基准加权换算. 名字唯一、煤种在词表里、价为正、
   // 日期 YYYY-MM-DD、指标是已知指标的数.
   const benchmarks = priceFactor.benchmarks ?? [];
   if (!Array.isArray(benchmarks)) fail("price_factor.benchmarks 必须是数组");
@@ -282,6 +282,21 @@ if (priceFactor != null) {
       }
     }
     if (typeof series.props?.S !== "number") fail(`${label}: 至少要有硫分 S`);
+  }
+  // 只展示的指数序列 (如综合指数): 和 index_series 一起拉, 代码不能重复; 没有固定规格,
+  // 不写指标与煤种 (写了就像能当基准), 也不写价格.
+  const displaySeries = priceFactor.display_series ?? [];
+  if (!Array.isArray(displaySeries)) fail("price_factor.display_series 必须是数组");
+  for (const series of Array.isArray(displaySeries) ? displaySeries : []) {
+    const label = `price_factor 展示序列 ${series.code ?? "(无代码)"}`;
+    if (!/^[A-Z][A-Z0-9_]*$/.test(series.code ?? "")) fail(`${label}: code 须为钢铁网品种代码 (大写字母/数字/下划线)`);
+    if (seriesCodes.has(series.code)) fail(`${label}: 代码与其他序列重复`);
+    seriesCodes.add(series.code);
+    if (!series.type_name) fail(`${label}: 缺 type_name (钢铁网品种名)`);
+    if (!series.name) fail(`${label}: 缺 name`);
+    if (/钢铁网|mysteel/i.test(series.name ?? "")) fail(`${label}: name 不写数据来源 (界面会显示)`);
+    if (series.props != null || series.coal_type != null) fail(`${label}: 只展示的序列没有固定规格, 不写 props/coal_type`);
+    if (series.price != null || series.date != null) fail(`${label}: 价格与日期由服务端每天拉取, master 里不要写`);
   }
   const regionPenalty = priceFactor.region_penalty;
   if (regionPenalty != null && !(typeof regionPenalty === "number" && Number.isFinite(regionPenalty) && regionPenalty >= 0)) {

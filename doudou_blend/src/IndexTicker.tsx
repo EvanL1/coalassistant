@@ -4,7 +4,7 @@
  *
  * 界面不标数据来源. 停更超过几天时在值后标出数据日期. 没数据的品种不显示,
  * 全都没有 (离线、服务异常) 时整条不渲染. 只做展示, 不进任何求解逻辑.
- * 七个品种一行放不下, 用网格换行 (手机两列、不画走势; 宽屏自动排、带走势), 见 App.css.
+ * 综合指数 (只展示、不当基准) 排最前. 八个品种一行放不下, 用网格换行 (手机两列、不画走势; 宽屏自动排、带走势), 见 App.css.
  * 每个品种可点开, 看完整的可交互走势 (IndexChartDialog).
  */
 import { useEffect, useState } from "react";
@@ -16,8 +16,9 @@ import type { McciSeries } from "./types";
 /** sparkline 取最近这么多个交易日. */
 const SPARK_POINTS = 30;
 
-/** 窄条上的短名: 主焦三档去掉末尾的"煤" (低硫主焦煤 → 低硫主焦). */
-const shortName = (typeName: string) => typeName.replace(/主焦煤$/, "主焦");
+/** 窄条上的短名: 主焦三档去掉末尾的"煤" (低硫主焦煤 → 低硫主焦), 综合炼焦煤只写"综合". */
+const shortName = (typeName: string) =>
+  typeName.replace(/^综合炼焦煤$/, "综合").replace(/主焦煤$/, "主焦");
 
 /** 内联 SVG 折线, 数据归一化到固定 viewBox, 不引图表库. */
 function Sparkline({ prices, color }: { prices: number[]; color: string }) {

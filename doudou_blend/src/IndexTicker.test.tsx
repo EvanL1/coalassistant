@@ -95,6 +95,30 @@ describe("指数走势弹层", () => {
     return { opener, points };
   }
 
+  it("综合指数没有固定规格: 行情条写'综合', 点开写各品种加权, 不写标准品", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T20:00:00+08:00"), toFake: ["Date"] });
+    mocks.fetchMcci.mockResolvedValue([
+      {
+        code: "LJM_ZH",
+        type_name: "综合炼焦煤",
+        name: "综合炼焦煤指数",
+        display_only: true,
+        points: [
+          { date: "2026-10-30", price: 2009.3 },
+          { date: "2026-11-02", price: 1994.6 },
+        ],
+      },
+      series("瘦煤", [["2026-10-30", 1951.3], ["2026-11-02", 1924.5]]),
+    ]);
+    render(<IndexTicker />);
+    expect(await screen.findByText("综合")).toBeTruthy();
+    expect(screen.getByText("1995")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /综合炼焦煤 最新 1995, 查看走势/ }));
+    const dialog = screen.getByRole("dialog", { name: "综合炼焦煤" });
+    expect(dialog.textContent).toContain("各品种加权, 无固定规格");
+    expect(dialog.textContent).not.toContain("标准品");
+  });
+
   it("点开显示品种、标准品规格、最新价与日/周涨跌; 不写数据来源", async () => {
     const { points } = await openLowSulfur();
     const dialog = screen.getByRole("dialog", { name: "低硫主焦煤" });

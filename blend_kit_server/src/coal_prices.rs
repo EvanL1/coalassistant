@@ -312,9 +312,11 @@ async fn refresh(pool: &PgPool) -> Result<(), String> {
 }
 
 /// 补算只接受完整输入, 空 CCP 也视为不可用; 交互估价仍可逐层降级.
+/// 只留当基准的序列 (`index_series`) 的历史: 综合指数这类只展示的序列也在 mcci_daily 里,
+/// 但定不出价, 不能决定补算范围 (见 [`latest_index`]、[`earliest_input`]).
 fn require_backfill_inputs(
     master: &Value,
-    inputs: benchmarks::BenchmarkInputs,
+    mut inputs: benchmarks::BenchmarkInputs,
     error: Option<String>,
 ) -> Result<benchmarks::BenchmarkInputs, String> {
     if let Some(error) = error {
@@ -323,17 +325,22 @@ fn require_backfill_inputs(
     if inputs.ccp.as_ref().is_none_or(Vec::is_empty) {
         return Err("CCP 指数取不到, 推算缺一层, 不补算".into());
     }
-    // 首次启动时指数逐条入库, 查询成功也可能还缺序列; 不能把缺料的估价永久定格.
-    for code in master["price_factor"]["index_series"]
+    let codes: Vec<&str> = master["price_factor"]["index_series"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|series| series["code"].as_str())
+        .collect();
+    // 首次启动时指数逐条入库, 查询成功也可能还缺序列; 不能把缺料的估价永久定格.
+    if let Some(code) = codes
+        .iter()
+        .find(|code| inputs.history.get(**code).is_none_or(Vec::is_empty))
     {
-        if inputs.history.get(code).is_none_or(Vec::is_empty) {
-            return Err(format!("钢铁网指数序列 {code} 尚无历史, 不补算"));
-        }
+        return Err(format!("钢铁网指数序列 {code} 尚无历史, 不补算"));
     }
+    inputs
+        .history
+        .retain(|code, _| codes.contains(&code.as_str()));
     Ok(inputs)
 }
 
@@ -798,6 +805,42 @@ mod tests {
             ccp: None,
         };
         assert_eq!(latest_index(&empty), None);
+    }
+
+    /// 综合指数这类只展示的序列也在 mcci_daily 里, 但定不出价: 补算闸口只放 index_series 的历史,
+    /// 它比分指数先到一期也不能把补算的终点推到那一天, 它没历史也不挡补算.
+    #[test]
+    fn test_backfill_inputs_keep_only_benchmark_series() {
+        let point = |date: &str| IndexPoint {
+            date: date.into(),
+            price: 1.0,
+        };
+        let master = json!({"price_factor": {
+            "index_series": [{"code": "LJM_QM"}],
+            "display_series": [{"code": "LJM_ZH"}]
+        }});
+        let inputs = benchmarks::BenchmarkInputs {
+            stored: vec![],
+            history: HashMap::from([
+                ("LJM_QM".to_string(), vec![point("2026-10-20")]),
+                (
+                    "LJM_ZH".to_string(),
+                    vec![point("2025-01-01"), point("2026-10-28")],
+                ),
+            ]),
+            ccp: Some(vec![point("2026-10-01")]),
+        };
+        let kept = require_backfill_inputs(&master, inputs, None).unwrap();
+        assert_eq!(kept.history.keys().collect::<Vec<_>>(), ["LJM_QM"]);
+        assert_eq!(latest_index(&kept), Some(d("2026-10-20")));
+        assert_eq!(earliest_input(&master, &kept), Some(d("2026-10-20")));
+
+        let without_composite = benchmarks::BenchmarkInputs {
+            stored: vec![],
+            history: HashMap::from([("LJM_QM".to_string(), vec![point("2026-10-20")])]),
+            ccp: Some(vec![point("2026-10-01")]),
+        };
+        assert!(require_backfill_inputs(&master, without_composite, None).is_ok());
     }
 
     #[test]

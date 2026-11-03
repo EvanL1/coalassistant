@@ -16,6 +16,8 @@ describe("solverPriceFactor", () => {
       index_series: [
         { code: "LJM_FM", type_name: "肥煤", name: "肥煤指数", coal_type: "肥煤", props: { S: 1.8 } },
       ],
+      display_series_note: "说明",
+      display_series: [{ code: "LJM_ZH", type_name: "综合炼焦煤", name: "综合炼焦煤指数" }],
     };
     const factor = solverPriceFactor(master);
     expect(Object.keys(factor).sort()).toEqual(["adjusts", "benchmarks", "matching"]);

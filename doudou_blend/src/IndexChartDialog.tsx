@@ -1,7 +1,7 @@
 /** 行情条点开的指数走势, 默认显示一年. */
 import { useState } from "react";
 import { ChartDialog, DEFAULT_RANGE, RangeButtons, rangeDays } from "./ChartDialog";
-import { changeOver, lastDays, specText } from "./mcci";
+import { changeOver, lastDays, seriesSpec } from "./mcci";
 import { PriceChart } from "./PriceChart";
 import { ChangeText } from "./screens/McciCard";
 import type { McciSeries } from "./types";
@@ -13,7 +13,7 @@ export function IndexChartDialog({ series, onClose }: { series: McciSeries; onCl
 
   return (
     <ChartDialog titleId="index-chart-title" title={series.type_name}
-      subtitle={`标准品 ${specText(series.props)}`} onClose={onClose}>
+      subtitle={seriesSpec(series)} onClose={onClose}>
       {latest && (
         <div className="index-chart-summary">
           <span className="index-chart-price">{latest.price.toFixed(0)}</span>

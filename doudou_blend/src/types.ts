@@ -248,14 +248,27 @@ export interface IndexSeries {
   props: Record<string, number>;
 }
 
+/** master 里只展示、不当基准的指数序列 (如综合指数): 没有固定规格, 也不分煤种. */
+export interface DisplaySeries {
+  code: string;
+  type_name: string;
+  name: string;
+}
+
 /** 钢铁网指数的一个交易日值 (元/湿吨). */
 export interface McciPoint {
   date: string;
   price: number;
 }
 
-/** /api/mcci 的一条序列: master 配置 + 近一年的值 (升序, 可能为空). */
-export interface McciSeries extends IndexSeries {
+/** /api/mcci 的一条序列: master 配置 + 近一年的值 (升序, 可能为空).
+ * 只展示的序列 (display_only) 没有 coal_type/props. */
+export interface McciSeries extends DisplaySeries {
+  coal_type?: string;
+  form?: string;
+  region?: string;
+  props?: Record<string, number>;
+  display_only?: boolean;
   points: McciPoint[];
 }
 
@@ -326,6 +339,9 @@ export interface MasterPriceFactor extends PriceFactor {
   matching_note?: string;
   /** 只给服务端用, 不进求解请求. */
   index_series?: IndexSeries[];
+  display_series_note?: string;
+  /** 只给服务端拉数与行情条展示, 不当基准、不进求解请求. */
+  display_series?: DisplaySeries[];
 }
 
 /** 估价里一条基准占的份额 (0–1). */
