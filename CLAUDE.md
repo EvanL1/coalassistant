@@ -54,15 +54,23 @@ result is post-processed into three business views: cost breakdown, physical ord
 linearized per round so the LP stays linear); absent or k = 0 must leave results byte-identical.
 `pricing.rs` is the standalone **estimation module** (估价模块): quality index (1000-point premiums/discounts from
 `price_factor.adjusts`) + pricing against **benchmarks** (`price_factor.benchmarks`: dated market quotes per coal type) —
-each coal is priced from the benchmark of the same coal type → same form (`Coal.form`: 精煤/筛选精煤/浮选精煤…; hard layers, each applied only if such a benchmark exists) whose premiums differ least — region is only a soft preference (`price_factor.region_penalty` points added to other-region benchmarks), because forcing a sparse local benchmark mis-prices by hundreds — `price = benchmark × Q(coal)/Q(benchmark)`,
-falling back to `market_price`. Own JSON entry `estimate_json` (server `POST /api/price`, CLI `blend price`);
+each coal is priced by **indicator distance, not by coal type** (`price_factor.matching`): distance = premium differences
+(points) + unpriced indicators such as V (`matching.weights`, points/unit; coal types are defined by V/G/Y, so once V is in
+the distance the `coal_type` label is redundant) + `region_penalty` for other-region benchmarks (soft preference — forcing
+a sparse local benchmark mis-prices by hundreds); all benchmarks compete, shares ∝ exp(−d/`bandwidth`), and
+`price = Σ share × benchmark × Q(coal)/Q(benchmark)` (`CoalValue.benchmark_mix` lists the shares). The form layer (`Coal.form`:
+精煤/筛选精煤/浮选精煤…; applied only if such a benchmark exists) stays hard — form is not encoded in V/G/Y. Only when the
+coal lacks a `matching.weights` indicator (or `matching` is absent) is the hard coal-type layer applied first (blending, if
+configured, then happens within it; without `bandwidth` only the single nearest benchmark is used). The coefficients
+come from a leave-one-out backtest (see master `matching_note`). Without benchmarks it falls back to `market_price`. Own JSON entry `estimate_json` (server `POST /api/price`, CLI `blend price`);
 `price_factor.rs` is only the solver glue (unpriced coals enter the LP at the estimate; `coal_values` attached after).
 Benchmarks live in three layers merged by the server (`blend_kit_server/src/benchmarks.rs`): master defaults + the
 `price_benchmarks` table (admin-entered, latest date per name wins) + the **Mysteel coking-coal index** (MCCI,
 `blend_kit_server/src/mcci.rs`): the server pulls 7 fixed-spec series daily after 17:30 Beijing into `mcci_daily`
 (signed request copied from the public index page; `MCCI_FETCH=off` disables), and each series' latest value becomes a
 benchmark whose props are the standard product in master `price_factor.index_series`. Older quotes are drifted into
-`current_price` by the same-coal-type MCCI series (nearest S grade) when it can, else by CCP. CCP is index points
+`current_price` by the MCCI series nearest by the same distance (picked through `estimate_json`; a quote without V only
+considers same-coal-type series) when it can, else by CCP. CCP is index points
 (2017-01 = 1000) — never use it as a price. Master-only `price_factor` keys (`*_note`, `index_series`) are stripped before
 reaching the core (`MASTER_ONLY_KEYS`, mirrored in `doudou_blend/src/benchmarks.ts`).
 `blend_kit_server/src/coal_prices.rs` 在服务启动后每小时重算当天 (北京时间) 的共享煤库估价快照, 并在启动时与每过零点

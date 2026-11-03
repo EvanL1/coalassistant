@@ -188,10 +188,22 @@ export interface PriceFactor {
   estimate_unpriced?: boolean;
   /** 煤价典型误差, 给价格稳健性分析用. */
   uncertainty?: PriceUncertainty | null;
-  /** 基准报价 (带日期的市场价); 有就按同煤种、指标最接近的基准估价, 优先于 market_price. */
+  /** 基准报价 (带日期的市场价); 有就按指标最接近的基准估价, 优先于 market_price. */
   benchmarks?: Benchmark[];
-  /** 对标时外地基准的距离加罚 (点); 煤种、形态是硬分层, 地区只是软偏好. 缺省 = 不看地区. */
+  /** 对标时外地基准的距离加罚 (点); 地区只是软偏好. 缺省 = 不看地区. */
   region_penalty?: number | null;
+  /** 按指标数据对标 (不先分煤种); 缺省 = 按煤种 → 形态分层后取最近的一条. */
+  matching?: MatchConfig | null;
+}
+
+/** 按指标数据对标的配置. */
+export interface MatchConfig {
+  /** 只比、不计价的指标 (点/指标单位), 如 { V: 20 }. */
+  weights?: Record<string, number>;
+  /** 基准缺 weights 里某项指标时, 每缺一项加罚的距离 (点). */
+  missing_penalty?: number;
+  /** 多条基准加权的带宽 (点): 份额 ∝ exp(−距离/带宽); 缺省 = 只用最近的一条. */
+  bandwidth?: number | null;
 }
 
 /** 基准报价: 一个具体品种某天的市场价 (出厂含税). */
@@ -219,7 +231,7 @@ export interface BenchmarkEntry extends Benchmark {
   id?: string;
   index_ratio?: number;
   index_date?: string;
-  /** 推算用的指数: 同煤种指数序列的名字, 或 "CCP". */
+  /** 推算用的指数: 指标最接近的指数序列的名字, 或 "CCP". */
   index_source?: string;
   /** origin=mcci 时的钢铁网品种代码. */
   index_code?: string;
@@ -311,8 +323,15 @@ export interface MasterPriceFactor extends PriceFactor {
   uncertainty_note?: string;
   benchmarks_note?: string;
   index_series_note?: string;
+  matching_note?: string;
   /** 只给服务端用, 不进求解请求. */
   index_series?: IndexSeries[];
+}
+
+/** 估价里一条基准占的份额 (0–1). */
+export interface BenchmarkShare {
+  name: string;
+  share: number;
 }
 
 export interface PricePart {
@@ -336,8 +355,10 @@ export interface CoalValue {
   ratio: number | null;
   /** 配煤价值: 本次煤池与合同下的盈亏平衡到厂价 (元/吨); 到厂价低于它就会入选. */
   blend_value?: number | null;
-  /** 估价对标的基准报价名; 缺省 = 按市场价或煤池反推. */
+  /** 估价对标的基准报价名 (多条加权时是份额最大的那条); 缺省 = 按市场价或煤池反推. */
   benchmark?: string | null;
+  /** 配了带宽时各条基准的份额 (≥1% 的, 大的在前); 没配带宽时缺省. */
+  benchmark_mix?: BenchmarkShare[];
   parts: PricePart[];
   missing: string[];
   extrapolated: string[];

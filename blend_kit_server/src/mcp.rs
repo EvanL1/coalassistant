@@ -14,8 +14,8 @@ use crate::today::{self, Market, TodayOptions};
 /// 支持的协议版本, 新的在前. 客户端要的版本在列表里就照回, 否则回最新的.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "豆哥配煤: 炼焦配煤的最低成本配方。所有煤价都是估算价: 按同煤种、指标最接近的 \
-基准报价 (公开的分煤种出厂含税价) 与 1000 点质量指数之比换算, 合同与煤池用线上保存的那一份。先用 today_blend 出配方; \
+const INSTRUCTIONS: &str = "豆哥配煤: 炼焦配煤的最低成本配方。所有煤价都是估算价: 按指标 (含挥发分) 最接近的几条 \
+基准报价 (公开的出厂含税价与指数) 加权, 用 1000 点质量指数之比换算, 合同与煤池用线上保存的那一份。先用 today_blend 出配方; \
 用户说某个煤停了/不要, 放进 exclude 重算; 用户给出具体比例时用 check_ratios 验算。";
 
 /// 处理一条消息要用到的线上数据. 只有 tools/call 需要, 由调用方按需加载.
@@ -552,7 +552,7 @@ fn contract_text(context: &Context) -> String {
             None => "估价市场价: 没有基准报价, 现货指数也取不到".into(),
         });
     } else {
-        out.push("估价基准报价 (同煤种、指标最接近的一条换算):".into());
+        out.push("估价基准报价 (按指标距离对最接近的几条加权换算):".into());
         for benchmark in &context.benchmarks {
             out.push(benchmark_line(benchmark));
         }

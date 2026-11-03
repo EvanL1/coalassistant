@@ -287,6 +287,29 @@ if (priceFactor != null) {
   if (regionPenalty != null && !(typeof regionPenalty === "number" && Number.isFinite(regionPenalty) && regionPenalty >= 0)) {
     fail(`price_factor.region_penalty=${regionPenalty} 须为 ≥0 的有限数`);
   }
+  const matching = priceFactor.matching;
+  if (matching != null) {
+    const nonNegative = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+    const weights = Object.entries(matching.weights ?? {});
+    if (!weights.length) fail("price_factor.matching.weights 不能为空 (没有只比不计价的指标, 就退回按煤种分层了)");
+    for (const [key, weight] of weights) {
+      if (!INDICATORS.includes(key)) fail(`price_factor.matching.weights: 未知指标 ${key}`);
+      if (!(nonNegative(weight) && weight > 0)) fail(`price_factor.matching.weights.${key} 须为 >0 的有限数`);
+    }
+    // 写了就得是数: 核心的缺省只管不写, null 会让整个 price_factor 解析失败.
+    if ("missing_penalty" in matching && !nonNegative(matching.missing_penalty)) {
+      fail("price_factor.matching.missing_penalty 须为 ≥0 的有限数");
+    }
+    const bandwidth = matching.bandwidth;
+    if (bandwidth != null && !(typeof bandwidth === "number" && Number.isFinite(bandwidth) && bandwidth > 0)) {
+      fail("price_factor.matching.bandwidth 须为 >0 的有限数");
+    }
+    // 指数序列是估价的骨架: 每条都要能按指标定位, 否则它在对标距离里只能靠加罚.
+    for (const series of Array.isArray(indexSeries) ? indexSeries : []) {
+      const lacking = weights.map(([key]) => key).filter((key) => typeof series.props?.[key] !== "number");
+      if (lacking.length) fail(`price_factor 指数序列 ${series.code}: 缺对标指标 ${lacking.join("/")}`);
+    }
+  }
   const uncertainty = priceFactor.uncertainty;
   if (uncertainty != null) {
     const isError = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
