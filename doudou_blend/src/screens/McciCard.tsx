@@ -6,7 +6,7 @@
  * 接口取不到时整张卡不显示.
  */
 import { useEffect, useState } from "react";
-import { changeOver, fetchMcci, lastYear, specText, staleDays } from "../mcci";
+import { changeOver, fetchMcci, hasSpec, lastYear, NO_SPEC_TEXT, specText, staleDays } from "../mcci";
 import type { McciPoint, McciSeries } from "../types";
 
 /** 超过这么多个日历天没新值就提示 (周末 + 一天假期以内不算). */
@@ -104,7 +104,10 @@ function SeriesRow({ series }: { series: McciSeries }) {
     <tr>
       <td style={cell}>
         <div>{series.type_name}</div>
-        <div style={small}>{specText(series.props)}</div>
+        {/* 表头已写"标准品", 有规格只列指标; 综合指数这类没规格的写加权. */}
+        <div style={small}>
+          {hasSpec(series) ? specText(series.props) : NO_SPEC_TEXT}
+        </div>
       </td>
       <td style={numCell}>
         {latest ? (
@@ -155,8 +158,8 @@ export function McciCard() {
     <div className="card" style={{ marginTop: 12 }}>
       <div className="card-title">炼焦煤价格指数</div>
       <div style={{ ...small, marginBottom: 8 }}>
-        每个品种是一个固定规格的标准品 (山西, 元/湿吨, 现金). 估价按指标最接近的几条指数加权对标,
-        每晚 17:30 后更新.
+        分煤种指数各是一个固定规格的标准品 (山西, 元/湿吨, 现金). 估价按指标最接近的几条指数加权对标;
+        综合指数是各品种加权, 只看整体行情. 每晚 17:30 后更新.
       </div>
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>

@@ -3,7 +3,8 @@
 //! 为什么用它: 按方法论 (《煤焦价格指数方法论》2026-05) 每个分指数是一个固定规格的标准品,
 //! 由二十多家山西矿/洗煤厂的成交、询盘、报盘按指标线性标准化后按量加权, 每个交易日一个值
 //! (元/湿吨, 现金). 规格固定 + 日更, 正好当"每天对标"的基准; 标准品指标写在 master
-//! `price_factor.index_series`, 这里只管取数.
+//! `price_factor.index_series`, 这里只管取数. 综合指数是各分指数的加权、没有固定规格,
+//! 放在 `price_factor.display_series`: 一样每天拉、行情条展示, 但不当基准.
 //!
 //! 取数: 指数页 (index.mysteel.com/xpic/detail.html?tabName=ljm) 不用登录, 数据走
 //! `getReport.ms`, 请求头要带前端同样的签名 (appKey/appSecret 是网页公开 JS 里的常量).
@@ -66,21 +67,33 @@ pub(crate) struct Series {
     pub type_name: String,
 }
 
-/// master `price_factor.index_series` 里配置的序列.
+/// 要拉、要展示的全部序列配置: 先 `display_series` (只展示, 如综合指数; 标 `display_only`),
+/// 再 `index_series` (固定规格的标准品, 同时当估价基准). 基准只读 `index_series`, 不走这里.
+pub(crate) fn series_config(master: &Value) -> Vec<Value> {
+    let list = |key: &str| {
+        master["price_factor"][key]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let display = list("display_series").into_iter().map(|mut entry| {
+        entry["display_only"] = json!(true);
+        entry
+    });
+    display.chain(list("index_series")).collect()
+}
+
+/// master 里配置的全部序列 (见 [`series_config`]), 缺代码或品种名的跳过.
 pub(crate) fn configured_series(master: &Value) -> Vec<Series> {
-    master["price_factor"]["index_series"]
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .filter_map(|entry| {
-                    Some(Series {
-                        code: entry["code"].as_str()?.to_string(),
-                        type_name: entry["type_name"].as_str()?.to_string(),
-                    })
-                })
-                .collect()
+    series_config(master)
+        .iter()
+        .filter_map(|entry| {
+            Some(Series {
+                code: entry["code"].as_str()?.to_string(),
+                type_name: entry["type_name"].as_str()?.to_string(),
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 pub(crate) fn beijing() -> FixedOffset {
@@ -237,10 +250,7 @@ pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> R
     }
     // 指数序列不在煤库覆盖层里, 读内置 master 即可 (与 spawn_daily 同一份), 不用合并覆盖层.
     let master: Value = serde_json::from_str(blend_kit::master_json()).unwrap_or_default();
-    let config = master["price_factor"]["index_series"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let config = series_config(&master);
     let history = match &state.database {
         Some(pool) => match history(pool).await {
             Ok(history) => history,
@@ -672,5 +682,27 @@ mod tests {
             }]
         );
         assert!(configured_series(&json!({})).is_empty());
+    }
+
+    /// 综合指数没有固定规格, 只展示、不当基准: 放在 display_series, 照样每天拉, 列在最前.
+    #[test]
+    fn test_display_series_are_fetched_and_listed_first() {
+        let master = json!({"price_factor": {
+            "index_series": [{"code": "LJM_QM", "type_name": "气煤", "coal_type": "气煤",
+                              "props": {"S": 0.6}}],
+            "display_series": [{"code": "LJM_ZH", "type_name": "综合炼焦煤", "name": "综合炼焦煤指数"}]
+        }});
+        let codes: Vec<String> = configured_series(&master)
+            .into_iter()
+            .map(|series| series.code)
+            .collect();
+        assert_eq!(codes, ["LJM_ZH", "LJM_QM"]);
+
+        let rows = overview(&series_config(&master), &HashMap::new());
+        assert_eq!(rows[0]["code"], "LJM_ZH");
+        assert_eq!(rows[0]["display_only"], true);
+        assert!(rows[0].get("props").is_none());
+        assert_eq!(rows[1]["code"], "LJM_QM");
+        assert!(rows[1].get("display_only").is_none());
     }
 }

@@ -1,6 +1,7 @@
 /**
  * 钢铁网国产炼焦煤价格指数 (MCCI) 的数据层: 服务端每晚 17:30 后拉一次存库,
- * /api/mcci 只读库. 每条序列是一个固定规格的标准品, 估价按指标最接近的序列对标 (不先分煤种).
+ * /api/mcci 只读库. 分煤种序列各是一个固定规格的标准品, 估价按指标最接近的序列对标 (不先分煤种);
+ * 综合指数 (display_only) 是各品种加权, 没有规格, 只看整体行情.
  * 只做展示, 求解用的基准由 /api/benchmarks 给.
  */
 import type { McciSeries, McciPoint } from "./types";
@@ -74,4 +75,19 @@ export function specText(props: Record<string, number>): string {
   return SPEC_ORDER.filter(([key]) => props[key] != null)
     .map(([key, label]) => `${label}${props[key]}`)
     .join(" ");
+}
+
+type SpecFields = Pick<McciSeries, "props" | "display_only">;
+
+/** 有没有固定规格: 综合指数这类只展示的序列没有. */
+export function hasSpec(series: SpecFields): series is SpecFields & { props: Record<string, number> } {
+  return !series.display_only && series.props != null;
+}
+
+/** 没有固定规格时的说明. */
+export const NO_SPEC_TEXT = "各品种加权, 无固定规格";
+
+/** 一条序列的规格说明: 分煤种指数写标准品; 没有固定规格的写加权. */
+export function seriesSpec(series: SpecFields): string {
+  return hasSpec(series) ? `标准品 ${specText(series.props)}` : NO_SPEC_TEXT;
 }

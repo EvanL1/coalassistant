@@ -41,6 +41,8 @@ const MASTER_ONLY_KEYS = [
   "index_series",
   "index_series_note",
   "matching_note",
+  "display_series",
+  "display_series_note",
 ] as const;
 
 /** master 的价格因子去掉说明与服务端配置, 只留核心认识的字段. */

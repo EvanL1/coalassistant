@@ -30,13 +30,15 @@ use crate::coal_index::{self, IndexPoint};
 use crate::mcci;
 
 /// 只给人看或只给服务端用的价格因子字段, 交给核心前去掉.
-pub(crate) const MASTER_ONLY_KEYS: [&str; 6] = [
+pub(crate) const MASTER_ONLY_KEYS: [&str; 8] = [
     "description",
     "uncertainty_note",
     "benchmarks_note",
     "index_series",
     "index_series_note",
     "matching_note",
+    "display_series",
+    "display_series_note",
 ];
 
 /// 一条基准报价的请求体上限.
@@ -837,7 +839,7 @@ mod tests {
     fn test_fill_price_request_uses_master_and_current_benchmarks() {
         let master = json!({"price_factor": {"description": "说明", "adjusts": [],
             "index_series": [{"code": "LJM_QM"}], "index_series_note": "说明",
-            "matching_note": "说明", "matching": {"weights": {"V": 20}}}});
+            "matching_note": "说明", "matching": {"weights": {"V": 20}}, "display_series": [{"code": "LJM_ZH"}], "display_series_note": "说明"}});
         let benchmarks = [json!({"name": "晋中", "price": 2050})];
         let mut request = json!({"coals": []});
         fill_price_request(&mut request, &master, &benchmarks);
@@ -849,6 +851,8 @@ mod tests {
             request["price_factor"]["matching"]["weights"]["V"], 20,
             "对标配置交给核心"
         );
+        assert!(request["price_factor"].get("display_series").is_none());
+        assert!(request["price_factor"].get("display_series_note").is_none());
         assert_eq!(request["price_factor"]["benchmarks"][0]["name"], "晋中");
 
         // master 自己带着默认基准时, 也要换成当前生效的 (补录、指数、推算后的).
@@ -902,6 +906,24 @@ mod tests {
 
     fn day(text: &str) -> NaiveDate {
         text.parse().unwrap()
+    }
+
+    /// 只展示的序列 (综合指数) 没有标准品: 有了历史也不能变成基准, 也不拿来推算旧报价.
+    /// 故意给它配上煤种与硫分 (数据自检会拦, 这里模拟配错): 基准与推算只认 index_series,
+    /// 否则它会成为孝义高硫 (焦煤, S2.9) 硫分最近的同煤种序列.
+    #[test]
+    fn test_display_series_never_become_benchmarks() {
+        let (mut master, mut inputs) = inputs_fixture();
+        master["price_factor"]["display_series"] = json!([{"code": "LJM_ZH",
+            "type_name": "综合炼焦煤", "name": "综合炼焦煤指数",
+            "coal_type": "焦煤", "props": {"S": 2.9}}]);
+        inputs.history.insert(
+            "LJM_ZH".to_string(),
+            vec![point("2026-10-15", 2000.0), point("2026-10-20", 1.0)],
+        );
+        let merged = as_of(&master, &inputs, day("2026-10-20"));
+        assert!(merged.iter().all(|b| b["index_code"] != "LJM_ZH"));
+        assert!(merged.iter().all(|b| b["index_source"] != "综合炼焦煤指数"));
     }
 
     #[test]

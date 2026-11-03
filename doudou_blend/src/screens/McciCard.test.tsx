@@ -48,6 +48,29 @@ describe("McciCard", () => {
     expect(screen.queryByText(/未更新/)).toBeNull();
   });
 
+  it("综合指数一行: 没有标准品指标, 写各品种加权", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T20:00:00+08:00"), toFake: ["Date"] });
+    mocks.fetchMcci.mockResolvedValue([
+      {
+        code: "LJM_ZH",
+        type_name: "综合炼焦煤",
+        name: "综合炼焦煤指数",
+        display_only: true,
+        points: [
+          { date: "2026-10-30", price: 2009.3 },
+          { date: "2026-11-02", price: 1994.6 },
+        ],
+      },
+      fat,
+    ]);
+    render(<McciCard />);
+    expect(await screen.findByText("综合炼焦煤")).toBeTruthy();
+    expect(screen.getByText("各品种加权, 无固定规格")).toBeTruthy();
+    expect(screen.getByText("1995")).toBeTruthy();
+    // 分煤种那一行照旧只列指标.
+    expect(screen.getByText("A10 V30 S1.8 G90 Mt10")).toBeTruthy();
+  });
+
   it("走势悬停显示那天的日期与值", async () => {
     mocks.fetchMcci.mockResolvedValue([fat]);
     render(<McciCard />);

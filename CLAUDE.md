@@ -68,7 +68,9 @@ Benchmarks live in three layers merged by the server (`blend_kit_server/src/benc
 `price_benchmarks` table (admin-entered, latest date per name wins) + the **Mysteel coking-coal index** (MCCI,
 `blend_kit_server/src/mcci.rs`): the server pulls 7 fixed-spec series daily after 17:30 Beijing into `mcci_daily`
 (signed request copied from the public index page; `MCCI_FETCH=off` disables), and each series' latest value becomes a
-benchmark whose props are the standard product in master `price_factor.index_series`. Older quotes are drifted into
+benchmark whose props are the standard product in master `price_factor.index_series`. The composite index (`LJM_ZH`)
+has no fixed spec, so it sits in `price_factor.display_series`: fetched and shown first in the ticker, never a
+benchmark or drift source. Older quotes are drifted into
 `current_price` by the MCCI series nearest by the same distance (picked through `estimate_json`; a quote without V only
 considers same-coal-type series) when it can, else by CCP. CCP is index points
 (2017-01 = 1000) — never use it as a price. Master-only `price_factor` keys (`*_note`, `index_series`) are stripped before

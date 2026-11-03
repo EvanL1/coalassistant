@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { changeOver, lastYear, specText, staleDays } from "./mcci";
+import { changeOver, lastYear, seriesSpec, specText, staleDays } from "./mcci";
 
 const points = [
   { date: "2026-10-16", price: 2000 },
@@ -32,5 +32,11 @@ describe("mcci 指数换算", () => {
 
   it("标准品指标按 A V S G Mt 排", () => {
     expect(specText({ S: 1.8, A: 10, V: 30, G: 90, M: 10 })).toBe("A10 V30 S1.8 G90 Mt10");
+  });
+
+  it("规格说明: 有标准品写标准品, 综合指数这类没有规格的写加权", () => {
+    expect(seriesSpec({ props: { S: 0.6, G: 60 } })).toBe("标准品 S0.6 G60");
+    expect(seriesSpec({ display_only: true })).toBe("各品种加权, 无固定规格");
+    expect(seriesSpec({})).toBe("各品种加权, 无固定规格");
   });
 });
