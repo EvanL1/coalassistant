@@ -6,7 +6,7 @@
 //!   - LP 输入是不可变快照
 //!   - 输出分三视图: 成本结构 / 实物订单 / 指标体检
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// 8 项指标的标识符. 与 UI 中文标签一一对应:
 ///   "S"     → 硫
@@ -415,23 +415,41 @@ pub struct PriceFactor {
     /// 煤价的典型误差, 给价格稳健性分析用. None = 用内置的保守默认值.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uncertainty: Option<PriceUncertainty>,
-    /// 基准报价 (带日期的市场价). 有就按同煤种、指标最接近的基准估价, 优先于 market_price.
+    /// 基准报价 (带日期的市场价). 有就按指标最接近的基准估价 (见 matching), 优先于 market_price.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub benchmarks: Vec<Benchmark>,
     /// 对标时外地基准的距离加罚 (点): 本地基准指标差得不超过这么多点才优先用本地的.
-    /// 煤种、形态是硬分层, 地区只是软偏好 —— 基准稀疏时, 指标接近比同地区要紧.
-    /// None = 不看地区.
+    /// 地区只是软偏好 —— 基准稀疏时, 指标接近比同地区要紧. None = 不看地区.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region_penalty: Option<f64>,
+    /// 按指标数据对标 (不先分煤种). None = 按煤种 → 形态分层后取最近的一条.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matching: Option<MatchConfig>,
 }
 
-/// 基准报价: 一个具体品种某天的市场价 (出厂含税). 估价按"同煤种、指标最接近"的基准,
+/// 按指标数据对标的配置, 见 [`crate::pricing`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MatchConfig {
+    /// 只比、不计价的指标 (点/指标单位), 如 {"V": 20}: 挥发分差 1 个百分点按 20 点的距离算.
+    /// 煤种本就是按 V、G、Y 划的, V 进了距离, 煤种标签就不必再当门槛.
+    #[serde(default)]
+    pub weights: BTreeMap<String, f64>,
+    /// 基准缺 weights 里某项指标时, 每缺一项加罚的距离 (点).
+    #[serde(default)]
+    pub missing_penalty: f64,
+    /// 多条基准加权的带宽 (点): 份额 ∝ exp(−距离/带宽), 煤种边界附近的估价平滑过渡.
+    /// None = 只用最近的一条.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth: Option<f64>,
+}
+
+/// 基准报价: 一个具体品种某天的市场价 (出厂含税). 估价按指标最接近的基准 (见 [`MatchConfig`]),
 /// 用质量指数之比换算 —— 见 [`crate::pricing`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Benchmark {
     /// 唯一名, 如 "晋中中硫主焦".
     pub name: String,
-    /// 煤种, 与 [`Coal::coal_type`] 同一词表. None = 只在没有同煤种基准时参与.
+    /// 煤种, 与 [`Coal::coal_type`] 同一词表. 只在煤缺对标指标、要按煤种分层时用; None = 那时只在没有同煤种基准时参与.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coal_type: Option<String>,
     /// 产品形态, 与 [`Coal::form`] 同一词表.
@@ -550,9 +568,20 @@ pub struct CoalValue {
     /// 已入选的煤即其现价. 由 LP 对偶算出, 只算边际 (一点点加入时) 的价值. 算不出为 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend_value: Option<f64>,
-    /// 估价对标的基准报价名. None = 按市场价或煤池反推估价.
+    /// 估价对标的基准报价名 (多条加权时是份额最大的那条). None = 按市场价或煤池反推估价.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark: Option<String>,
+    /// 配了带宽时各条基准的份额 (≥1% 的, 大的在前). 没配带宽 (只用最近一条) 时为空.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub benchmark_mix: Vec<BenchmarkShare>,
+}
+
+/// 估价里一条基准占的份额.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BenchmarkShare {
+    pub name: String,
+    /// 0–1.
+    pub share: f64,
 }
 
 /// 价格稳健性报告: 煤价估不准时, 这个配方还靠不靠得住.

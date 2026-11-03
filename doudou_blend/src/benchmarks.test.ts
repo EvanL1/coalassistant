@@ -11,12 +11,14 @@ describe("solverPriceFactor", () => {
       uncertainty_note: "说明",
       benchmarks_note: "说明",
       index_series_note: "说明",
+      matching_note: "说明",
+      matching: { weights: { V: 20 }, bandwidth: 80 },
       index_series: [
         { code: "LJM_FM", type_name: "肥煤", name: "肥煤指数", coal_type: "肥煤", props: { S: 1.8 } },
       ],
     };
     const factor = solverPriceFactor(master);
-    expect(Object.keys(factor).sort()).toEqual(["adjusts", "benchmarks"]);
+    expect(Object.keys(factor).sort()).toEqual(["adjusts", "benchmarks", "matching"]);
     expect(factor.benchmarks?.[0].name).toBe("晋中");
   });
 });

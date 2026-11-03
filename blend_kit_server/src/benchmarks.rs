@@ -30,12 +30,13 @@ use crate::coal_index::{self, IndexPoint};
 use crate::mcci;
 
 /// 只给人看或只给服务端用的价格因子字段, 交给核心前去掉.
-pub(crate) const MASTER_ONLY_KEYS: [&str; 5] = [
+pub(crate) const MASTER_ONLY_KEYS: [&str; 6] = [
     "description",
     "uncertainty_note",
     "benchmarks_note",
     "index_series",
     "index_series_note",
+    "matching_note",
 ];
 
 /// 一条基准报价的请求体上限.
@@ -139,14 +140,17 @@ pub(crate) fn index_benchmarks(
         .collect()
 }
 
-/// 给旧报价挑推算用的指数: 同煤种、能推算这条报价 (有不晚于报价日的基点、也有更新的点) 的
-/// 指数序列, 多档时取硫分最接近的; 没有就用 CCP —— 序列历史不全或停更时也就退回 CCP.
-/// 指数自己生成的基准只看 CCP: 平时比 CCP 新、不动; 停更后 CCP 出了新一期才推算.
+/// 给旧报价挑推算用的指数: 在能推算这条报价 (有不晚于报价日的基点、也有更新的点) 的序列里,
+/// 按估价模块同一套距离取最近的一条 —— 报价写全了对标指标 (master `price_factor.matching`,
+/// 如 V) 就只按指标挑、不看煤种; 缺这些指标时只在同煤种序列里挑. 挑不出就用 CCP ——
+/// 序列历史不全或停更时也就退回 CCP. 指数自己生成的基准只看 CCP: 平时比 CCP 新、不动;
+/// 停更后 CCP 出了新一期才推算. `factor` 是 master 的 `price_factor`.
 pub(crate) fn drift_series<'a>(
     benchmark: &Value,
     config: &[Value],
     history: &'a HashMap<String, Vec<IndexPoint>>,
     ccp: Option<&'a [IndexPoint]>,
+    factor: &Value,
 ) -> Option<(&'a [IndexPoint], String)> {
     let ccp = ccp.map(|points| (points, "CCP".to_string()));
     let Some(date) = benchmark["date"].as_str() else {
@@ -155,30 +159,92 @@ pub(crate) fn drift_series<'a>(
     if benchmark["origin"] == "mcci" {
         return ccp;
     }
-    let sulfur = benchmark["props"]["S"].as_f64();
-    let sulfur_gap = |series: &Value| match (sulfur, series["props"]["S"].as_f64()) {
-        (Some(a), Some(b)) => (a - b).abs(),
-        _ => f64::INFINITY,
-    };
-    let same_type = config
+    let by_data = placeable(benchmark, factor);
+    let candidates: Vec<(&Value, &str, &'a [IndexPoint])> = config
         .iter()
         .filter(|series| {
-            benchmark["coal_type"].is_string() && series["coal_type"] == benchmark["coal_type"]
+            by_data
+                || (benchmark["coal_type"].is_string()
+                    && series["coal_type"] == benchmark["coal_type"])
         })
         .filter_map(|series| {
             let code = series["code"].as_str()?;
             let points = history.get(code)?;
             index_ratio(points, date)?;
-            Some((series, code, points))
+            Some((series, code, points.as_slice()))
         })
-        .min_by(|(a, ..), (b, ..)| sulfur_gap(a).total_cmp(&sulfur_gap(b)));
-    match same_type {
+        .collect();
+    let chosen = nearest_series(benchmark, &candidates, date, factor)
+        .and_then(|code| candidates.iter().find(|(_, c, _)| *c == code));
+    match chosen {
         Some((series, code, points)) => {
             let label = series["name"].as_str().unwrap_or(code);
-            Some((points.as_slice(), label.to_string()))
+            Some((*points, label.to_string()))
         }
         None => ccp,
     }
+}
+
+/// 报价写全了对标指标 (与估价模块的判断一致): 配了 `matching.weights`, 且报价每项都有.
+fn placeable(benchmark: &Value, factor: &Value) -> bool {
+    factor["matching"]["weights"]
+        .as_object()
+        .is_some_and(|weights| {
+            !weights.is_empty()
+                && weights
+                    .keys()
+                    .all(|key| benchmark["props"][key].is_number())
+        })
+}
+
+/// 有值才写进去 (核心的 serde 默认值只管缺字段, 不收 null).
+fn put_present(target: &mut Value, source: &Value, keys: &[&str]) {
+    for key in keys {
+        if !source[*key].is_null() {
+            target[*key] = source[*key].clone();
+        }
+    }
+}
+
+/// 交给估价模块挑最近的序列 (同一套距离, 不在这里另写一份): 序列当基准、报价当煤,
+/// 只用一条最近的 (去掉带宽), 不看地区. 返回序列代码; 估价失败 (如报价指标有负值) 记一条警告,
+/// 退回第一条候选 —— 候选都能推算这条报价, 比退回 CCP 贴近.
+fn nearest_series(
+    benchmark: &Value,
+    candidates: &[(&Value, &str, &[IndexPoint])],
+    date: &str,
+    factor: &Value,
+) -> Option<String> {
+    if candidates.len() <= 1 {
+        return candidates.first().map(|(_, code, _)| code.to_string());
+    }
+    let mut coal = json!({"name": "待推算", "props": {}, "fob": 0.0, "frt": 0.0});
+    put_present(&mut coal, benchmark, &["props", "coal_type", "form"]);
+    let anchors: Vec<Value> = candidates
+        .iter()
+        .map(|(series, code, _)| {
+            let mut anchor = json!({"name": code, "props": {}, "price": 1.0, "date": date});
+            put_present(&mut anchor, series, &["props", "coal_type", "form"]);
+            anchor
+        })
+        .collect();
+    let mut price_factor = json!({"benchmarks": anchors});
+    put_present(&mut price_factor, factor, &["adjusts", "matching"]);
+    if let Some(matching) = price_factor["matching"].as_object_mut() {
+        matching.remove("bandwidth");
+    }
+    let request = json!({"coals": [coal], "price_factor": price_factor});
+    let result: Value =
+        serde_json::from_str(&blend_kit::estimate_json(&request.to_string())).unwrap_or_default();
+    if let Some(code) = result["coal_values"][0]["benchmark"].as_str() {
+        return Some(code.to_string());
+    }
+    tracing::warn!(
+        name = benchmark["name"].as_str().unwrap_or(""),
+        reason = result["reason"].as_str().unwrap_or("估价结果缺对标"),
+        "挑推算序列时估价失败, 退回第一条候选"
+    );
+    candidates.first().map(|(_, code, _)| code.to_string())
 }
 
 fn master_benchmarks(master: &Value) -> Vec<Value> {
@@ -284,7 +350,7 @@ fn points_until(points: &[IndexPoint], day: &str) -> Vec<IndexPoint> {
 }
 
 /// 某天 (北京时间) 能拿到的基准: 报价日、指数期都不晚于这天, 旧报价也只推算到这天.
-/// 三层来源: master ∪ 库表 (同名取最新) ∪ 钢铁网指数各序列; 旧报价按同煤种指数推算, 没有则用 CCP.
+/// 三层来源: master ∪ 库表 (同名取最新) ∪ 钢铁网指数各序列; 旧报价按指标最接近的指数序列推算 (见 [`drift_series`]), 没有则用 CCP.
 /// 实时快照就是 as_of(今天); 补算历史逐日调用, 两边一套口径.
 pub(crate) fn as_of(master: &Value, inputs: &BenchmarkInputs, day: NaiveDate) -> Vec<Value> {
     let day = day.format("%Y-%m-%d").to_string();
@@ -312,7 +378,13 @@ pub(crate) fn as_of(master: &Value, inputs: &BenchmarkInputs, day: NaiveDate) ->
     let indexed = index_benchmarks(&config, &history);
     let mut merged = merge(&[&master_layer, &stored, &indexed]);
     apply_drift(&mut merged, |benchmark| {
-        drift_series(benchmark, &config, &history, ccp.as_deref())
+        drift_series(
+            benchmark,
+            &config,
+            &history,
+            ccp.as_deref(),
+            &master["price_factor"],
+        )
     });
     merged
 }
@@ -610,7 +682,9 @@ mod tests {
             point("2026-10-08", 1907.0),
             point("2026-10-23", 1890.0),
         ];
-        let pick = |b: Value| drift_series(&b, &config, &history, Some(&ccp)).map(|(_, l)| l);
+        let pick = |b: Value| {
+            drift_series(&b, &config, &history, Some(&ccp), &drift_factor(None)).map(|(_, l)| l)
+        };
         // 焦煤 S2.9 → 高硫档; S0.5 → 低硫档.
         assert_eq!(
             pick(json!({"coal_type": "焦煤", "date": "2026-10-20", "props": {"S": 2.9}}))
@@ -644,9 +718,64 @@ mod tests {
             &json!({"coal_type": "贫瘦煤", "date": "2026-10-20", "props": {}}),
             &config,
             &history,
-            None
+            None,
+            &drift_factor(None),
         )
         .is_none());
+    }
+
+    /// 只按硫分计价的 price_factor; v = 对标距离里 V 的权重 (None = 不按数据对标).
+    fn drift_factor(v: Option<f64>) -> Value {
+        let mut factor = json!({"adjusts": [
+            {"indicator": "S", "direction": "Upper", "base": 1.3, "premium_rate": 75, "discount_rate": 47}
+        ]});
+        if let Some(weight) = v {
+            factor["matching"] = json!({"weights": {"V": weight}, "bandwidth": 80});
+        }
+        factor
+    }
+
+    /// 报价指标估价模块不收 (负值): 不退回 CCP, 用第一条能推算的候选.
+    #[test]
+    fn test_drift_series_falls_back_to_first_candidate_when_estimate_fails() {
+        let config = index_config();
+        let history = index_history();
+        let ccp = [point("2026-09-24", 1975.0), point("2026-10-23", 1890.0)];
+        let bad = json!({"name": "录错", "coal_type": "焦煤", "date": "2026-10-20", "props": {"S": -1.0}});
+        let picked = drift_series(&bad, &config, &history, Some(&ccp), &drift_factor(None));
+        assert_eq!(picked.map(|(_, l)| l).as_deref(), Some("低硫主焦煤指数"));
+    }
+
+    /// 写了 V 的报价按指标挑序列, 不看煤种: 标着焦煤的 V38 低硫煤按气煤指数推算;
+    /// 没写 V 的只在同煤种里挑.
+    #[test]
+    fn test_drift_series_by_data_ignores_coal_type() {
+        let config = index_config();
+        let mut history = index_history();
+        history.insert(
+            "LJM_QM".to_string(),
+            vec![point("2026-10-15", 1400.0), point("2026-10-26", 1380.0)],
+        );
+        let factor = drift_factor(Some(20.0));
+        let pick = |b: Value| drift_series(&b, &config, &history, None, &factor).map(|(_, l)| l);
+        assert_eq!(
+            pick(json!({"coal_type": "焦煤", "date": "2026-10-20", "props": {"S": 0.6, "V": 38}}))
+                .as_deref(),
+            Some("气煤指数")
+        );
+        assert_eq!(
+            pick(json!({"coal_type": "焦煤", "date": "2026-10-20", "props": {"S": 0.6}}))
+                .as_deref(),
+            Some("低硫主焦煤指数")
+        );
+        // 没配序列的煤种, 写了 V 也能按指标找到最近的序列, 不再一律退回 CCP.
+        assert_eq!(
+            pick(
+                json!({"coal_type": "贫瘦煤", "date": "2026-10-20", "props": {"S": 2.4, "V": 16}})
+            )
+            .as_deref(),
+            Some("高硫主焦煤指数")
+        );
     }
 
     #[test]
@@ -663,7 +792,7 @@ mod tests {
                    "date": "2026-10-01", "price": 2300.0}),
         ];
         apply_drift(&mut benchmarks, |b| {
-            drift_series(b, &config, &history, Some(&ccp))
+            drift_series(b, &config, &history, Some(&ccp), &drift_factor(None))
         });
         assert!(benchmarks[0].get("current_price").is_none());
         assert_eq!(benchmarks[1]["index_source"], "CCP");
@@ -677,7 +806,7 @@ mod tests {
         let mut benchmarks = vec![json!({"name": "孝义高硫", "coal_type": "焦煤",
             "props": {"S": 2.9}, "date": "2026-10-15", "price": 2039.0})];
         apply_drift(&mut benchmarks, |b| {
-            drift_series(b, &config, &history, None)
+            drift_series(b, &config, &history, None, &drift_factor(None))
         });
         // 高硫档 10/15 → 10/26: 2107.4 / 2118.6.
         assert_eq!(benchmarks[0]["current_price"], 2028.22);
@@ -707,13 +836,19 @@ mod tests {
     #[test]
     fn test_fill_price_request_uses_master_and_current_benchmarks() {
         let master = json!({"price_factor": {"description": "说明", "adjusts": [],
-            "index_series": [{"code": "LJM_QM"}], "index_series_note": "说明"}});
+            "index_series": [{"code": "LJM_QM"}], "index_series_note": "说明",
+            "matching_note": "说明", "matching": {"weights": {"V": 20}}}});
         let benchmarks = [json!({"name": "晋中", "price": 2050})];
         let mut request = json!({"coals": []});
         fill_price_request(&mut request, &master, &benchmarks);
         assert!(request["price_factor"].get("description").is_none());
         assert!(request["price_factor"].get("index_series").is_none());
         assert!(request["price_factor"].get("index_series_note").is_none());
+        assert!(request["price_factor"].get("matching_note").is_none());
+        assert_eq!(
+            request["price_factor"]["matching"]["weights"]["V"], 20,
+            "对标配置交给核心"
+        );
         assert_eq!(request["price_factor"]["benchmarks"][0]["name"], "晋中");
 
         // master 自己带着默认基准时, 也要换成当前生效的 (补录、指数、推算后的).
@@ -732,7 +867,7 @@ mod tests {
 
     fn inputs_fixture() -> (Value, BenchmarkInputs) {
         let master = json!({"price_factor": {
-            "adjusts": [],
+            "adjusts": drift_factor(None)["adjusts"],
             "index_series": index_config(),
             "benchmarks": [
                 {"name": "晋中", "coal_type": "焦煤", "props": {"S": 0.6}, "date": "2026-10-16", "price": 2300.0}
@@ -838,7 +973,13 @@ mod tests {
         let indexed = index_benchmarks(&config, &inputs.history);
         let mut expected = merge(&[&master_benchmarks(&master), &inputs.stored, &indexed]);
         apply_drift(&mut expected, |b| {
-            drift_series(b, &config, &inputs.history, inputs.ccp.as_deref())
+            drift_series(
+                b,
+                &config,
+                &inputs.history,
+                inputs.ccp.as_deref(),
+                &master["price_factor"],
+            )
         });
         assert_eq!(as_of(&master, &inputs, day("2026-10-30")), expected);
     }

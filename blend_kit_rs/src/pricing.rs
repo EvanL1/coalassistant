@@ -14,10 +14,15 @@
 //! 升贴水按**点**计: 标准品 = 1000 点, 质量指数 Q(c) = 1000 + Σ adj_i.
 //!
 //! 第二步 —— 定价, 按优先级:
-//!   1. **基准报价** (`benchmarks`, 带日期的市场报价): 先按 煤种 → 形态 逐层收窄 (每层只在煤写了该属性、
-//!      且有相同的基准时收窄; 不同煤种、形态是不同的市场), 再取"升贴水差得最少"的一条 b
-//!      (Σ|adj_i(c) − adj_i(b)|, 两边都有该指标的规则才算; 地区不同的基准加罚 `region_penalty` 点),
-//!      估价 = 基准价 × Q(c)/Q(b). 这样肥煤对标肥煤、浮精对标浮精、高硫对标高硫, 不必从标准品一路外推.
+//!   1. **基准报价** (`benchmarks`, 带日期的市场报价): 按指标距离对标, 估价 = Σ 份额_b × 基准价_b × Q(c)/Q(b).
+//!      距离 d(c, b) = Σ|adj_i(c) − adj_i(b)| (两边都有该指标的计价规则) + Σ w_k·|x_k(c) − x_k(b)|
+//!      (`matching.weights`: 只比不计价的指标, 如 V; 基准缺该项加罚 `missing_penalty`),
+//!      地区不同的基准再加罚 `region_penalty`. 配了 `matching.bandwidth` τ 时份额 ∝ exp(−d/τ),
+//!      否则只用最近的一条.
+//!      **不先分煤种**: 煤种本就是按 V、G、Y 划的, V 进了距离, 标签就不必当门槛 —— 标着焦煤的 V37 煤
+//!      自然落到气煤上, 煤种边界附近的煤在两边的基准之间平滑过渡. 形态 (精煤/煤泥/浮精) 不由 V、G、Y
+//!      决定, 照旧分层 (只在有相同形态的基准时收窄). 只有煤缺 weights 里的指标 (或没配 `matching`) 时,
+//!      煤种标签是唯一线索, 才先按煤种分层.
 //!   2. **市场价** (`market_price`, 标准品 1000 点的价): 估价 = 市场价/1000 × Q(c).
 //!   3. 都没有: 由有报价的煤反推市场价 = 1000 × mean(报价 / Q).
 //!
@@ -29,8 +34,8 @@
 use std::collections::HashSet;
 
 use crate::model::{
-    Benchmark, Coal, CoalValue, Direction, PriceAdjust, PriceFactor, PricePart, PriceRequest,
-    PriceResult, INDICATORS,
+    Benchmark, BenchmarkShare, Coal, CoalValue, Direction, MatchConfig, PriceAdjust, PriceFactor,
+    PricePart, PriceRequest, PriceResult, INDICATORS,
 };
 use crate::quality::validate_coal;
 
@@ -106,7 +111,37 @@ pub fn validate(factor: &PriceFactor) -> Result<(), String> {
     {
         return Err(format!("外地基准加罚 {p} 无效, 须为 ≥0 的有限数"));
     }
+    if let Some(matching) = &factor.matching {
+        validate_matching(matching)?;
+    }
     validate_benchmarks(factor)
+}
+
+fn validate_matching(matching: &MatchConfig) -> Result<(), String> {
+    let non_negative = |x: f64| x.is_finite() && x >= 0.0;
+    for (key, weight) in &matching.weights {
+        if !INDICATORS.contains(&key.as_str()) {
+            return Err(format!("对标距离里的未知指标 {key}"));
+        }
+        // 权重 0 的指标在距离里不加信息, 却会让煤跳过煤种分层.
+        if !(non_negative(*weight) && *weight > 0.0) {
+            return Err(format!(
+                "对标距离 {key} 的权重 {weight} 无效, 须为 >0 的有限数"
+            ));
+        }
+    }
+    if !non_negative(matching.missing_penalty) {
+        return Err(format!(
+            "基准缺指标的加罚 {} 无效, 须为 ≥0 的有限数",
+            matching.missing_penalty
+        ));
+    }
+    match matching.bandwidth {
+        Some(b) if !(b.is_finite() && b > 0.0) => {
+            Err(format!("对标带宽 {b} 无效, 须为 >0 的有限数"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// 基准报价: 名字唯一, 价为正, 指标是已知指标的有限数, 质量指数 > 0 (否则没法按比例换算).
@@ -185,6 +220,7 @@ fn adjust_coal(coal: &Coal, rules: &[&PriceAdjust]) -> CoalValue {
         ratio: None,
         blend_value: None,
         benchmark: None,
+        benchmark_mix: Vec::new(),
         parts: Vec::new(),
         missing: Vec::new(),
         extrapolated: Vec::new(),
@@ -273,8 +309,30 @@ fn distance(a: &CoalValue, b: &CoalValue) -> f64 {
         .sum()
 }
 
-/// 对标时逐层收窄的属性, 按优先级: 煤种 → 形态 (不同煤种、形态是不同的市场).
-/// 地区不在这里 —— 它只是软偏好, 见 [`nearest`].
+/// 只比、不计价的指标 (如 V) 差多少点: 权重 × |差|; 基准缺该项按 missing_penalty 计,
+/// 煤缺该项不计 (这时煤按标签分层, 见 [`placeable`]).
+fn match_distance(coal: &Coal, anchor: &Coal, matching: &MatchConfig) -> f64 {
+    matching
+        .weights
+        .iter()
+        .map(|(key, weight)| match (coal.get(key), anchor.get(key)) {
+            (Some(a), Some(b)) => weight * (a - b).abs(),
+            (Some(_), None) => matching.missing_penalty,
+            (None, _) => 0.0,
+        })
+        .sum()
+}
+
+/// 煤能不能只凭指标定位: 配了只比不计价的指标, 且煤这几项都有.
+/// 不能时 (没配, 或煤缺 V) 煤种标签是唯一线索, 退回先按煤种分层.
+fn placeable(coal: &Coal, matching: Option<&MatchConfig>) -> bool {
+    matching.is_some_and(|m| {
+        !m.weights.is_empty() && m.weights.keys().all(|key| coal.get(key).is_some())
+    })
+}
+
+/// 逐层收窄的属性, 按优先级: 煤种 → 形态. 煤能凭指标定位时跳过煤种层, 形态层照旧
+/// (形态不由 V、G、Y 决定). 地区不在这里 —— 它只是软偏好.
 type Attribute = fn(&Coal) -> Option<&str>;
 const MATCH_ORDER: [Attribute; 2] = [|c| c.coal_type.as_deref(), |c| c.form.as_deref()];
 
@@ -299,30 +357,94 @@ fn narrow<'a>(
     }
 }
 
-/// 按 [`MATCH_ORDER`] 逐层收窄后, 取升贴水差得最少的基准; 配置了 region_penalty 时,
-/// 地区与煤不同的基准距离再加罚这么多点 (煤没写地区不罚). 并列取先列的.
-fn nearest<'a>(
+/// 候选基准与距离, 近的在前 (并列保持列出顺序). 距离 = 升贴水差 + 只比不计价的指标差
+/// + 外地加罚 (煤没写地区不罚). 煤能凭指标定位时所有基准都是候选, 否则先按标签分层.
+fn ranked<'a>(
     coal: &Coal,
     value: &CoalValue,
     anchors: &'a [Anchor<'a>],
-    region_penalty: Option<f64>,
-) -> &'a Anchor<'a> {
-    let pool = MATCH_ORDER
-        .iter()
-        .fold(anchors.iter().collect(), |pool, of| {
-            narrow(pool, of(coal), *of)
-        });
+    factor: &PriceFactor,
+) -> Vec<(&'a Anchor<'a>, f64)> {
+    let matching = factor.matching.as_ref();
+    // 能凭指标定位时只跳过煤种层: 形态 (精煤/煤泥/浮精) 不由 V、G、Y 决定, 照旧分层.
+    let layers = if placeable(coal, matching) {
+        &MATCH_ORDER[1..]
+    } else {
+        &MATCH_ORDER[..]
+    };
+    let pool = layers.iter().fold(anchors.iter().collect(), |pool, of| {
+        narrow(pool, of(coal), *of)
+    });
     let cost = |anchor: &Anchor| {
         let elsewhere = coal.region.is_some() && anchor.probe.region != coal.region;
-        let penalty = region_penalty.filter(|_| elsewhere).unwrap_or(0.0);
-        distance(value, &anchor.value) + penalty
+        let penalty = factor.region_penalty.filter(|_| elsewhere).unwrap_or(0.0);
+        let unpriced = matching.map_or(0.0, |m| match_distance(coal, &anchor.probe, m));
+        distance(value, &anchor.value) + unpriced + penalty
     };
-    pool.into_iter()
-        .min_by(|a, b| cost(a).total_cmp(&cost(b)))
-        .expect("调用方保证至少一条基准")
+    let mut ranked: Vec<_> = pool.into_iter().map(|a| (a, cost(a))).collect();
+    ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
+    ranked
 }
 
-/// 按基准报价定价: 估价 = 基准价 × Q(煤) / Q(基准). 标准品价取离标准品最近的基准反推.
+/// 各候选的份额: 配了带宽 τ 时 ∝ exp(−(d − d_min)/τ); 没配只用最近的一条.
+/// 最近的距离都不是有限数 (指标大到溢出) 时也只用最近的一条, 不让 inf − inf 把份额弄成 NaN、估价成 0.
+fn shares(ranked: &[(&Anchor, f64)], bandwidth: Option<f64>) -> Vec<f64> {
+    let nearest = ranked.first().map_or(0.0, |(_, d)| *d);
+    let Some(tau) = bandwidth.filter(|_| nearest.is_finite()) else {
+        return (0..ranked.len())
+            .map(|i| f64::from(u8::from(i == 0)))
+            .collect();
+    };
+    let raw: Vec<f64> = ranked
+        .iter()
+        .map(|(_, d)| (-(d - nearest) / tau).exp())
+        .collect();
+    let total: f64 = raw.iter().sum();
+    raw.iter().map(|w| w / total).collect()
+}
+
+/// 列出来的份额下限 (估价仍用全部份额).
+const MIX_LISTED: f64 = 0.01;
+
+/// 一种煤的估价: Σ 份额 × 基准价 × Q(煤)/Q(基准).
+fn price_one(
+    coal: &Coal,
+    mut value: CoalValue,
+    anchors: &[Anchor],
+    factor: &PriceFactor,
+) -> CoalValue {
+    let ranked = ranked(coal, &value, anchors, factor);
+    let bandwidth = factor.matching.as_ref().and_then(|m| m.bandwidth);
+    let shares = shares(&ranked, bandwidth);
+    let fair = ranked
+        .iter()
+        .zip(&shares)
+        .filter(|(_, share)| **share > 0.0)
+        .map(|((anchor, _), share)| {
+            share * (anchor.benchmark.effective_price() * value.points / anchor.value.points)
+        })
+        .sum();
+    value.fair = fair;
+    value.gap = value.fob.map(|fob| fob - fair);
+    value.ratio = value
+        .fob
+        .map(|fob| if fair > 0.0 { fob / fair } else { 0.0 });
+    value.benchmark = ranked.first().map(|(a, _)| a.benchmark.name.clone());
+    if bandwidth.is_some() {
+        value.benchmark_mix = ranked
+            .iter()
+            .zip(&shares)
+            .filter(|(_, share)| **share >= MIX_LISTED)
+            .map(|((anchor, _), share)| BenchmarkShare {
+                name: anchor.benchmark.name.clone(),
+                share: *share,
+            })
+            .collect();
+    }
+    value
+}
+
+/// 按基准报价定价 (见 [`price_one`]). 标准品价取离标准品最近的基准反推.
 fn price_by_benchmarks(
     coals: &[Coal],
     values: Vec<CoalValue>,
@@ -345,17 +467,7 @@ fn price_by_benchmarks(
     let coal_values = coals
         .iter()
         .zip(values)
-        .map(|(coal, mut value)| {
-            let anchor = nearest(coal, &value, &anchors, factor.region_penalty);
-            let fair = anchor.benchmark.effective_price() * value.points / anchor.value.points;
-            value.fair = fair;
-            value.gap = value.fob.map(|fob| fob - fair);
-            value.ratio = value
-                .fob
-                .map(|fob| if fair > 0.0 { fob / fair } else { 0.0 });
-            value.benchmark = Some(anchor.benchmark.name.clone());
-            value
-        })
+        .map(|(coal, value)| price_one(coal, value, &anchors, factor))
         .collect();
     let standard = anchors
         .iter()
@@ -484,6 +596,7 @@ mod tests {
             uncertainty: None,
             benchmarks: Vec::new(),
             region_penalty: None,
+            matching: None,
         }
     }
 
@@ -621,6 +734,7 @@ mod tests {
             uncertainty: None,
             benchmarks: Vec::new(),
             region_penalty: None,
+            matching: None,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -648,6 +762,7 @@ mod tests {
             uncertainty: None,
             benchmarks: Vec::new(),
             region_penalty: None,
+            matching: None,
         };
         let coal = coal_from_tuple(
             "甲",
@@ -707,6 +822,204 @@ mod tests {
         assert!(eval.market.is_none());
     }
 
+    /// 只按灰分计价 (每 1% 10 点), 两条基准灰分相同、只差挥发分 —— 估价全看对标落在哪条上.
+    fn ash_only(matching: Option<MatchConfig>, benchmarks: Vec<Benchmark>) -> PriceFactor {
+        PriceFactor {
+            adjusts: vec![rule("A", Direction::Upper, 10.0, 10.0, 10.0)],
+            benchmarks,
+            matching,
+            ..PriceFactor::default()
+        }
+    }
+
+    fn quote(name: &str, coal_type: &str, props: &[(&str, f64)], price: f64) -> Benchmark {
+        Benchmark {
+            name: name.into(),
+            coal_type: Some(coal_type.into()),
+            form: None,
+            region: None,
+            props: props.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            price,
+            date: "2026-11-02".into(),
+            source: None,
+            current_price: None,
+        }
+    }
+
+    fn gas_and_coking() -> Vec<Benchmark> {
+        vec![
+            quote("主焦", "焦煤", &[("A", 10.0), ("V", 22.0)], 2000.0),
+            quote("气煤", "气煤", &[("A", 10.0), ("V", 38.0)], 1400.0),
+        ]
+    }
+
+    fn by_v(weight: f64) -> MatchConfig {
+        MatchConfig {
+            weights: [("V".to_string(), weight)].into(),
+            ..MatchConfig::default()
+        }
+    }
+
+    fn labeled(name: &str, coal_type: &str, props: &[(&str, f64)]) -> Coal {
+        let mut coal = coal_from_tuple(
+            name,
+            (1.0, 10.0, 24.0, 85.0, 15.0, 0.1, 65.0, 10.0, 0.0, 0.0),
+        );
+        coal.props = props.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        coal.coal_type = Some(coal_type.into());
+        coal
+    }
+
+    fn priced(coal: Coal, factor: &PriceFactor) -> CoalValue {
+        evaluate(&[coal], factor).unwrap().coal_values.remove(0)
+    }
+
+    /// 标着"焦煤"但 V37 的煤: 不按数据对标时只能在焦煤里挑; 按数据对标就落到气煤上.
+    #[test]
+    fn test_data_matching_ignores_coal_label() {
+        let coal = || labeled("标焦煤", "焦煤", &[("A", 10.0), ("V", 37.0)]);
+        let by_label = priced(coal(), &ash_only(None, gas_and_coking()));
+        assert_eq!(by_label.benchmark.as_deref(), Some("主焦"));
+        let by_data = priced(coal(), &ash_only(Some(by_v(20.0)), gas_and_coking()));
+        assert_eq!(by_data.benchmark.as_deref(), Some("气煤"));
+        close(by_data.fair, 1400.0, "按气煤估");
+        assert!(by_data.benchmark_mix.is_empty(), "没配带宽只用一条");
+    }
+
+    /// 煤缺 V, 数据没法定位, 退回按煤种标签分层.
+    #[test]
+    fn test_coal_without_v_falls_back_to_label() {
+        let coal = labeled("缺V", "气煤", &[("A", 10.0)]);
+        let value = priced(coal, &ash_only(Some(by_v(20.0)), gas_and_coking()));
+        assert_eq!(value.benchmark.as_deref(), Some("气煤"));
+    }
+
+    /// 基准缺 V 时每缺一项加罚, 免得它在 V 上和谁都"一样近".
+    #[test]
+    fn test_benchmark_without_v_is_penalized() {
+        let mut benchmarks = gas_and_coking();
+        benchmarks.push(quote("没写V", "焦煤", &[("A", 10.0)], 3000.0));
+        let coal = || labeled("甲", "焦煤", &[("A", 10.0), ("V", 23.0)]);
+        let free = priced(coal(), &ash_only(Some(by_v(20.0)), benchmarks.clone()));
+        assert_eq!(
+            free.benchmark.as_deref(),
+            Some("没写V"),
+            "不罚就白捡 0 距离"
+        );
+        let matching = MatchConfig {
+            missing_penalty: 100.0,
+            ..by_v(20.0)
+        };
+        let fined = priced(coal(), &ash_only(Some(matching), benchmarks));
+        assert_eq!(fined.benchmark.as_deref(), Some("主焦"));
+    }
+
+    /// 带宽 50 点: V24 离主焦 2×20=40 点, 离气煤 14×20=280 点;
+    /// 份额 ∝ exp(−d/50), 估价 = Σ 份额 × 基准价 × Q(煤)/Q(基准) (这里 Q 都是 1000).
+    #[test]
+    fn test_bandwidth_blends_nearby_benchmarks() {
+        let matching = MatchConfig {
+            bandwidth: Some(50.0),
+            ..by_v(20.0)
+        };
+        let coal = labeled("甲", "焦煤", &[("A", 10.0), ("V", 24.0)]);
+        let value = priced(coal, &ash_only(Some(matching), gas_and_coking()));
+        let far = (-(280.0 - 40.0) / 50.0_f64).exp();
+        let near_share = 1.0 / (1.0 + far);
+        close(
+            value.fair,
+            near_share * 2000.0 + (1.0 - near_share) * 1400.0,
+            "加权估价",
+        );
+        assert_eq!(value.benchmark.as_deref(), Some("主焦"));
+        assert_eq!(value.benchmark_mix.len(), 1, "气煤份额 <1% 不列");
+        close(value.benchmark_mix[0].share, near_share, "主焦份额");
+    }
+
+    /// 两条一样近时各占一半, 份额从大到小列出.
+    #[test]
+    fn test_equidistant_benchmarks_split_evenly() {
+        let matching = MatchConfig {
+            bandwidth: Some(50.0),
+            ..by_v(20.0)
+        };
+        let coal = labeled("甲", "焦煤", &[("A", 10.0), ("V", 30.0)]);
+        let value = priced(coal, &ash_only(Some(matching), gas_and_coking()));
+        close(value.fair, 1700.0, "两条平分");
+        let names: Vec<_> = value
+            .benchmark_mix
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["主焦", "气煤"], "并列时先列的在前");
+        close(value.benchmark_mix[1].share, 0.5, "气煤份额");
+    }
+
+    /// 指标大到距离溢出成 inf: 只用最近的一条, 不能估成 0 元 (否则在 LP 里成了免费煤).
+    #[test]
+    fn test_infinite_distance_keeps_nearest_price() {
+        let matching = MatchConfig {
+            bandwidth: Some(50.0),
+            ..by_v(20.0)
+        };
+        let coal = labeled("溢出", "焦煤", &[("A", 10.0), ("V", 1e308)]);
+        let value = priced(coal, &ash_only(Some(matching), gas_and_coking()));
+        close(value.fair, 2000.0, "取先列的一条");
+        assert_eq!(value.benchmark.as_deref(), Some("主焦"));
+    }
+
+    /// 按数据对标只跳过煤种层: 煤泥照旧只和煤泥基准比, 哪怕精煤的 V 更近.
+    #[test]
+    fn test_data_matching_keeps_form_layer() {
+        let mut benchmarks = gas_and_coking();
+        let mut slime = quote("煤泥", "焦煤", &[("A", 10.0), ("V", 26.0)], 900.0);
+        slime.form = Some("煤泥".into());
+        benchmarks[0].form = Some("精煤".into());
+        benchmarks.push(slime);
+        let mut coal = labeled("甲", "焦煤", &[("A", 10.0), ("V", 22.0)]);
+        coal.form = Some("煤泥".into());
+        let value = priced(coal, &ash_only(Some(by_v(20.0)), benchmarks));
+        assert_eq!(value.benchmark.as_deref(), Some("煤泥"));
+    }
+
+    /// 煤缺 V 退回按煤种分层时, 配了带宽就在同煤种的几条之间加权.
+    #[test]
+    fn test_label_fallback_blends_within_coal_type() {
+        let mut benchmarks = gas_and_coking();
+        benchmarks.push(quote("主焦二", "焦煤", &[("A", 10.0), ("V", 24.0)], 2200.0));
+        let matching = MatchConfig {
+            bandwidth: Some(50.0),
+            ..by_v(20.0)
+        };
+        let coal = labeled("缺V", "焦煤", &[("A", 10.0)]);
+        let value = priced(coal, &ash_only(Some(matching), benchmarks));
+        close(value.fair, 2100.0, "两条焦煤基准一样近, 各占一半");
+        assert!(value.benchmark_mix.iter().all(|s| s.name != "气煤"));
+    }
+
+    /// 不配 matching: 输出不多任何新键 (老调用方拿到的 JSON 与原来一样).
+    #[test]
+    fn test_absent_matching_adds_no_output_keys() {
+        let request = serde_json::json!({
+            "coals": [labeled("甲", "焦煤", &[("A", 10.0), ("V", 24.0)])],
+            "price_factor": ash_only(None, gas_and_coking()),
+        });
+        let output = estimate_json(&request.to_string());
+        assert!(output.contains(r#""benchmark":"主焦""#), "{output}");
+        assert!(!output.contains("benchmark_mix"), "{output}");
+    }
+
+    /// 只写 weights 也能用: 缺项罚 0, 不加权. null 不当缺省 (master 自检同样拒收).
+    #[test]
+    fn test_match_config_partial_fields() {
+        let partial: MatchConfig = serde_json::from_str(r#"{"weights":{"V":20}}"#).unwrap();
+        assert_eq!(partial, by_v(20.0));
+        assert!(serde_json::from_str::<MatchConfig>(
+            r#"{"weights":{"V":20},"missing_penalty":null}"#
+        )
+        .is_err());
+    }
+
     #[test]
     fn test_validation_errors() {
         let bad = |edit: &dyn Fn(&mut PriceFactor)| {
@@ -725,6 +1038,20 @@ mod tests {
         assert!(bad(&|f| f.adjusts[0].base = f64::INFINITY));
         assert!(bad(&|f| f.market_price = Some(f64::NAN)));
         assert!(bad(&|f| f.market_price = Some(0.0)), "市场价须 > 0");
+        let bad_match = |edit: &dyn Fn(&mut MatchConfig)| {
+            let mut matching = by_v(20.0);
+            edit(&mut matching);
+            bad(&|f| f.matching = Some(matching.clone()))
+        };
+        assert!(!bad_match(&|_| {}));
+        assert!(bad_match(&|m| m.weights = [("挥发".into(), 1.0)].into()));
+        assert!(bad_match(&|m| m.weights = [("V".into(), -1.0)].into()));
+        assert!(
+            bad_match(&|m| m.weights = [("V".into(), 0.0)].into()),
+            "权重 0 不加信息"
+        );
+        assert!(bad_match(&|m| m.missing_penalty = f64::NAN));
+        assert!(bad_match(&|m| m.bandwidth = Some(0.0)), "带宽须 > 0");
         assert!(evaluate(
             &four_coals(),
             &PriceFactor {
@@ -735,6 +1062,7 @@ mod tests {
                 uncertainty: None,
                 benchmarks: Vec::new(),
                 region_penalty: None,
+                matching: None,
             }
         )
         .is_err());
