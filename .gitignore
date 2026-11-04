@@ -62,3 +62,8 @@ __pycache__/
 
 # Supabase CLI 本地项目关联缓存
 supabase/.temp/
+
+# research/ 里的价格数据来自钢铁网等第三方, 仓库公开, 不提交 (脚本可以)
+research/**/*.json
+research/**/*.csv
+research/**/*.pdf
