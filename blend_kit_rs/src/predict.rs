@@ -70,6 +70,7 @@ impl CsrPredictor {
         if n < 7 {
             return Err(format!("样本数不足: 需要至少 7 个观测, 实际 {}", n));
         }
+        validate_csr_observations(observations)?;
 
         // 构造设计矩阵 X (n×7) 和目标向量 y (n).
         // 列顺序: [1, S, A, V, G, Y, M]
@@ -128,6 +129,10 @@ impl CsrPredictor {
         } else {
             1.0 - ss_res / ss_tot
         };
+        // 输入都有限也可能在平方求和时溢出 (观测值极大), 结果不可用.
+        if !r_squared.is_finite() || beta.iter().any(|value| !value.is_finite()) {
+            return Err("CSR 观测数值过大, 拟合溢出".into());
+        }
 
         Ok(CsrPredictor {
             intercept: beta[0],
@@ -556,6 +561,10 @@ fn fit_ridge(observations: &[CsrObservation], lambda: f64) -> Result<CsrPredicto
             *variance += (value - mean).powi(2) / count;
         }
     }
+    // 观测有限也可能在求方差时溢出: 标准差成了 inf, 该特征会被静默抹成 0 系数.
+    if stddev.iter().any(|variance| !variance.is_finite()) {
+        return Err("CSR 观测数值过大, 拟合溢出".into());
+    }
     for value in &mut stddev {
         *value = value.sqrt();
         if *value < 1e-9 {
@@ -842,10 +851,13 @@ fn hash_policy(hash: &mut u64, policy: &ModelPolicy) {
 fn gauss_jordan(aug: &mut [[f64; 8]; 7]) -> Result<(), String> {
     const N: usize = 7;
     for col in 0..N {
-        // 选列最大主元 (部分主元).
-        let pivot_row =
-            (col..N).max_by(|&a, &b| aug[a][col].abs().partial_cmp(&aug[b][col].abs()).unwrap());
-        let pivot_row = pivot_row.unwrap();
+        // 选列最大主元 (部分主元). total_cmp: 溢出出 NaN 时也不会 panic, 由下面的有限性检查拦下.
+        let pivot_row = (col..N)
+            .max_by(|&a, &b| aug[a][col].abs().total_cmp(&aug[b][col].abs()))
+            .unwrap_or(col);
+        if !aug[pivot_row][col].is_finite() {
+            return Err("数值溢出: 观测值过大".into());
+        }
         if aug[pivot_row][col].abs() < 1e-12 {
             return Err("矩阵奇异: 自变量之间存在完全共线性".into());
         }
@@ -869,6 +881,9 @@ fn gauss_jordan(aug: &mut [[f64; 8]; 7]) -> Result<(), String> {
                 *v -= factor * p;
             }
         }
+    }
+    if aug.iter().any(|row| !row[N].is_finite()) {
+        return Err("数值溢出: 观测值过大".into());
     }
     Ok(())
 }
@@ -939,6 +954,20 @@ pub fn csr_stamp_charging(vdaf: f64, g: f64, y: f64, mci: Option<f64>) -> f64 {
     let m40 = -1.14 * vdaf + 0.036 * g + 1.13 * y + 87.5 + 50.0 * BULK_DENSITY - 50.0;
     let correction = mci.map_or(0.0, |mci| (mci - MCI_BASELINE) * MCI_SLOPE);
     -0.032 * m40 * m40 + 6.336 * m40 - 241.18 - correction
+}
+
+/// [`csr_stamp_charging`] 加上适用范围检查: 外推出 0~100 以外的 CSR 是公式失效, 不是
+/// 焦炭质量, 不给数, 返回一条说明. 高挥发低 G/Y 的气煤配方会落到这一侧 (M40 低于约 51.4
+/// 时二次式为负).
+pub fn csr_stamp_in_domain(vdaf: f64, g: f64, y: f64, mci: Option<f64>) -> Result<f64, String> {
+    let estimate = csr_stamp_charging(vdaf, g, y, mci);
+    if estimate.is_finite() && (0.0..=100.0).contains(&estimate) {
+        return Ok(estimate);
+    }
+    Err(format!(
+        "捣固 CSR 估算超出公式适用范围 (配合煤挥发 {vdaf:.2} / G {g:.1} / Y {y:.1} 外推得 \
+         {estimate:.1}), 本次不给估算值"
+    ))
 }
 
 #[cfg(test)]
@@ -1020,6 +1049,39 @@ mod tests {
             predictor.beta_m
         );
         assert_eq!(predictor.n_samples, 10);
+    }
+
+    /// 非有限或极大的观测: 返回 Err, 不 panic (服务端后台会拿历史实测调用 fit).
+    #[test]
+    fn test_fit_rejects_non_finite_and_overflowing_input() {
+        let mut with_nan = make_obs(10);
+        with_nan[3].csr_measured = f64::NAN;
+        assert!(CsrPredictor::fit(&with_nan).is_err());
+
+        let mut with_inf = make_obs(10);
+        with_inf[0].g = f64::INFINITY;
+        assert!(CsrPredictor::fit(&with_inf).is_err());
+
+        // 有限但极大: 平方求和溢出成 inf/NaN.
+        let mut huge = make_obs(10);
+        huge[2].a = 1e200;
+        huge[5].csr_measured = 1e200;
+        assert!(CsrPredictor::fit(&huge).is_err());
+
+        let policy = ModelPolicy::default();
+        let mut huge_ridge = make_obs(40);
+        huge_ridge[7].v = 1e300;
+        assert!(ValidatedCsrModel::fit(&huge_ridge, &policy).is_err());
+    }
+
+    #[test]
+    fn test_gauss_jordan_reports_nan_instead_of_panicking() {
+        let mut aug = [[0.0; 8]; 7];
+        for (index, row) in aug.iter_mut().enumerate() {
+            row[index] = 1.0;
+        }
+        aug[2][0] = f64::NAN;
+        assert!(gauss_jordan(&mut aug).is_err());
     }
 
     #[test]
