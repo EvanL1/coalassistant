@@ -569,6 +569,8 @@ export interface BlendResult {
   rank_variance?: number | null;
   /** 启用煤阶交互时: CSR 因此扣掉的点数 k·D (体检里的 CSR 已扣过). */
   csr_interaction_penalty?: number | null;
+  /** 按整铲配时, 为凑成整铲留余量重配而比不凑整的配方多花的成本 (元/吨); 没走这一步时缺失. */
+  shovel_extra_cost?: number | null;
   /** 价格因子评估; 未配置或旧历史结果为空/缺失. */
   coal_values?: CoalValue[];
   /** 标准品 1000 点对应的市场价 (元/吨). */

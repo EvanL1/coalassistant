@@ -1204,7 +1204,8 @@ button {
 
   .today-dashboard {
     display: grid;
-    grid-template-columns: minmax(320px, 0.85fr) minmax(480px, 1.35fr);
+    /* 两列的最小宽度加间距要放得进 960px 断点下最窄的内容区 (侧栏之外约 720px). */
+    grid-template-columns: minmax(280px, 0.85fr) minmax(400px, 1.35fr);
     grid-template-rows: auto 1fr;
     gap: 16px;
     align-items: stretch;
