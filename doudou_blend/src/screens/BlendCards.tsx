@@ -1,5 +1,6 @@
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
 import type { BlendResult, EvaluationMethod, EvaluationStatus, IndicatorCheck, QualityStatus } from "../types";
+import { shovelRoundingMissed, shovelRoundingNotice } from "../domain/resultNotes";
 
 const RECIPE_COLORS = ["#0a5fff", "#7c3aed", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#8b5cf6"];
 
@@ -53,12 +54,17 @@ export function RecipeCard({
   result,
   coalTypes,
   title = "今日配方",
+  shovelTons = null,
 }: {
   result: BlendResult;
   coalTypes: Map<string, string>;
   title?: string;
+  /** 本次请求的一铲吨数; 带了却没凑成整铲时在卡里说破. */
+  shovelTons?: number | null;
 }) {
   const sortedRecipe = [...result.orders].sort((a, b) => b.ratio - a.ratio);
+  const roundingMissed =
+    shovelTons != null && shovelRoundingMissed({ shovel_tons: shovelTons }, result);
   return (
     <div className="card today-recipe">
       <div
@@ -110,6 +116,11 @@ export function RecipeCard({
           </div>
         ))}
       </div>
+      {roundingMissed && shovelTons != null && (
+        <p className="result-notice" role="status">
+          {shovelRoundingNotice(shovelTons)}
+        </p>
+      )}
     </div>
   );
 }

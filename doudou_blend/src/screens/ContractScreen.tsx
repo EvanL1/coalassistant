@@ -28,6 +28,13 @@ import {
   type PenaltyDraftResult,
 } from "../penalty";
 import { PenaltyEditor } from "../PenaltyEditor";
+import {
+  isPartialNumberInput,
+  numberInputError,
+  numberOrNull,
+  parseNumberInput,
+} from "../domain/numberInput";
+import { errorMessage } from "../http";
 
 const ACCEPTANCE_OPTIONS: ReadonlyArray<{
   value: AcceptanceMode;
@@ -103,9 +110,54 @@ function specToForm(s: Spec): FormSpec {
 }
 
 function optionalNumber(value: string): number | null {
-  if (value.trim() === "") return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  return numberOrNull(value, "indicator");
+}
+
+type NumberField = "min" | "max" | "margin" | "decimals" | "tolerance";
+
+const FIELD_LABEL: Record<NumberField, string> = {
+  min: "下限",
+  max: "上限",
+  margin: "安全余量",
+  decimals: "判定小数位",
+  tolerance: "额外容差",
+};
+
+/**
+ * 每个数字框的错误; 与核心 quality.rs 的合同校验对应 (缺上下限、下限大于上限),
+ * 在前端先拦住, 免得存下去今日页才报"缺少上限". 停用的项核心不看, 这里也不拦.
+ */
+function specFieldErrors(f: FormSpec): Record<NumberField, string | null> {
+  const errors: Record<NumberField, string | null> = {
+    min: null,
+    max: null,
+    margin: null,
+    decimals: null,
+    tolerance: null,
+  };
+  if (!f.enabled) return errors;
+  const needsMin = f.direction !== "Upper";
+  const needsMax = f.direction !== "Lower";
+  const min = parseNumberInput(f.min, "indicator");
+  const max = parseNumberInput(f.max, "indicator");
+  if (needsMin) errors.min = min.ok ? (min.value == null ? "缺少下限" : null) : min.error;
+  if (needsMax) errors.max = max.ok ? (max.value == null ? "缺少上限" : null) : max.error;
+  if (
+    f.direction === "Range" &&
+    min.ok &&
+    max.ok &&
+    min.value != null &&
+    max.value != null &&
+    min.value > max.value
+  ) {
+    errors.min = "下限不能大于上限";
+  }
+  // 安全余量只对硬约束生效, 别的方式下输入框是禁用的: 残留的错值不该拦住保存.
+  errors.margin = f.enforcement === "Hard" ? numberInputError(f.margin, "indicator") : null;
+  errors.decimals =
+    f.acceptanceMode === "Raw" ? null : numberInputError(f.decimals, "indicator");
+  errors.tolerance = numberInputError(f.tolerance, "indicator");
+  return errors;
 }
 
 /**
@@ -145,8 +197,10 @@ function specPenalty(f: FormSpec): PenaltyDraftResult {
 }
 
 function formToSpec(f: FormSpec, penalty: Penalty | null): Spec {
-  const min = optionalNumber(f.min);
-  const max = optionalNumber(f.max);
+  // 上限型不看下限、下限型不看上限 (核心 quality.rs 同规则): 残留的那一端丢掉,
+  // 免得界面看不到的值发进核心, 矛盾时用户不知道要改哪里.
+  const min = f.direction === "Upper" ? null : optionalNumber(f.min);
+  const max = f.direction === "Lower" ? null : optionalNumber(f.max);
   const margin = optionalNumber(f.margin);
   const decimals = optionalNumber(f.decimals);
   const tolerance = optionalNumber(f.tolerance);
@@ -172,18 +226,39 @@ function formToSpec(f: FormSpec, penalty: Penalty | null): Spec {
 
 export function ContractScreen() {
   const [master, setMaster] = useState<CoalMaster | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<FormSpec[]>([]);
   const [savedFlag, setSavedFlag] = useState(false);
+  // 输到一半的中间态 (末尾逗号/小数点) 输入中不亮错; 失焦或点过保存后照实报.
+  const [blurred, setBlurred] = useState<ReadonlySet<string>>(new Set());
+  const [triedSave, setTriedSave] = useState(false);
+  const markBlurred = (field: string) =>
+    setBlurred((prev) => (prev.has(field) ? prev : new Set(prev).add(field)));
 
-  useEffect(() => {
-    loadMaster().then((m) => {
-      setMaster(m);
-      const userOverride = getUserContract();
-      const specs = userOverride ?? m.default_contract.specs;
-      setForm(specs.map(specToForm));
-    });
-  }, []);
+  function load() {
+    setLoadError(null);
+    loadMaster()
+      .then((m) => {
+        setMaster(m);
+        const userOverride = getUserContract();
+        const specs = userOverride ?? m.default_contract.specs;
+        setForm(specs.map(specToForm));
+      })
+      .catch((error: unknown) => setLoadError(errorMessage(error)));
+  }
 
+  useEffect(load, []);
+
+  if (loadError) {
+    return (
+      <div className="empty">
+        <p style={{ marginBottom: 16 }}>合同加载失败: {loadError}</p>
+        <button className="btn btn-primary" onClick={load}>
+          重试
+        </button>
+      </div>
+    );
+  }
   if (!master) return <div className="loading">加载中...</div>;
 
   function updateSpec(i: number, patch: Partial<FormSpec>) {
@@ -203,9 +278,37 @@ export function ContractScreen() {
   // 每条 spec 的计价条款只算这一次, 下面的红字、保存拦截、写盘都用它.
   const penalties = form.map(specPenalty);
   const penaltyErrorCount = penalties.filter((p) => p.error != null).length;
+  const fieldErrors = form.map(specFieldErrors);
+  const visibleFieldErrors = form.map((f, i) => {
+    const shown = {} as Record<NumberField, string | null>;
+    for (const field of Object.keys(FIELD_LABEL) as NumberField[]) {
+      const error = fieldErrors[i][field];
+      shown[field] =
+        error != null &&
+        (triedSave || blurred.has(`${i}:${field}`) || !isPartialNumberInput(f[field]))
+          ? error
+          : null;
+    }
+    return shown;
+  });
+  const invalidFields = form.flatMap((f, i) =>
+    (Object.keys(FIELD_LABEL) as NumberField[])
+      .filter((field) => fieldErrors[i][field] != null)
+      .map((field) => `${INDICATOR_LABEL[f.indicator] || f.indicator} ${FIELD_LABEL[field]}`),
+  );
+  const visibleInvalidFields = form.flatMap((f, i) =>
+    (Object.keys(FIELD_LABEL) as NumberField[])
+      .filter((field) => visibleFieldErrors[i][field] != null)
+      .map((field) => `${INDICATOR_LABEL[f.indicator] || f.indicator} ${FIELD_LABEL[field]}`),
+  );
+  const blocked = penaltyErrorCount > 0 || invalidFields.length > 0;
 
   function save() {
-    if (penaltyErrorCount > 0) return;
+    if (blocked) {
+      // 点保存才校验输到一半的中间态: 把所有错亮出来.
+      setTriedSave(true);
+      return;
+    }
     const specs = form.map((f, i) => formToSpec(f, penalties[i].penalty));
     setUserContract(specs);
     setSavedFlag(true);
@@ -213,7 +316,7 @@ export function ContractScreen() {
   }
 
   function reset() {
-    if (!confirm("重置合同为 master 默认值?")) return;
+    if (!confirm("重置合同为默认值?")) return;
     clearUserContract();
     setForm(master!.default_contract.specs.map(specToForm));
   }
@@ -237,11 +340,27 @@ export function ContractScreen() {
             key={f.indicator}
             spec={f}
             penaltyError={penalties[i].error}
+            fieldErrors={visibleFieldErrors[i]}
             onChange={(patch) => updateSpec(i, patch)}
+            onBlurField={(field) => markBlurred(`${i}:${field}`)}
             isLast={i === form.length - 1}
           />
         ))}
       </div>
+
+      {visibleInvalidFields.length > 0 && (
+        <div
+          role="alert"
+          style={{
+            marginTop: 12,
+            fontSize: 12,
+            color: "var(--c-danger)",
+            padding: "0 4px",
+          }}
+        >
+          有 {visibleInvalidFields.length} 处没填对 (已标红): {visibleInvalidFields.join("、")}，改好才能保存
+        </div>
+      )}
 
       {penaltyErrorCount > 0 && (
         <div
@@ -260,12 +379,7 @@ export function ContractScreen() {
         <button className="btn btn-secondary" onClick={reset}>
           重置默认
         </button>
-        <button
-          className="btn btn-primary"
-          disabled={penaltyErrorCount > 0}
-          style={{ opacity: penaltyErrorCount > 0 ? 0.5 : 1 }}
-          onClick={save}
-        >
+        <button className="btn btn-primary" onClick={save}>
           {savedFlag ? "✓ 已保存" : "保存合同"}
         </button>
       </div>
@@ -287,12 +401,16 @@ export function ContractScreen() {
 function SpecRow({
   spec,
   penaltyError,
+  fieldErrors,
   onChange,
+  onBlurField,
   isLast,
 }: {
   spec: FormSpec;
   penaltyError: string | null;
+  fieldErrors: Record<NumberField, string | null>;
   onChange: (patch: Partial<FormSpec>) => void;
+  onBlurField: (field: NumberField) => void;
   isLast: boolean;
 }) {
   const label = INDICATOR_LABEL[spec.indicator] || spec.indicator;
@@ -357,8 +475,10 @@ function SpecRow({
           <NumberInput
             label="≥"
             value={spec.min}
+            error={fieldErrors.min}
             disabled={!spec.enabled}
             onChange={(v) => onChange({ min: v })}
+            onBlur={() => onBlurField("min")}
           />
         )}
         {spec.direction === "Upper" && (
@@ -373,8 +493,10 @@ function SpecRow({
           <NumberInput
             label="≤"
             value={spec.max}
+            error={fieldErrors.max}
             disabled={!spec.enabled}
             onChange={(v) => onChange({ max: v })}
+            onBlur={() => onBlurField("max")}
           />
         )}
         {spec.direction === "Lower" && (
@@ -426,27 +548,26 @@ function SpecRow({
           <NumberInput
             label="判定小数位"
             value={spec.acceptanceMode === "Raw" ? "—" : spec.decimals}
+            error={fieldErrors.decimals}
             disabled={!spec.enabled || spec.acceptanceMode === "Raw"}
-            min={0}
-            max={6}
-            step={1}
             onChange={(v) => onChange({ decimals: v })}
+            onBlur={() => onBlurField("decimals")}
           />
           <NumberInput
             label="额外容差"
             value={spec.tolerance}
+            error={fieldErrors.tolerance}
             disabled={!spec.enabled}
-            min={0}
-            step="any"
             onChange={(v) => onChange({ tolerance: v })}
+            onBlur={() => onBlurField("tolerance")}
           />
           <NumberInput
             label="安全余量（仅硬约束）"
             value={spec.margin}
+            error={fieldErrors.margin}
             disabled={!spec.enabled || spec.enforcement !== "Hard"}
-            min={0}
-            step="any"
             onChange={(v) => onChange({ margin: v })}
+            onBlur={() => onBlurField("margin")}
           />
         </div>
         <div
@@ -516,22 +637,21 @@ function SpecRow({
   );
 }
 
+/** 文本框 + 数字键盘: type=number 会把认不出的字悄悄变成空, 用户看不出填错了. */
 function NumberInput({
   label,
   value,
   disabled,
-  min,
-  max,
-  step,
+  error,
   onChange,
+  onBlur,
 }: {
   label: string;
   value: string;
   disabled?: boolean;
-  min?: number;
-  max?: number;
-  step?: number | "any";
+  error?: string | null;
   onChange: (v: string) => void;
+  onBlur?: () => void;
 }) {
   return (
     <label
@@ -543,19 +663,19 @@ function NumberInput({
         flexDirection: "column",
         gap: 2,
         opacity: disabled ? 0.5 : 1,
+        boxShadow: error ? "inset 0 0 0 1px var(--c-danger)" : undefined,
       }}
     >
       <span style={{ fontSize: 10, color: "var(--c-text-3)" }}>{label}</span>
       <input
-        type="number"
+        type="text"
         inputMode="decimal"
         value={value === "—" ? "" : value}
         disabled={disabled}
-        min={min}
-        max={max}
-        step={step}
-        placeholder={value === "—" ? "—" : "—"}
+        aria-invalid={error ? true : undefined}
+        placeholder="—"
         onChange={(e) => onChange(e.target.value)}
+        onBlur={onBlur}
         style={{
           background: "transparent",
           border: "none",
@@ -568,6 +688,9 @@ function NumberInput({
           padding: 0,
         }}
       />
+      {error && (
+        <span style={{ fontSize: 10, color: "var(--c-danger)" }}>{error}</span>
+      )}
     </label>
   );
 }

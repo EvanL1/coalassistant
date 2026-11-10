@@ -5,6 +5,9 @@
 import { useEffect, useRef, useState } from "react";
 import { logout } from "../auth";
 import { getBackend } from "../backend";
+import { hasUnsyncedChanges } from "../cloudStorage";
+import { getLocalOwner } from "../localAccount";
+import { numberOrNull } from "../domain/numberInput";
 import {
   clearAllCoalPrefs,
   clearUserContract,
@@ -143,7 +146,9 @@ export function MeScreen() {
           }}
         >
           <div>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>doudou</div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>
+              {getLocalOwner() ?? "当前账号"}
+            </div>
             <div style={{ fontSize: 11, color: "var(--c-text-3)" }}>
               已登录 · Web 数据云端保存
             </div>
@@ -157,7 +162,7 @@ export function MeScreen() {
               color: "var(--c-danger)",
             }}
             onClick={() => {
-              if (confirm("退出登录? 本地数据不会被清除.")) void logout();
+              if (confirm(logoutConfirmText(hasUnsyncedChanges()))) void logout();
             }}
           >
             退出登录
@@ -190,18 +195,18 @@ export function MeScreen() {
         </div>
         <DangerButton
           label="清空煤偏好"
-          hint="重置所有煤的启用/价格/化验为 master 默认"
+          hint="把所有煤的启用、化验值与采购保证值恢复成煤库默认"
           onClick={() => {
-            if (confirm("清空所有煤偏好? 改过的价格/化验值都会丢失.")) {
+            if (confirm("清空所有煤偏好? 改过的启用状态、化验值与采购保证值都会丢失.")) {
               clearAllCoalPrefs();
             }
           }}
         />
         <DangerButton
           label="重置合同"
-          hint="清除自定义合同, 回到 master 默认 8 项约束"
+          hint="清除自定义合同, 回到默认的 8 项要求"
           onClick={() => {
-            if (confirm("重置合同为 master 默认?")) clearUserContract();
+            if (confirm("重置合同为默认?")) clearUserContract();
           }}
         />
         <DangerButton
@@ -216,8 +221,7 @@ export function MeScreen() {
       <div className="card">
         <div className="card-title">关于</div>
         <Row label="版本" value="v0.1.1" />
-        <Row label="运行模式" value={detectMode()} />
-        <Row label="数据源" value="内置 Master" isLast />
+        <Row label="煤库数据" value="随版本更新" isLast />
       </div>
 
       <p
@@ -229,7 +233,7 @@ export function MeScreen() {
           marginBottom: 12,
         }}
       >
-        豆哥配煤 · 核心计算由服务端完成 · Web 数据保存在 PostgreSQL
+        豆哥配煤 · 计算在服务器上完成 · 数据保存在云端
       </p>
     </>
   );
@@ -250,8 +254,8 @@ function ShovelCard() {
   }, []);
 
   function commit() {
-    const n = Number(input);
-    if (Number.isFinite(n) && n > 0) {
+    const n = numberOrNull(input, "indicator");
+    if (n != null && n > 0) {
       setInput(String(n));
       if (n !== getShovelTons()) setShovelTons(n);
     } else {
@@ -274,10 +278,8 @@ function ShovelCard() {
         <span style={{ color: "var(--c-text-2)" }}>一铲</span>
         <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <input
-            type="number"
+            type="text"
             inputMode="decimal"
-            min={0}
-            step={0.5}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onBlur={commit}
@@ -305,8 +307,13 @@ function ShovelCard() {
   );
 }
 
-function detectMode(): string {
-  return "浏览器 Rust API";
+/** 退出会清本机数据; 还有没同步上去的改动时必须说清会丢. */
+export function logoutConfirmText(unsynced: boolean): string {
+  const base =
+    "退出登录? 本机上的煤池设置、合同等数据会被清除, 云端已保存的不受影响, 重新登录后恢复.";
+  return unsynced
+    ? `${base}\n注意: 还有改动没同步到云端, 退出后这些改动会丢失.`
+    : base;
 }
 
 function Row({

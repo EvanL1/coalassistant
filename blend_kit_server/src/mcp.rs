@@ -390,10 +390,15 @@ fn format_result(built: &today::TodayRequest, result: &Value, market: Option<f64
         .partition(|w| w.starts_with(SHOVEL_WARNING));
 
     if result["ok"] != true {
-        out.push(format!(
-            "无解: {}",
-            result["reason"].as_str().unwrap_or("约束冲突")
-        ));
+        let reason = result["reason"].as_str().unwrap_or("约束冲突");
+        // 求解器没算出结论、也没证实不可行: 不能说"无解", 合同也许本来配得出.
+        if result["undetermined"] == true {
+            out.push(format!(
+                "这次没算出结论: {reason}。这不等于合同配不出来, 可以再算一次"
+            ));
+        } else {
+            out.push(format!("无解: {reason}"));
+        }
         let bounds: Vec<InfeasibleBound> =
             serde_json::from_value(result["infeasible_bounds"].clone()).unwrap_or_default();
         for bound in &bounds {
@@ -1381,6 +1386,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_undetermined_result_is_not_called_infeasible() {
+        let built = fabricated(json!([{"indicator": "S", "direction": "Upper", "max": 1.0}]));
+        let result = json!({"ok": false, "undetermined": true, "warnings": [],
+            "reason": "求解器没有算出可靠结论 (迭代次数用尽), 无法判定合同是否可行",
+            "infeasible_bounds": []});
+        let text = format_result(&built, &result, None);
+        assert!(text.contains("这次没算出结论"), "{text}");
+        assert!(text.contains("这不等于合同配不出来"), "{text}");
+        assert!(!text.contains("无解"), "{text}");
     }
 
     #[test]

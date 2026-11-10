@@ -12,6 +12,8 @@ import {
 } from "react";
 import { getBackend } from "../backend";
 import type { HistoryRecord, MeasuredQuality } from "../types";
+import { parseNumberInput } from "../domain/numberInput";
+import { errorMessage } from "../http";
 
 /** 回填字段定义: [MeasuredQuality 键, 显示标签, HistoryRecord 列, 下限 (不含), 上限, 单位]. */
 const QUALITY_FIELDS = [
@@ -57,6 +59,8 @@ function recipeBrief(recipe: Record<string, number>): string {
 
 export function HistoryScreen() {
   const [list, setList] = useState<HistoryRecord[]>([]);
+  // 至少成功加载过一次才能说"没有记录"; 还在加载或加载失败时不能显示成空列表.
+  const [loaded, setLoaded] = useState(false);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
   const refreshRequestRef = useRef(0);
@@ -75,13 +79,14 @@ export function HistoryScreen() {
         return;
       }
       setList(nextList);
+      setLoaded(true);
       setLoadErr(null);
-    } catch {
+    } catch (error) {
       if (
         mountedRef.current &&
         requestId === refreshRequestRef.current
       ) {
-        setLoadErr("加载历史失败");
+        setLoadErr(`历史加载失败: ${errorMessage(error)}`);
       }
     }
   }
@@ -113,6 +118,7 @@ export function HistoryScreen() {
       await backend.clearHistory();
       if (mountedRef.current) {
         setList([]);
+        setLoaded(true);
         setLoadErr(null);
       }
     } catch {
@@ -136,7 +142,8 @@ export function HistoryScreen() {
             className="page-subtitle"
             style={loadErr ? { color: "var(--c-danger)" } : undefined}
           >
-            {loadErr ?? (list.length === 0 ? "尚无保存的方案" : `共 ${list.length} 条`)}
+            {loadErr ??
+              (!loaded ? "加载中..." : list.length === 0 ? "尚无保存的方案" : `共 ${list.length} 条`)}
           </div>
         </div>
         {list.length > 0 && (
@@ -150,18 +157,26 @@ export function HistoryScreen() {
         )}
       </div>
 
-      {list.length === 0 ? (
-        <div className="empty">
-          <p style={{ margin: 0 }}>还没保存过方案</p>
-          <p style={{ fontSize: 12, marginTop: 8 }}>
-            到「今日」tab 点 [保存方案] 后会出现在这里
-          </p>
-        </div>
-      ) : (
+      {list.length > 0 ? (
         <div className="history-grid">
           {list.map((entry) => (
             <HistoryCard key={entry.id} entry={entry} />
           ))}
+        </div>
+      ) : loadErr && !loaded ? (
+        <div className="empty">
+          <button className="btn btn-primary" onClick={() => void refresh()}>
+            重试
+          </button>
+        </div>
+      ) : !loaded ? (
+        <div className="loading">加载中...</div>
+      ) : (
+        <div className="empty">
+          <p style={{ margin: 0 }}>还没保存过方案</p>
+          <p style={{ fontSize: 12, marginTop: 8 }}>
+            到「今日」页点「保存方案」后会出现在这里
+          </p>
         </div>
       )}
     </>
@@ -217,6 +232,8 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
     inputsFromEntry(entry),
   );
   const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -235,13 +252,19 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
   const filled = MEASURED_FIELDS.filter(([key]) => inputs[key].trim() !== "");
 
   async function save() {
+    if (savingRef.current) return;
     if (filled.length === 0) {
       setErr("至少填一项");
       return;
     }
     const measured: MeasuredQuality = {};
     for (const [key, label, , min, max, unit] of filled) {
-      const v = Number(inputs[key]);
+      const parsed = parseNumberInput(inputs[key], "indicator");
+      if (!parsed.ok) {
+        setErr(`${label} ${parsed.error}`);
+        return;
+      }
+      const v = parsed.value ?? Number.NaN;
       if (!Number.isFinite(v) || v <= 0) {
         setErr(`${label} 请输入正数`);
         return;
@@ -252,16 +275,21 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
       }
       measured[key] = v;
     }
+    savingRef.current = true;
+    setSaving(true);
     try {
       const backend = await getBackend();
       await backend.setMeasuredQuality(entry.id, measured);
       if (!mountedRef.current) return;
       setEditing(false);
       setErr(null);
-    } catch {
+    } catch (error) {
       if (mountedRef.current) {
-        setErr("保存失败，请重试");
+        setErr(`保存失败: ${errorMessage(error)}`);
       }
+    } finally {
+      savingRef.current = false;
+      if (mountedRef.current) setSaving(false);
     }
   }
 
@@ -280,7 +308,7 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
           <label key={key} style={{ fontSize: 11, color: "var(--c-text-2)" }}>
             {label}
             <input
-              type="number"
+              type="text"
               inputMode="decimal"
               value={inputs[key]}
               placeholder="—"
@@ -333,8 +361,12 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
                 留空 = 保持原值（不会清除已录数据）
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-                <button style={miniSave} onClick={() => void save()}>
-                  保存
+                <button
+                  style={{ ...miniSave, opacity: saving ? 0.6 : 1 }}
+                  disabled={saving}
+                  onClick={() => void save()}
+                >
+                  {saving ? "保存中..." : "保存"}
                 </button>
                 <button
                   style={linkBtn}

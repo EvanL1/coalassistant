@@ -856,6 +856,10 @@ pub struct BlendResult {
     /// `#[serde(default)]`: 兼容诊断上线前的存量记录 (无此字段).
     #[serde(default)]
     pub infeasible_bounds: Vec<InfeasibleBound>,
+    /// 求解器没算出结论 (迭代用尽、数值错误、解过不了复核), 诊断也没能证实不可行: 合同也许
+    /// 本来可行, 界面不该引导用户去放宽. 只在为真时序列化, 其余结果的输出不变.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub undetermined: bool,
     /// 配方: 煤名 → 配比. 仅含 > 1e-5 的煤.
     pub recipe: HashMap<String, f64>,
     /// 视图 A.
@@ -909,6 +913,7 @@ impl BlendResult {
             ok: false,
             reason: Some(reason.into()),
             infeasible_bounds: Vec::new(),
+            undetermined: false,
             recipe: HashMap::new(),
             cost: None,
             orders: Vec::new(),

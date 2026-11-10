@@ -252,7 +252,7 @@ function MoistureInput({
     >
       <span style={{ fontSize: 10, color: "var(--c-text-3)" }}>{label}</span>
       <input
-        type="number"
+        type="text"
         inputMode="decimal"
         aria-label={label}
         value={value}

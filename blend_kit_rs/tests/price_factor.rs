@@ -390,3 +390,44 @@ fn test_old_result_without_price_fields_deserializes() {
     assert!(parsed.coal_values.is_empty());
     assert!(parsed.market_price.is_none());
 }
+
+/// 煤池 (coals) 里的煤直接按自身价格进 LP, 不走估价; 出厂价 ≤ 0 按约定是"没报价"
+/// (pricing / price_factor 同一约定), 这种煤进 LP 会被当成近乎免费的煤把配方整个
+/// 拽过去. 必须点名拒绝, 而不是算出一份"便宜"的配方.
+#[test]
+fn test_zero_price_coal_in_pool_is_rejected_by_name() {
+    let mut req = request(1.5, None);
+    req["coals"][1]["fob"] = json!(0.0);
+    let result = run(&req);
+    assert_eq!(result["ok"], false, "{result}");
+    let reason = result["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("新星"), "{reason}");
+    assert!(reason.contains("出厂价"), "{reason}");
+}
+
+/// 出厂价 0 + 运费 60: 到厂价不是 0, 但出厂价 ≤ 0 同样是"没报价", 一样要拒绝.
+#[test]
+fn test_zero_fob_with_freight_is_rejected_by_name() {
+    let mut req = request(1.5, None);
+    req["coals"][1]["fob"] = json!(0.0);
+    req["coals"][1]["frt"] = json!(60.0);
+    let result = run(&req);
+    assert_eq!(result["ok"], false, "{result}");
+    let reason = result["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("新星"), "{reason}");
+    assert!(reason.contains("出厂价"), "{reason}");
+}
+
+/// 同一种煤放进 extra_coals 并打开估价, 出厂价 0 = 没报价, 按估算价求解, 照常可解.
+#[test]
+fn test_zero_price_coal_via_estimate_still_solves() {
+    let mut factor = default_factor();
+    factor["market_price"] = json!(2000.0);
+    factor["estimate_unpriced"] = json!(true);
+    factor["extra_coals"] = json!([unpriced()[1].clone()]);
+    let mut req = request(1.5, Some(factor));
+    let pool = coals();
+    req["coals"] = json!([pool[0].clone(), pool[2].clone(), pool[3].clone()]);
+    let result = run(&req);
+    assert_eq!(result["ok"], true, "{:?}", result["reason"]);
+}

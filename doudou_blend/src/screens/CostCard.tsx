@@ -52,9 +52,12 @@ function indicatorLabel(indicator: string): string {
 export function CostCard({
   cost,
   orphanedGuarantees = [],
+  benchmarksStale = false,
 }: {
   cost: CostBreakdown;
   orphanedGuarantees?: OrphanedGuaranteeWarning[];
+  /** 基准报价没取到、退回了内置基准: 估价可能落后于行情. */
+  benchmarksStale?: boolean;
 }) {
   // 三个判定全部来自 domain/costBreakdown.ts, 不在这里手写阈值 ——
   // TodayScreen.tsx 的 buildOrderText 曾经用 |net-cif|>eps 单独判过一次,
@@ -83,6 +86,11 @@ export function CostCard({
               </li>
             ))}
           </ul>
+        </div>
+      )}
+      {benchmarksStale && (
+        <div className="cost-stale-note" role="status">
+          基准报价没取到, 这次按内置基准估价, 煤价可能不是最新的
         </div>
       )}
       <div className="cost-label">{detailed ? "最低实际成本" : "最低到厂价"}</div>
