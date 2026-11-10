@@ -518,7 +518,7 @@ describe("TodayScreen 捣固公式 CSR 估算", () => {
     render(<TodayScreen onNavigate={vi.fn()} />);
     await screen.findByText("今日配方");
 
-    expect(screen.getByText("捣固公式估算 68.6")).toBeTruthy();
+    expect(screen.getByText(/^捣固公式估算 68\.6 · 仅供参考, 不参与达标判定/)).toBeTruthy();
   });
 
   it("没有估算值时不显示这一行", async () => {

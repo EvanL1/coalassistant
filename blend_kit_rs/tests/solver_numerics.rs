@@ -58,28 +58,55 @@ fn test_tightening_skips_rows_binding_by_construction() {
     assert!((cost - 2244.72).abs() < 0.01, "成本 {cost}");
 }
 
-/// 收紧重解挤出来的解, 达标靠的是占比 ≤1e-5、不进配方也不进订单的零头煤:
-/// 按实际输出的配方 (去零头重新归一化) 回放验算, 灰分判不达标. 这种解不算解出 —
-/// 客户照着配方配不出达标的煤.
+/// 合同卡在判定边缘时, 解可能靠一种占比不到十万分之一的煤才达标. 输出的配方不能把它截掉:
+/// 截掉后照着配方验算, 灰分就判不达标了. 达标所需的零头煤要留在配方与订单里, 配方回放照样达标.
 #[test]
-fn test_recipe_beyond_output_grain_is_not_a_solution() {
+fn test_recipe_keeps_the_dust_it_needs() {
     let request = load(include_str!("fixtures/postcheck_truncate.json"));
     let result = solve(&request);
-    assert!(!result.ok, "靠零头达标的解不该报出: {:?}", result.recipe);
-    // 这份合同在 LP 里够得到 (靠零头), 诊断指不出真凶, 只能如实说没算出可靠结论.
+    assert!(result.ok, "{:?}", result.reason);
+    assert!(!result.undetermined);
     assert!(
-        result.infeasible_bounds.is_empty(),
-        "{:?}",
-        result.infeasible_bounds
+        result.recipe.values().any(|ratio| *ratio <= 1e-5),
+        "达标靠的那份零头应在配方里: {:?}",
+        result.recipe
     );
-    let reason = result.reason.as_deref().unwrap_or_default();
-    assert_ne!(reason, CONFLICT);
-    // 界面据此不引导用户去放宽合同.
-    assert!(result.undetermined);
-    assert!(serde_json::to_string(&result)
-        .unwrap()
-        .contains("\"undetermined\":true"));
-    assert!(reason.contains("无法判定"), "{reason}");
+    assert_eq!(result.recipe.len(), result.orders.len());
+    assert_recipe_passes_review(&request, &result);
+}
+
+/// 不需要的零头照旧不进配方: 门槛只在"截掉会让配方判不达标"时才往下放.
+#[test]
+fn test_recipe_drops_dust_it_does_not_need() {
+    let request = load(include_str!("fixtures/postcheck_raw_bounds.json"));
+    let result = solve(&request);
+    assert!(result.ok, "{:?}", result.reason);
+    assert!(
+        result.recipe.values().all(|ratio| *ratio > 1e-5),
+        "{:?}",
+        result.recipe
+    );
+}
+
+/// 按整铲配时, 达标所需的零头煤会被看见: 要么去掉, 要么给足一铲. 结果是真正的整铲配方,
+/// 而不是"显示一种煤 100%、实际靠看不见的零头达标".
+#[test]
+fn test_shovel_gives_needed_dust_a_whole_shovel() {
+    let request = load(include_str!("fixtures/dust_needs_one_shovel.json"));
+    let result = solve(&request);
+    assert!(result.ok, "{:?}", result.reason);
+    assert!(
+        result
+            .orders
+            .iter()
+            .all(|order| order.shovels.is_some_and(|count| count >= 1)),
+        "每种煤都该是整铲: {:?}",
+        result.orders
+    );
+    let shovels: u32 = result.orders.iter().filter_map(|order| order.shovels).sum();
+    assert_eq!(shovels, 100);
+    assert!(result.orders.len() >= 2, "{:?}", result.recipe);
+    assert_recipe_passes_review(&request, &result);
 }
 
 /// 收紧重解只在复核失败时才走: 正常路径一次求解就该过, 结果与收紧无关.

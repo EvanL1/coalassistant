@@ -889,6 +889,9 @@ pub struct BlendResult {
     /// 启用煤阶交互时: CSR 因此扣掉的点数 k·D (体检里的 CSR 已扣过). 未启用为 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub csr_interaction_penalty: Option<f64>,
+    /// 按整铲配时, 为凑成整铲留余量重配而比不凑整的配方多花的成本 (元/吨). 没走这一步为 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shovel_extra_cost: Option<f64>,
     /// 价格因子评估 (按请求煤池顺序). 未配置价格因子或配置无效时为空.
     /// `#[serde(default)]`: 兼容价格因子上线前的存量记录.
     #[serde(default)]
@@ -925,6 +928,7 @@ impl BlendResult {
             csr_stamp_estimate: None,
             rank_variance: None,
             csr_interaction_penalty: None,
+            shovel_extra_cost: None,
             coal_values: Vec::new(),
             market_price: None,
             market_price_from_group: false,

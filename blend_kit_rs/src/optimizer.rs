@@ -397,7 +397,7 @@ fn solve_core(
         let participating: Vec<(&Coal, f64)> = kept
             .iter()
             .zip(&ratios)
-            .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+            .filter(|(coal, _)| result.recipe.contains_key(&coal.name))
             .map(|(coal, ratio)| (*coal, *ratio))
             .collect();
         let Some((sigma, petro_outcome)) = review_petrography(
@@ -1093,21 +1093,15 @@ fn solve_once(
     .ok_or(LpFailure::Infeasible)?;
     let (solution, objective, tightened) = problem.solve()?;
     let ratios = solution[..count].to_vec();
-    // 收紧重解挤出来的解要再过一道: 按实际输出的配方 (占比 ≤ OUTPUT_RATIO_TOLERANCE 的
-    // 零头不进配方也不进订单, 去掉后重新归一化) 用原始界复核每条 Hard 约束. 靠零头才达标
-    // 的解报出去, 客户照着配方配出来的是不达标的煤. 首次求解就过复核的正常路径不加这一步.
-    if tightened
-        && !recipe_meets_hard_bounds(
-            specs,
-            request,
-            formulas,
-            petro_proxy_lower,
-            petro_proxy_upper,
-            &ratios,
-        )
-    {
-        return Err(LpFailure::Numerical("解按输出配方复核不达标".into()));
-    }
+    // 输出配方的占比门槛: 截掉零头会让配方判不达标时, 把达标所需的零头煤留在配方里.
+    // 收紧重解挤出来的解连完整的都判不达标, 就不算解出; 首次求解的照旧走下面的 Hard 复核.
+    let grain = match output_grain(specs, request, formulas, &ratios) {
+        Some(grain) => grain,
+        None if tightened => {
+            return Err(LpFailure::Numerical("解按输出配方复核不达标".into()));
+        }
+        None => OUTPUT_RATIO_TOLERANCE,
+    };
     let penalty_by_indicator = read_back_penalties(&blocks, &solution);
     let mut result = assemble_result(
         coals,
@@ -1116,6 +1110,7 @@ fn solve_once(
         formulas,
         models,
         &ratios,
+        grain,
         &penalty_by_indicator,
         warnings,
     );
@@ -1152,55 +1147,84 @@ fn solve_once(
     Ok((result, ratios))
 }
 
-/// 按实际输出的配方复核 Hard 界: 占比 ≤ OUTPUT_RATIO_TOLERANCE 的零头不进配方也不进
-/// 订单, 去掉后重新归一化, 再逐条对照 LP 实际执行的界 (含判定规则与 margin 的折算).
-/// 容限与解后复核同量级 —— 判的还是"解有没有越界", 不是复刻合同判定.
-fn recipe_meets_hard_bounds(
+/// 输出配方里留哪些煤的占比门槛 (占比 > 门槛的才进 `recipe` 与订单).
+///
+/// 默认 `OUTPUT_RATIO_TOLERANCE`: 再小的份额是求解残差. 但合同卡在判定边缘时, 解可能靠一种
+/// 占比不到十万分之一的煤才达标; 把它截掉, 输出的配方照着验算就不达标了. 这时从大到小把零头
+/// 煤一种种放回, 取刚好让输出配方达标的门槛 —— 输出的配方必须自己经得起验算. 留下来的零头煤
+/// 在按整铲配时会被分支定界看见: 要么去掉, 要么给足一铲.
+///
+/// 连完整的解都判不达标时返回 None.
+fn output_grain(
     specs: &[&Spec],
     request: &BlendRequest,
     formulas: &HashMap<String, MetricFormula>,
-    petro_proxy_lower: Option<f64>,
-    petro_proxy_upper: Option<f64>,
     ratios: &[f64],
+) -> Option<f64> {
+    let fails = |grain: f64| output_recipe_fails(specs, request, formulas, ratios, grain);
+    if !fails(OUTPUT_RATIO_TOLERANCE) {
+        return Some(OUTPUT_RATIO_TOLERANCE);
+    }
+    let mut dust: Vec<f64> = ratios
+        .iter()
+        .copied()
+        .filter(|ratio| *ratio > 0.0 && *ratio <= OUTPUT_RATIO_TOLERANCE)
+        .collect();
+    dust.sort_by(|left, right| right.total_cmp(left));
+    // 门槛取"刚好小于这份零头", 它和比它大的都留下.
+    dust.into_iter()
+        .map(f64::next_down)
+        .find(|grain| !fails(*grain))
+}
+
+/// 按门槛取出输出配方 (去掉零头后重新归一化), 看 Hard 约束与计价拒收线有没有判不达标的.
+/// 用的是合同判定 (与验算路径同一个 `check_value`), 不是 LP 的执行界: 回答的是"照着输出的
+/// 配方配, 验算过不过".
+fn output_recipe_fails(
+    specs: &[&Spec],
+    request: &BlendRequest,
+    formulas: &HashMap<String, MetricFormula>,
+    ratios: &[f64],
+    grain: f64,
 ) -> bool {
     let mut recipe: Vec<f64> = ratios
         .iter()
-        .map(|ratio| {
-            if *ratio > OUTPUT_RATIO_TOLERANCE {
-                *ratio
-            } else {
-                0.0
-            }
-        })
+        .map(|ratio| if *ratio > grain { *ratio } else { 0.0 })
         .collect();
     let total: f64 = recipe.iter().sum();
     if !total.is_finite() || total <= 0.0 {
-        return false;
+        return true;
     }
     for ratio in &mut recipe {
         *ratio /= total;
     }
     specs
         .iter()
-        // 计价项的拒收线在 LP 里同样是一条硬线, 一并复核.
         .filter(|spec| matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced))
-        .all(|spec| {
-            let Some(formula) = formulas.get(&spec.indicator) else {
-                return true;
+        .any(|spec| {
+            let Some(value) = formulas
+                .get(&spec.indicator)
+                .and_then(|formula| formula.evaluate(&recipe))
+            else {
+                return false;
             };
-            let Some(value) = formula.evaluate(&recipe) else {
-                return true;
-            };
-            enforced_bounds(spec, request, petro_proxy_lower, petro_proxy_upper)
-                .iter()
-                .all(|(direction, _, enforced)| {
-                    let slack = FEASIBILITY_TOLERANCE * (1.0 + enforced.abs());
-                    match direction {
-                        Direction::Upper => value <= enforced + slack,
-                        Direction::Lower => value + slack >= *enforced,
-                        Direction::Range => true,
+            let outcome = check_value(value, Some(spec), request.truncate_decimal, true);
+            if outcome.status != EvaluationStatus::Fail {
+                return false;
+            }
+            // 计价项超合同界是预期行为 (已折算成扣款), 越过拒收线才算不达标; 与体检同一个口径.
+            if spec.enforcement == Enforcement::Priced {
+                let within_reject = spec.penalty.as_ref().is_some_and(|penalty| {
+                    let slack = FEASIBILITY_TOLERANCE * (1.0 + penalty.reject.abs());
+                    match spec.direction {
+                        Direction::Upper => value <= penalty.reject + slack,
+                        Direction::Lower => value + slack >= penalty.reject,
+                        Direction::Range => false,
                     }
-                })
+                });
+                return !within_reject;
+            }
+            true
         })
 }
 
@@ -1291,6 +1315,8 @@ fn assemble_result(
     formulas: &HashMap<String, MetricFormula>,
     models: &EvaluatorSet,
     ratios: &[f64],
+    // 占比大于它的煤才进配方与订单; 见 output_grain.
+    grain: f64,
     penalty_by_indicator: &HashMap<String, f64>,
     mut warnings: Vec<String>,
 ) -> BlendResult {
@@ -1299,7 +1325,7 @@ fn assemble_result(
     let recipe = coals
         .iter()
         .zip(ratios)
-        .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+        .filter(|(_, ratio)| **ratio > grain)
         .map(|(coal, ratio)| (coal.name.clone(), *ratio))
         .collect();
     let fob_per_ton: f64 = coals
@@ -1350,7 +1376,7 @@ fn assemble_result(
     let mut orders: Vec<OrderItem> = coals
         .iter()
         .zip(ratios)
-        .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+        .filter(|(_, ratio)| **ratio > grain)
         .map(|(coal, ratio)| {
             let tons = request.total_quantity.map(|quantity| quantity * ratio);
             let effective = cif_eff_or_quoted(coal);
@@ -1375,7 +1401,7 @@ fn assemble_result(
     let used: Vec<(&Coal, f64)> = coals
         .iter()
         .zip(ratios)
-        .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+        .filter(|(_, ratio)| **ratio > grain)
         .map(|(coal, ratio)| (*coal, *ratio))
         .collect();
     let used_coals: Vec<&Coal> = used.iter().map(|(coal, _)| *coal).collect();
@@ -1523,6 +1549,7 @@ fn assemble_result(
         csr_stamp_estimate: None,
         rank_variance: None,
         csr_interaction_penalty: None,
+        shovel_extra_cost: None,
         coal_values: Vec::new(),
         market_price: None,
         market_price_from_group: false,
@@ -1655,6 +1682,7 @@ fn evaluate_fixed(
         formulas,
         evaluators,
         &ratios,
+        OUTPUT_RATIO_TOLERANCE,
         &penalty_by_indicator,
         warnings,
     )
