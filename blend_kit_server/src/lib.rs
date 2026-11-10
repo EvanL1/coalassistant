@@ -1,10 +1,11 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
-    extract::{Json, Path, State},
+    extract::{ConnectInfo, Extension, Json, Path, State},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
@@ -17,7 +18,7 @@ use subtle::ConstantTimeEq;
 use tower_http::{
     compression::CompressionLayer,
     services::{fs::ServeFileSystemResponseBody, ServeDir, ServeFile},
-    set_header::SetResponseHeader,
+    set_header::{SetResponseHeader, SetResponseHeaderLayer},
     trace::TraceLayer,
 };
 
@@ -27,6 +28,7 @@ mod benchmarks;
 mod coal_index;
 mod coal_prices;
 mod database;
+mod limits;
 mod master_data;
 mod mcci;
 mod mcp;
@@ -44,8 +46,12 @@ const DATA_API_KEY_HEADER: &str = "x-api-key";
 const MAX_DATA_API_BODY: usize = 256 * 1024;
 /// 管理员会话令牌最短字节数. 令牌即 Cookie 值, 太短可被穷举.
 const MIN_ADMIN_TOKEN_BYTES: usize = 32;
-/// 登录失败后的固定等待, 拖慢在线暴力猜测 (不做按 IP 计数).
+/// 普通会话令牌的建议最短字节数. 只告警不拒绝: 线上令牌长度未知, 拒绝可能让部署起不来.
+const MIN_SESSION_TOKEN_BYTES: usize = 32;
+/// 登录失败后的固定等待, 拖慢在线暴力猜测 (按来源限速见 `limits::LoginGuard`).
 const LOGIN_FAILURE_DELAY: Duration = Duration::from_secs(1);
+/// MCP 一个请求里最多的 JSON-RPC 消息条数; 每条 tools/call 都要求解一次.
+const MAX_MCP_MESSAGES: usize = 16;
 
 pub async fn app(public_dir: PathBuf) -> Router {
     let database = database::connect_from_env().await;
@@ -81,6 +87,8 @@ pub struct AuthConfig {
     secure_cookie: bool,
     /// 管理员账号. None = 管理端停用 (ADMIN_* 未配齐).
     admin: Option<AdminAccount>,
+    /// 登录限速状态, 随这份配置共享.
+    login_guard: Arc<limits::LoginGuard>,
 }
 
 /// 管理员账号: 普通账号的超集, 另可调参、维护煤库、管理密钥.
@@ -111,7 +119,18 @@ impl AuthConfig {
             session_token: session_token.into(),
             secure_cookie,
             admin: None,
+            login_guard: Arc::default(),
         }
+    }
+
+    fn short_session_token(&self) -> bool {
+        self.session_token.len() < MIN_SESSION_TOKEN_BYTES
+    }
+
+    /// 打开或关闭按来源 IP 的登录锁定 (默认关). 全站并发名额与失败等待不受影响.
+    fn with_login_ip_lockout(mut self, enabled: bool) -> Self {
+        self.login_guard = Arc::new(limits::LoginGuard::with_ip_lockout(enabled));
+        self
     }
 
     /// 启用管理员账号. 以下情况拒绝启用 (记错误日志, 管理端停用):
@@ -159,12 +178,27 @@ impl AuthConfig {
             })
         };
 
+        let ip_lockout =
+            limits::ip_lockout_enabled(std::env::var(limits::IP_LOCKOUT_ENV).ok().as_deref());
+        tracing::info!(
+            ip_lockout,
+            "登录按来源 IP 锁定: {} ({} 设为 on 打开)",
+            if ip_lockout { "开" } else { "关" },
+            limits::IP_LOCKOUT_ENV
+        );
         let config = Self::new(
             read("AUTH_USERNAME", "doudou"),
             read("AUTH_PASSWORD", "123456"),
             read("AUTH_SESSION_TOKEN", "local-development-session"),
             on_railway,
-        );
+        )
+        .with_login_ip_lockout(ip_lockout);
+        // 本机默认令牌不提醒; 显式配置的短令牌只告警, 不拒绝启动.
+        if std::env::var_os("AUTH_SESSION_TOKEN").is_some() && config.short_session_token() {
+            tracing::warn!(
+                "AUTH_SESSION_TOKEN 短于 {MIN_SESSION_TOKEN_BYTES} 字节, 可被穷举, 请换成更长的随机值"
+            );
+        }
         // 管理员三项全部可选: 缺任一项即停用管理端, Railway 上也不 panic.
         let optional = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
         match (
@@ -219,6 +253,7 @@ pub fn app_with_auth(public_dir: PathBuf, auth: AuthConfig) -> Router {
 }
 
 fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
+    let https_only = state.auth.secure_cookie;
     // 不发 Cache-Control 时浏览器按 Last-Modified 自行估算缓存时长, 部署后几小时还在跑旧前端.
     // 打包产物文件名带内容哈希, 成功的可以永久缓存; 页面每次向服务器确认 (没变就回 304).
     let assets = SetResponseHeader::overriding(
@@ -238,7 +273,7 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         HeaderValue::from_static("no-cache"),
     );
 
-    Router::new()
+    let router = Router::new()
         .route("/api/health", get(health))
         .route("/api/coal-index", get(coal_index_handler))
         .route("/api/auth/session", get(auth_session))
@@ -288,8 +323,28 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         .nest_service("/assets", assets)
         .fallback_service(static_files)
         .with_state(state)
-        .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new());
+    with_security_headers(router, https_only).layer(TraceLayer::new_for_http())
+}
+
+/// 安全响应头. 不加限制脚本/样式来源的 CSP, 只用 frame-ancestors 禁止被别的站点嵌入.
+/// HSTS 只在 Railway (secure_cookie 为真, 一定走 HTTPS) 上发, 本机 http 调试不受影响.
+fn with_security_headers(router: Router, https_only: bool) -> Router {
+    let set =
+        |name, value| SetResponseHeaderLayer::if_not_present(name, HeaderValue::from_static(value));
+    let router = router
+        .layer(set(header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
+        .layer(set(header::X_FRAME_OPTIONS, "SAMEORIGIN"))
+        .layer(set(
+            header::CONTENT_SECURITY_POLICY,
+            "frame-ancestors 'self'",
+        ))
+        .layer(set(header::REFERRER_POLICY, "same-origin"));
+    if https_only {
+        router.layer(set(header::STRICT_TRANSPORT_SECURITY, "max-age=31536000"))
+    } else {
+        router
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Response {
@@ -345,8 +400,32 @@ async fn auth_session(State(state): State<AppState>, headers: HeaderMap) -> Json
     })
 }
 
-async fn login(State(state): State<AppState>, Json(input): Json<LoginRequest>) -> Response {
+async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Json(input): Json<LoginRequest>,
+) -> Response {
     let auth = &state.auth;
+    let guard = &auth.login_guard;
+    let peer = peer.map(|Extension(ConnectInfo(addr))| addr);
+    let source = limits::client_ip(&headers, peer);
+    let locked = || {
+        guard.retry_after(&source, Instant::now()).map(|wait| {
+            let reason = format!("登录失败次数过多, 请 {} 秒后再试", wait.as_secs().max(1));
+            limits::too_many_logins(wait, &reason)
+        })
+    };
+    if let Some(response) = locked() {
+        return response;
+    }
+    // 名额一直占到失败等待结束, 并发猜密码的总速率因此有上限.
+    let Some(_slot) = guard.slot().await else {
+        return limits::too_many_logins(Duration::from_secs(5), "登录请求过多, 请稍后再试");
+    };
+    if let Some(response) = locked() {
+        return response;
+    }
     // 账号也按常数时间比较, 且两组凭据都完整比完再判 (`&` 不短路),
     // 免得响应时间泄露哪个账号存在.
     let matches = |username: &str, password: &str| {
@@ -367,6 +446,15 @@ async fn login(State(state): State<AppState>, Json(input): Json<LoginRequest>) -
             r#"{"authenticated":true,"admin":false}"#,
         ),
         _ => {
+            // 记原始代理头与对端地址 (不记账号密码), 上线后据此判断代理是覆盖还是追加.
+            tracing::warn!(
+                x_forwarded_for = %limits::header_for_log(&headers, "x-forwarded-for"),
+                x_real_ip = %limits::header_for_log(&headers, "x-real-ip"),
+                peer = %peer.map_or_else(|| "-".to_string(), |addr| addr.to_string()),
+                %source,
+                "登录失败"
+            );
+            guard.record_failure(&source, Instant::now());
             tokio::time::sleep(LOGIN_FAILURE_DELAY).await;
             return (
                 StatusCode::UNAUTHORIZED,
@@ -376,6 +464,7 @@ async fn login(State(state): State<AppState>, Json(input): Json<LoginRequest>) -
                 .into_response();
         }
     };
+    guard.record_success(&source);
 
     let secure = if auth.secure_cookie { "; Secure" } else { "" };
     let cookie = format!(
@@ -444,10 +533,10 @@ async fn solve(
     // k 取内存缓存, 不碰库.
     let input = admin::inject_rank_interaction(input, state.rank_k()).into_owned();
     // 求解是纯 CPU 计算 (带价格稳健性分析时要改价重解上百次), 挪出异步线程, 免得卡住
-    // 同一 worker 上的其他请求.
-    let output = tokio::task::spawn_blocking(move || blend_kit::solve_json(&input))
+    // 同一 worker 上的其他请求; 并发与时长受 limits 约束.
+    let output = limits::run_solver(move || blend_kit::solve_json(&input))
         .await
-        .unwrap_or_else(|_| r#"{"ok":false,"reason":"求解线程异常退出"}"#.to_string());
+        .unwrap_or_else(|error| json!({ "ok": false, "reason": error.reason("求解") }).to_string());
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
@@ -1143,9 +1232,9 @@ async fn mcp_serve(state: &AppState, presented: &str, body: &[u8]) -> Response {
         }))
         .into_response();
     };
-    let (messages, batch) = match parsed {
-        serde_json::Value::Array(list) => (list, true),
-        single => (vec![single], false),
+    let (messages, batch) = match mcp_messages(parsed) {
+        Ok(split) => split,
+        Err(error) => return Json(error).into_response(),
     };
     let context = if messages.iter().any(mcp::needs_context) {
         match load_mcp_context(state, pool).await {
@@ -1155,21 +1244,101 @@ async fn mcp_serve(state: &AppState, presented: &str, body: &[u8]) -> Response {
     } else {
         None
     };
-    // tools/call 会求解 (CPU 密集), 同 /api/solve 一样挪出异步线程.
-    let mut replies: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
-        messages
-            .iter()
-            .filter_map(|message| mcp::handle(message, context.as_ref()))
-            .collect()
-    })
-    .await
-    .unwrap_or_default();
+    let mut replies = mcp_replies(messages, context, limits::run_solver).await;
     match (replies.is_empty(), batch) {
         // 全是通知: 规范要求 202, 不带内容
         (true, _) => StatusCode::ACCEPTED.into_response(),
         (false, true) => Json(serde_json::Value::Array(replies)).into_response(),
         (false, false) => Json(replies.remove(0)).into_response(),
     }
+}
+
+/// 拆出 JSON-RPC 消息与是否批量; 批量超过 `MAX_MCP_MESSAGES` 条回 JSON-RPC 错误.
+fn mcp_messages(
+    parsed: serde_json::Value,
+) -> Result<(Vec<serde_json::Value>, bool), serde_json::Value> {
+    match parsed {
+        serde_json::Value::Array(list) if list.len() > MAX_MCP_MESSAGES => Err(json!({
+            "jsonrpc": "2.0", "id": null,
+            "error": {
+                "code": -32600,
+                "message": format!("一个请求最多 {MAX_MCP_MESSAGES} 条消息, 收到 {} 条", list.len())
+            }
+        })),
+        serde_json::Value::Array(list) => Ok((list, true)),
+        single => Ok((vec![single], false)),
+    }
+}
+
+/// 一批 MCP 消息里要在求解闸门里算的那部分 (带原位置), 交给 `run` 执行.
+type McpTask = Box<dyn FnOnce() -> Vec<(usize, serde_json::Value)> + Send>;
+
+/// 要求解或估价的消息: 除查合同 (只拼文字) 外的 tools/call.
+fn mcp_computes(message: &serde_json::Value) -> bool {
+    mcp::needs_context(message) && message["params"]["name"].as_str() != Some("get_contract")
+}
+
+/// 逐条回 MCP 消息, 按原顺序. 只有求解/估价的消息交给 `run` (线上为求解闸门: CPU 密集,
+/// 挪出异步线程, 受同一并发上限与超时约束); 握手、列工具之类当场回, 忙时也不排队.
+async fn mcp_replies<Run, Fut>(
+    messages: Vec<serde_json::Value>,
+    context: Option<mcp::Context>,
+    run: Run,
+) -> Vec<serde_json::Value>
+where
+    Run: FnOnce(McpTask) -> Fut,
+    Fut:
+        std::future::Future<Output = Result<Vec<(usize, serde_json::Value)>, limits::ComputeError>>,
+{
+    let (computing, quick): (Vec<_>, Vec<_>) = messages
+        .into_iter()
+        .enumerate()
+        .partition(|(_, message)| mcp_computes(message));
+    let mut replies: Vec<(usize, serde_json::Value)> = quick
+        .iter()
+        .filter_map(|(at, message)| {
+            mcp::handle(message, context.as_ref()).map(|reply| (*at, reply))
+        })
+        .collect();
+    if !computing.is_empty() {
+        let (positions, ids): (Vec<usize>, Vec<serde_json::Value>) = computing
+            .iter()
+            .filter_map(|(at, message)| {
+                let id = message.get("id").filter(|id| !id.is_null())?;
+                Some((*at, id.clone()))
+            })
+            .unzip();
+        let task: McpTask = Box::new(move || {
+            computing
+                .iter()
+                .filter_map(|(at, message)| {
+                    mcp::handle(message, context.as_ref()).map(|reply| (*at, reply))
+                })
+                .collect()
+        });
+        match run(task).await {
+            Ok(done) => replies.extend(done),
+            Err(error) => replies.extend(
+                positions
+                    .into_iter()
+                    .zip(mcp_internal_errors(ids, &error.reason("求解"))),
+            ),
+        }
+    }
+    replies.sort_by_key(|(at, _)| *at);
+    replies.into_iter().map(|(_, reply)| reply).collect()
+}
+
+/// 求解线程出错时, 每条带 id 的消息各回一条 -32603 (通知不回).
+fn mcp_internal_errors(ids: Vec<serde_json::Value>, message: &str) -> Vec<serde_json::Value> {
+    ids.into_iter()
+        .map(|id| {
+            json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32603, "message": message }
+            })
+        })
+        .collect()
 }
 
 /// 求解要用的线上数据: 合并后的煤库、网页账号保存的合同与煤池、现货指数最新值、煤阶交互 k.
@@ -1194,6 +1363,10 @@ async fn load_mcp_context(state: &AppState, pool: &PgPool) -> Result<mcp::Contex
         rank_k: state.rank_k(),
     })
 }
+
+#[cfg(test)]
+#[path = "reliability_tests.rs"]
+mod reliability_tests;
 
 #[cfg(test)]
 mod tests {

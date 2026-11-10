@@ -1,6 +1,7 @@
 //! 询价按批存档与估价对比; 不进煤池、不跨次沿用, 估价只由服务端重算.
 
 use super::benchmarks;
+use super::master_data::INDICATOR_RANGE;
 use super::{
     authenticated_username, bad_request, database_error, mcci, merged_master_json, require_admin,
     require_database, require_json_content_type, AppState,
@@ -85,8 +86,33 @@ fn validate(batch: &QuoteBatch) -> Result<(), String> {
         {
             return Err(format!("{name} 的改动指标 {bad} 不认识"));
         }
+        for (key, value) in &item.props {
+            validate_prop(name, key, value)?;
+        }
     }
     Ok(())
+}
+
+/// 询价表是以后校准估价系数的样本: 指标须是已知指标, 值为空或物理量程内的有限数
+/// (量程同煤库覆盖值, 见 [`INDICATOR_RANGE`]).
+fn validate_prop(name: &str, key: &str, value: &Value) -> Result<(), String> {
+    let Some((_, lo, hi)) = INDICATOR_RANGE.iter().find(|(known, _, _)| *known == key) else {
+        let known: Vec<&str> = INDICATOR_RANGE.iter().map(|(known, _, _)| *known).collect();
+        return Err(format!(
+            "{name} 的指标 {key:?} 不认识, 只接受 {}",
+            known.join("/")
+        ));
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    match value.as_f64().filter(|number| number.is_finite()) {
+        Some(number) if (*lo..=*hi).contains(&number) => Ok(()),
+        Some(number) => Err(format!(
+            "{name} 的指标 {key} = {number} 超出物理量程 [{lo}, {hi}]"
+        )),
+        None => Err(format!("{name} 的指标 {key} 须为数字或留空")),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -134,6 +160,25 @@ fn estimate_items(
             }
         })
         .collect())
+}
+
+/// 估价失败不挡存档. 整批估不出来时逐条重估, 估不出来的那条记空, 不连累同批其他煤.
+fn estimates_or_blank(items: &[QuoteItem], master: &Value, benchmarks: &[Value]) -> Vec<Estimate> {
+    if let Ok(estimates) = estimate_items(items, master, benchmarks) {
+        return estimates;
+    }
+    items
+        .iter()
+        .map(
+            |item| match estimate_items(std::slice::from_ref(item), master, benchmarks) {
+                Ok(mut estimates) => estimates.pop().unwrap_or_default(),
+                Err(reason) => {
+                    tracing::warn!(name = %item.name, %reason, "询价估价失败, 这条估价记空");
+                    Estimate::default()
+                }
+            },
+        )
+        .collect()
 }
 
 /// 估价用的煤: 出厂口径 (运费不进), 空值指标去掉 (同每日快照).
@@ -254,10 +299,7 @@ pub(crate) async fn archive(
     }
     let master: Value = serde_json::from_str(&merged_master_json(&state).await).unwrap_or_default();
     let benchmarks = benchmarks::current(&state, &master).await;
-    let estimates = match estimate_items(&batch.items, &master, &benchmarks) {
-        Ok(estimates) => estimates,
-        Err(reason) => return bad_request(&reason),
-    };
+    let estimates = estimates_or_blank(&batch.items, &master, &benchmarks);
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -556,6 +598,41 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_bad_props() {
+        for (props, expect) in [
+            (json!({ "A": -5 }), "A"),
+            (json!({ "A": "abc" }), "A"),
+            (json!({ "A": { "value": 9.8 } }), "A"),
+            (json!({ "A": [9.8] }), "A"),
+            (json!({ "A": true }), "A"),
+            (json!({ "A": 50.01 }), "A"),
+            (json!({ "S": 10.5 }), "S"),
+            (json!({ "petro": 1.2 }), "petro"),
+            (json!({ "M": 31 }), "M"),
+            (json!({ "Ro": 1.1 }), "Ro"),
+            (json!({ "": 1 }), "\"\""),
+        ] {
+            let mut bad = item("临北", 2150.0);
+            bad.props = serde_json::from_value(props.clone()).unwrap();
+            let error = validate(&batch(vec![item("沙曲", 1980.0), bad])).unwrap_err();
+            assert!(
+                error.contains("临北") && error.contains(expect),
+                "{props}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_nulls_and_range_edges() {
+        let mut edge = item("临北", 2150.0);
+        edge.props = serde_json::from_value(json!({
+            "S": 0, "A": 50, "V": 50.0, "G": null, "Y": 0, "petro": 1, "CSR": 100, "M": 30
+        }))
+        .unwrap();
+        assert_eq!(validate(&batch(vec![edge])), Ok(()));
+    }
+
+    #[test]
     fn test_batch_ignores_client_estimate_fields() {
         let parsed: QuoteBatch = serde_json::from_value(json!({
             "batch_id": "abc-1",
@@ -616,6 +693,28 @@ mod tests {
         let mut bad = item("临北", 2150.0);
         bad.props.insert("A".into(), json!(-5)); // 负灰分触发核心指标校验.
         assert!(estimate_items(&[bad], &fixture_master(), &[]).is_err());
+    }
+
+    #[test]
+    fn test_one_failed_estimate_does_not_blank_the_rest() {
+        // 绕过 validate 直接让核心拒绝这一条, 模拟"输入合法但估价仍失败".
+        let mut bad = item("乙", 2150.0);
+        bad.props.insert("A".into(), json!(-5));
+        let items = [item("甲", 2000.0), bad, item("丙", 1900.0)];
+        let estimates = estimates_or_blank(&items, &fixture_master(), &[]);
+        assert_eq!(estimates.len(), 3);
+        assert_eq!(estimates[1], Estimate::default());
+        let alone = estimate_items(
+            &[item("甲", 2000.0), item("丙", 1900.0)],
+            &fixture_master(),
+            &[],
+        )
+        .unwrap();
+        assert!(alone.iter().all(|estimate| estimate.fair.is_some()));
+        assert_eq!((&estimates[0], &estimates[2]), (&alone[0], &alone[1]));
+        let rows = archived(&items, &estimates);
+        assert!(rows[1].estimate.is_none() && rows[1].gap.is_none());
+        assert!(rows[0].gap.is_some() && rows[2].gap.is_some());
     }
 
     #[test]
