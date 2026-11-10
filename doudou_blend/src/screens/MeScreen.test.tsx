@@ -9,7 +9,8 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MeScreen } from "./MeScreen";
+import { logout } from "../auth";
+import { logoutConfirmText, MeScreen } from "./MeScreen";
 
 const mocks = vi.hoisted(() => ({
   getBackend: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("../auth", () => ({
 }));
 
 vi.mock("../storage", () => ({
+  KEY_HISTORY: "doudou_blend.history.v1",
   clearAllCoalPrefs: vi.fn(),
   clearUserContract: vi.fn(),
   getCoalPrefs: mocks.getCoalPrefs,
@@ -148,6 +150,35 @@ describe("MeScreen 历史数据", () => {
   });
 });
 
+describe("MeScreen 账户", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    mocks.getBackend.mockResolvedValue({ countHistory: vi.fn().mockResolvedValue(0) });
+  });
+
+  it("显示登录时输入的账号, 不写死 doudou", () => {
+    localStorage.setItem("doudou_blend.owner.v1", "张三");
+    render(<MeScreen />);
+    expect(screen.getByText("张三")).toBeTruthy();
+    expect(screen.queryByText("doudou")).toBeNull();
+  });
+
+  it("退出确认说清本机数据会被清除; 有未同步改动时警告会丢", () => {
+    localStorage.setItem("doudou_blend.sync_pending.v1", "1");
+    render(<MeScreen />);
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    expect(mocks.confirm).toHaveBeenCalledWith(logoutConfirmText(true));
+    expect(logoutConfirmText(true)).toMatch(/会被清除[\s\S]*没同步到云端/);
+    expect(logoutConfirmText(false)).not.toMatch(/没同步/);
+    expect(logout).toHaveBeenCalled();
+  });
+
+  it("清空煤偏好的说明不再提价格", () => {
+    render(<MeScreen />);
+    expect(screen.queryByText(/价格/)).toBeNull();
+  });
+});
+
 describe("MeScreen 一铲吨数", () => {
   beforeEach(() => {
     mocks.getBackend.mockResolvedValue({ countHistory: vi.fn().mockResolvedValue(0) });
@@ -173,5 +204,15 @@ describe("MeScreen 一铲吨数", () => {
     fireEvent.blur(input);
     expect(mocks.setShovelTons).not.toHaveBeenCalled();
     expect(input.value).toBe("3");
+  });
+
+  it("全角数字照常认, 输入框是文本框 + 数字键盘", () => {
+    render(<MeScreen />);
+    const input = screen.getByLabelText("一铲吨数") as HTMLInputElement;
+    expect(input.type).toBe("text");
+    expect(input.inputMode).toBe("decimal");
+    fireEvent.change(input, { target: { value: "２.５" } });
+    fireEvent.blur(input);
+    expect(mocks.setShovelTons).toHaveBeenCalledWith(2.5);
   });
 });

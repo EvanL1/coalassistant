@@ -5,30 +5,25 @@
  * 读: 登录即可 (今日屏求解要用). 写: 管理员补录 / 删补录的 (master 的默认值删不了).
  */
 import type { Benchmark, BenchmarkEntry, MasterPriceFactor, PriceFactor } from "./types";
+import { apiFetch, readOk } from "./http";
 
 async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(path, { credentials: "same-origin", ...init });
-  const text = await response.text();
-  if (!response.ok) {
-    let reason = text;
-    try {
-      reason = (JSON.parse(text) as { reason?: string }).reason ?? text;
-    } catch {
-      // 非 JSON 错误体, 原样回显
-    }
-    throw new Error(reason || `HTTP ${response.status}`);
-  }
+  const text = await readOk(await apiFetch(path, { credentials: "same-origin", ...init }));
   return text ? JSON.parse(text) : null;
 }
 
-/** 当前生效的基准报价. 取不到 (离线、服务异常) 返回空表, 由调用方退回旧口径. */
-export async function fetchBenchmarks(): Promise<BenchmarkEntry[]> {
+/**
+ * 当前生效的基准报价. 取不到 (离线、服务异常) 默认返回空表, 由调用方退回旧口径;
+ * strict 时把异常抛给调用方, 好让界面说明这次用的是内置旧基准.
+ */
+export async function fetchBenchmarks(options?: { strict?: boolean }): Promise<BenchmarkEntry[]> {
   try {
     const result = (await request("/api/benchmarks", { cache: "no-store" })) as {
       benchmarks?: BenchmarkEntry[];
     };
     return result?.benchmarks ?? [];
-  } catch {
+  } catch (error) {
+    if (options?.strict) throw error;
     return [];
   }
 }

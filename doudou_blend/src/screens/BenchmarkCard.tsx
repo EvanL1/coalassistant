@@ -13,6 +13,7 @@ import {
   fetchBenchmarks,
 } from "../benchmarks";
 import { coalTag } from "../domain/coalTypes";
+import { parseNumberInput } from "../domain/numberInput";
 import type { Benchmark, BenchmarkEntry } from "../types";
 
 const SPEC_KEYS = ["S", "A", "V", "G", "Y"] as const;
@@ -66,15 +67,16 @@ function emptyDraft(): Draft {
 export function draftToBenchmark(draft: Draft): Benchmark | string {
   const name = draft.name.trim();
   if (!name) return "请填品名";
-  const price = Number(draft.price);
-  if (!Number.isFinite(price) || price <= 0) return "报价须为正数";
+  const parsedPrice = parseNumberInput(draft.price, "price");
+  if (!parsedPrice.ok) return `报价: ${parsedPrice.error}`;
+  const price = parsedPrice.value;
+  if (price == null || price <= 0) return "报价须为正数";
   const props: Benchmark["props"] = {};
   for (const key of SPEC_KEYS) {
-    const raw = draft.props[key].trim();
-    if (!raw) continue;
-    const value = Number(raw);
-    if (!Number.isFinite(value)) return `${key} 不是数字`;
-    props[key] = value;
+    const parsed = parseNumberInput(draft.props[key], "indicator");
+    if (!parsed.ok) return `${key}: ${parsed.error}`;
+    if (parsed.value == null) continue;
+    props[key] = parsed.value;
   }
   if (props.S == null) return "至少要填硫分 S";
   return {

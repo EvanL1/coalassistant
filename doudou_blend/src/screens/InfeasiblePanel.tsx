@@ -1,5 +1,6 @@
 import { INDICATOR_LABEL } from "../types";
 import type { BlendResult, InfeasibleBound } from "../types";
+import { friendlySolverText } from "../domain/resultNotes";
 
 /**
  * 不可行诊断面板.
@@ -46,19 +47,33 @@ const cellStyle = {
   textAlign: "right",
 } as const;
 
-export function InfeasiblePanel({ result }: { result: BlendResult }) {
+export function InfeasiblePanel({
+  result,
+  contractIncomplete: contractIncompleteInput = false,
+}: {
+  result: BlendResult;
+  /**
+   * 合同本身没填完整 (由调用方按合同页那套校验算, 见 domain/contract.ts):
+   * 放宽约束、启用更多煤都没用, 面板只指向合同页, 不匹配核心报错文案.
+   */
+  contractIncomplete?: boolean;
+}) {
   const bounds = result.infeasible_bounds ?? [];
   // ok 却没有成本结构 = 结果不完整 (畸形或存量记录), 不是合同不可行 —— 标题和
   // 说明都得跟着变, 否则界面会对着一个成功的求解喊"不可行".
   const incomplete = result.ok;
-  const reason =
+  const reason = friendlySolverText(
     result.reason ??
-    (incomplete ? "求解成功但没有返回成本结构, 无法展示方案." : "求解未给出原因.");
+      (incomplete ? "求解成功但没有返回成本结构, 无法展示方案." : "求解未给出原因."),
+  );
+  const contractIncomplete = !incomplete && contractIncompleteInput;
+  // 求解器没算出结论、也没能证实不可行: 合同也许本来配得出, 不能按"不可行"引导用户去放宽.
+  const undetermined = !incomplete && !contractIncomplete && result.undetermined === true;
 
   return (
     <div className="card" style={{ borderLeft: "4px solid var(--c-danger)" }}>
       <div className="card-title" style={{ color: "var(--c-danger)" }}>
-        {incomplete ? "✗ 结果不完整" : "✗ 不可行"}
+        {incomplete ? "✗ 结果不完整" : undetermined ? "✗ 这次没算出结论" : "✗ 不可行"}
       </div>
       <p style={{ margin: "0 0 10px", fontSize: 13 }}>{reason}</p>
 
@@ -125,7 +140,20 @@ export function InfeasiblePanel({ result }: { result: BlendResult }) {
         </>
       )}
 
-      {bounds.length === 0 && !incomplete && (
+      {contractIncomplete && (
+        <p style={{ margin: 0, fontSize: 12, color: "var(--c-text-3)" }}>
+          合同还没填完整, 放宽别的约束或启用更多煤都没用, 请先去「合同」页补全再算.
+        </p>
+      )}
+
+      {undetermined && (
+        <p style={{ margin: 0, fontSize: 12, color: "var(--c-text-3)" }}>
+          这不等于合同配不出来: 合同卡得很紧时, 计算可能算不稳. 可以再算一次;
+          还是这样的话, 把卡得最紧的那一项略微放一点再试.
+        </p>
+      )}
+
+      {bounds.length === 0 && !incomplete && !contractIncomplete && !undetermined && (
         <p style={{ margin: 0, fontSize: 12, color: "var(--c-text-3)" }}>
           没有单独一项约束能解释这次不可行: 冲突牵涉两项以上, 或者煤池本身就不够.
           需要同时放宽多项, 或去「煤池」启用更多煤源.

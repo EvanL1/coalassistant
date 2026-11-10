@@ -220,7 +220,40 @@ describe("InfeasiblePanel", () => {
 
     expect(screen.queryByRole("table")).toBeNull();
     expect(screen.getByText(/没有单独一项约束能解释这次不可行/)).toBeTruthy();
-    expect(screen.getByText("约束冲突, LP 不可行")).toBeTruthy();
+    // 核心原文 "约束冲突, LP 不可行" 照存, 显示时换成人话
+    expect(screen.getByText("合同要求互相冲突, 现有的煤怎么配都达不到")).toBeTruthy();
+    expect(screen.queryByText(/LP/)).toBeNull();
+  });
+
+  it("求解器没算出结论时不说不可行, 也不建议同时放宽多项", () => {
+    render(
+      <InfeasiblePanel
+        result={{
+          ...infeasible([]),
+          reason: "求解器没有算出可靠结论 (迭代次数用尽), 无法判定合同是否可行",
+          undetermined: true,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("✗ 这次没算出结论")).toBeTruthy();
+    expect(screen.queryByText("✗ 不可行")).toBeNull();
+    expect(screen.getByText(/这不等于合同配不出来/)).toBeTruthy();
+    expect(screen.queryByText(/没有单独一项约束能解释这次不可行/)).toBeNull();
+  });
+
+  it("合同没填完整时指向合同页, 不建议放宽或启用更多煤", () => {
+    render(
+      <InfeasiblePanel
+        result={{ ...infeasible([]), reason: "灰 缺少上限" }}
+        contractIncomplete
+      />,
+    );
+
+    expect(screen.getByText("灰 缺少上限")).toBeTruthy();
+    expect(screen.getByText(/去「合同」页补全/)).toBeTruthy();
+    expect(screen.queryByText(/没有单独一项约束能解释/)).toBeNull();
+    expect(screen.queryByText(/启用更多煤源/)).toBeNull();
   });
 
   // 诊断字段上线前存下来的结果不带这个字段, 面板不能因此崩掉.

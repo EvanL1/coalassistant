@@ -1,6 +1,7 @@
 import { fetchBenchmarks, solverPriceFactor, toRequestBenchmark } from "../benchmarks";
 import { fetchLatestCoalIndex } from "../coal_index";
-import type { BlendRequest, Coal, IndicatorKey, MasterPriceFactor, PriceFactor, PurchaseTerms, Spec } from "../types";
+import type { Benchmark, BlendRequest, Coal, IndicatorKey, MasterPriceFactor, PriceFactor, PurchaseTerms, Spec } from "../types";
+import { withoutUnusedBound } from "./contract";
 import { toEstimateCoal, type ResolvedCoal } from "./resolvedCoal";
 
 /*
@@ -21,20 +22,41 @@ export interface BlendBase {
  * 默认基准. 两样都没有才退回现货指数点位当标准品价 (只是相对尺度). 系数表来自 master (数据不是代码).
  */
 export async function loadPriceFactor(priceFactor: MasterPriceFactor): Promise<PriceFactor> {
-  const fetched = (await fetchBenchmarks()).map(toRequestBenchmark);
+  return (await loadPriceFactorWithStatus(priceFactor)).priceFactor;
+}
+
+export interface LoadedPriceFactor {
+  priceFactor: PriceFactor;
+  /** 基准报价没取到 (服务异常、断网), 这次退回了内置基准: 估价可能不是最新的. */
+  benchmarksStale: boolean;
+}
+
+export async function loadPriceFactorWithStatus(
+  priceFactor: MasterPriceFactor,
+): Promise<LoadedPriceFactor> {
+  let fetched: Benchmark[] = [];
+  let benchmarksStale = false;
+  try {
+    fetched = (await fetchBenchmarks({ strict: true })).map(toRequestBenchmark);
+  } catch {
+    benchmarksStale = true;
+  }
   const benchmarks = fetched.length > 0 ? fetched : (priceFactor.benchmarks ?? []);
   const marketPrice = benchmarks.length === 0 ? await fetchLatestCoalIndex() : null;
   return {
-    ...solverPriceFactor(priceFactor),
-    ...(benchmarks.length > 0 ? { benchmarks } : {}),
-    ...(marketPrice != null ? { market_price: marketPrice } : {}),
+    priceFactor: {
+      ...solverPriceFactor(priceFactor),
+      ...(benchmarks.length > 0 ? { benchmarks } : {}),
+      ...(marketPrice != null ? { market_price: marketPrice } : {}),
+    },
+    benchmarksStale,
   };
 }
 
 function requestBase(base: BlendBase): BlendRequest {
   return {
     coals: [],
-    specs: base.specs,
+    specs: base.specs.map(withoutUnusedBound),
     total_quantity: base.totalQuantity,
     // 现场铲车配煤: 每种煤要么不用、要么至少一铲, 按整铲配.
     shovel_tons: base.shovelTons ?? undefined,

@@ -13,6 +13,8 @@ export interface CoalIndexPoint {
   price: number; // 现货指数点位
 }
 
+import { apiFetch } from "./http";
+
 const KEY_INDEX = "doudou_blend.coal_index.v1";
 const TTL_MS = 6 * 60 * 60 * 1000;
 
@@ -60,7 +62,7 @@ async function fetchSeries(): Promise<CoalIndexPoint[] | null> {
   const cached = readCache();
   if (cached) return cached;
   try {
-    const response = await fetch("/api/coal-index", { cache: "no-store" });
+    const response = await apiFetch("/api/coal-index", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const points = parseIndexSeries(await response.json());
     if (points.length === 0) return null;

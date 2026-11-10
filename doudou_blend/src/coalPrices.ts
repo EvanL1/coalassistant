@@ -1,5 +1,6 @@
 import type { ResolvedCoal } from "./domain/resolvedCoal";
 import type { Coal, CoalPriceHistory, CoalPriceSnapshot, CoalValue, PriceResult } from "./types";
+import { apiFetch } from "./http";
 
 export type CardPrice =
   | { kind: "snapshot"; price: number; change: number | null; missing: string[] }
@@ -9,7 +10,7 @@ export type CardPrice =
 
 export async function fetchCoalPrices(): Promise<CoalPriceSnapshot | null> {
   try {
-    const response = await fetch("/api/coal-prices", {
+    const response = await apiFetch("/api/coal-prices", {
       credentials: "same-origin", cache: "no-store",
     });
     if (!response.ok) return null;
@@ -22,7 +23,7 @@ export async function fetchCoalPrices(): Promise<CoalPriceSnapshot | null> {
 
 export async function fetchCoalPriceHistory(name: string): Promise<CoalPriceHistory | null> {
   try {
-    const response = await fetch(`/api/coal-prices/history?name=${encodeURIComponent(name)}`, {
+    const response = await apiFetch(`/api/coal-prices/history?name=${encodeURIComponent(name)}`, {
       credentials: "same-origin", cache: "no-store",
     });
     if (!response.ok) return null;
@@ -47,7 +48,7 @@ export function hasPriceHistory(coal: ResolvedCoal, snapshot: CoalPriceSnapshot 
 export async function estimateLive(coals: Coal[]): Promise<Map<string, CoalValue> | null> {
   if (coals.length === 0) return new Map();
   try {
-    const response = await fetch("/api/price", {
+    const response = await apiFetch("/api/price", {
       method: "POST", credentials: "same-origin",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ coals }),
     });

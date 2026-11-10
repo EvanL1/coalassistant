@@ -6,14 +6,25 @@
  *   - 错误提示 inline
  *   - 登录成功后由父级 App 自动切换到主界面
  */
-import { useState } from "react";
-import { tryLogin } from "./auth";
+import { useEffect, useState } from "react";
+import { LoginRateLimitError, tryLogin } from "./auth";
 
-export function LoginScreen() {
+export function LoginScreen({ notice = null }: { notice?: string | null }) {
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // 登录被限速 (429) 后剩下的等待秒数; 等待期间按钮不可点并倒计时,
+  // 不然用户对着"暂不可用"反复点, 越点锁得越久.
+  const [retryIn, setRetryIn] = useState(0);
+
+  useEffect(() => {
+    if (retryIn <= 0) return;
+    const timer = window.setInterval(() => {
+      setRetryIn((value) => Math.max(0, value - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [retryIn > 0]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -32,12 +43,31 @@ export function LoginScreen() {
           card.classList.add("shake");
         }
       }
-    } catch {
-      setError("登录服务暂不可用，请稍后重试");
+    } catch (err) {
+      if (err instanceof LoginRateLimitError) {
+        if (err.retryAfterSeconds != null) {
+          // 提示里的秒数跟着倒计时走 (见下面的 shownError), 数到 0 提示就消失.
+          setRetryIn(err.retryAfterSeconds);
+        } else {
+          setError(err.message || "尝试次数过多, 请稍后再试");
+        }
+      } else if (err instanceof TypeError) {
+        // 网络层错误 (断网/超时), 没有服务端给的原因可显示.
+        setError("登录服务暂不可用，请稍后重试");
+      } else {
+        // 服务端给的 reason (限速以外的失败).
+        setError(
+          err instanceof Error && err.message
+            ? err.message
+            : "登录服务暂不可用，请稍后重试",
+        );
+      }
     } finally {
       setSubmitting(false);
     }
   }
+
+  const shownError = retryIn > 0 ? `尝试次数过多, 请 ${retryIn} 秒后再试` : error;
 
   return (
     <div
@@ -87,9 +117,25 @@ export function LoginScreen() {
               color: "var(--c-text-3)",
             }}
           >
-            主焦煤配煤优化 · 离线运行
+            主焦煤配煤优化 · 数据云端保存
           </p>
         </div>
+
+        {notice && (
+          <div
+            role="status"
+            style={{
+              background: "#fef3c7",
+              color: "#92400e",
+              borderRadius: 8,
+              padding: "8px 10px",
+              fontSize: 13,
+              marginBottom: 12,
+            }}
+          >
+            {notice}
+          </div>
+        )}
 
         <form onSubmit={submit}>
           <label className="login-field">
@@ -99,7 +145,7 @@ export function LoginScreen() {
               type="text"
               value={user}
               onChange={(e) => setUser(e.target.value)}
-              placeholder="doudou"
+              placeholder="请输入账号"
               autoComplete="username"
             />
           </label>
@@ -115,7 +161,7 @@ export function LoginScreen() {
             />
           </label>
 
-          {error && (
+          {shownError && (
             <div
               style={{
                 color: "var(--c-danger)",
@@ -124,14 +170,14 @@ export function LoginScreen() {
                 paddingLeft: 4,
               }}
             >
-              ⚠ {error}
+              ⚠ {shownError}
             </div>
           )}
 
           <button
             type="submit"
             className="btn btn-primary"
-            disabled={submitting}
+            disabled={submitting || retryIn > 0}
             style={{
               width: "100%",
               height: 48,
@@ -140,7 +186,7 @@ export function LoginScreen() {
               marginTop: 4,
             }}
           >
-            {submitting ? "登录中…" : "登录"}
+            {submitting ? "登录中…" : retryIn > 0 ? `${retryIn} 秒后再试` : "登录"}
           </button>
         </form>
 
