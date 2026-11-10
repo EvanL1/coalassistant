@@ -362,3 +362,104 @@ fn test_quantity_multiple_of_shovel_stays_quiet() {
         result.warnings
     );
 }
+
+/// 配方顶在合同界上, 一点余地都没有: 按最大余数法凑整会把指标顶破, 挪一铲也救不回.
+/// 这时给被顶破的那几项留一点余量重新配、再凑整, 得到的整铲配方按原合同验算仍达标,
+/// 并如实说为此比不凑整贵了多少.
+#[test]
+fn test_rounding_gets_headroom_when_recipe_sits_on_the_bounds() {
+    let request: BlendRequest =
+        serde_json::from_str(include_str!("fixtures/shovel_needs_headroom.json")).unwrap();
+    let result = solve(&request);
+    assert!(result.ok, "{:?}", result.reason);
+    assert!(
+        result
+            .orders
+            .iter()
+            .all(|order| order.shovels.is_some_and(|count| count >= 1)),
+        "每种煤都该是整铲: {:?}",
+        result.orders
+    );
+    let shovels: u32 = result.orders.iter().filter_map(|order| order.shovels).sum();
+    assert_eq!(shovels, 1429, "10000 吨 / 一铲 7 吨");
+    let extra = result
+        .shovel_extra_cost
+        .expect("留余量重配要报出多花了多少");
+    assert!(extra >= 0.0, "{extra}");
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("为凑成整铲")),
+        "{:?}",
+        result.warnings
+    );
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("凑不成整铲")),
+        "{:?}",
+        result.warnings
+    );
+
+    // 余量只为给凑整留地方: 凑好的配方按原合同回放, 不能有不达标的项.
+    let mut replay = request.clone();
+    replay.fixed_ratios = Some(result.recipe.clone());
+    replay.shovel_tons = None;
+    let review = solve(&replay);
+    assert!(review.ok, "{:?}", review.reason);
+    for check in &review.indicator_check {
+        assert_ne!(
+            check.status,
+            EvaluationStatus::Fail,
+            "回放配方 {} 判 Fail: {check:?}",
+            check.indicator
+        );
+    }
+}
+
+/// 直接凑整就成的, 不走留余量重配: 不报多花的成本, 输出里也没有这个字段.
+#[test]
+fn test_plain_rounding_reports_no_extra_cost() {
+    let coals = vec![coal("低硫", 0.6, 1900.0), coal("高硫", 2.0, 1500.0)];
+    let mut request = request(coals, 1.5);
+    request.total_quantity = Some(300.0);
+    request.shovel_tons = Some(3.0);
+    let result = solve(&request);
+    assert!(result.ok, "{:?}", result.reason);
+    assert!(result.orders.iter().all(|order| order.shovels.is_some()));
+    assert!(result.shovel_extra_cost.is_none());
+    assert!(!serde_json::to_string(&result)
+        .unwrap()
+        .contains("shovel_extra_cost"));
+}
+
+/// 留余量只对进了 LP 的约束 (硬约束、计价拒收线) 起作用: 凑整顶破的若是软约束,
+/// 不给它留余量, 说明里也不提它.
+#[test]
+fn test_headroom_is_only_for_constraints_the_lp_enforces() {
+    let request: BlendRequest =
+        serde_json::from_str(include_str!("fixtures/shovel_soft_spec_broken.json")).unwrap();
+    let soft: Vec<&str> = request
+        .specs
+        .iter()
+        .filter(|spec| !matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced))
+        .map(|spec| label_zh(&spec.indicator))
+        .collect();
+    assert!(!soft.is_empty(), "fixture 里要有软约束");
+    let result = solve(&request);
+    assert!(result.ok, "{:?}", result.reason);
+    assert!(result.orders.iter().all(|order| order.shovels.is_some()));
+    let note = result
+        .warnings
+        .iter()
+        .find(|warning| warning.starts_with("为凑成整铲"))
+        .expect("这份合同要留余量才凑得成整铲");
+    for label in soft {
+        assert!(
+            !note.contains(label),
+            "软约束 {label} 不该在留余量的说明里: {note}"
+        );
+    }
+}
