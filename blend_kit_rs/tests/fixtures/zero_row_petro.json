@@ -1,0 +1,446 @@
+{
+ "coals": [],
+ "specs": [
+  {
+   "indicator": "S",
+   "direction": "Upper",
+   "max": 2.8
+  },
+  {
+   "indicator": "A",
+   "direction": "Upper",
+   "max": 9.3
+  },
+  {
+   "indicator": "V",
+   "direction": "Upper",
+   "max": 25.0
+  },
+  {
+   "indicator": "G",
+   "direction": "Lower",
+   "min": 76.0
+  },
+  {
+   "indicator": "Y",
+   "direction": "Lower",
+   "min": 13.0
+  },
+  {
+   "indicator": "petro",
+   "direction": "Upper",
+   "max": 0.13
+  },
+  {
+   "indicator": "CSR",
+   "direction": "Lower",
+   "min": 59.0
+  },
+  {
+   "indicator": "M",
+   "direction": "Upper",
+   "max": 12.5
+  }
+ ],
+ "total_quantity": 1000,
+ "truncate_decimal": true,
+ "price_factor": {
+  "adjusts": [
+   {
+    "indicator": "S",
+    "direction": "Upper",
+    "base": 1.3,
+    "premium_rate": 75,
+    "discount_rate": 47,
+    "clamp": [
+     0.6,
+     100
+    ],
+    "linear_range": [
+     0.6,
+     2.8
+    ]
+   },
+   {
+    "indicator": "A",
+    "direction": "Upper",
+    "base": 10.5,
+    "premium_rate": 25,
+    "discount_rate": 25,
+    "clamp": [
+     8,
+     12
+    ],
+    "linear_range": [
+     8,
+     12
+    ]
+   },
+   {
+    "indicator": "G",
+    "direction": "Lower",
+    "base": 85,
+    "premium_rate": 5,
+    "discount_rate": 5,
+    "clamp": [
+     40,
+     95
+    ]
+   },
+   {
+    "indicator": "Y",
+    "direction": "Lower",
+    "base": 15,
+    "premium_rate": 3,
+    "discount_rate": 3
+   },
+   {
+    "indicator": "CSR",
+    "direction": "Lower",
+    "base": 65,
+    "premium_rate": 5,
+    "discount_rate": 5
+   }
+  ],
+  "uncertainty": {
+   "default": 250,
+   "quoted": 30,
+   "by_coal_type": {
+    "焦煤": 60
+   }
+  },
+  "region_penalty": 30,
+  "matching": {
+   "weights": {
+    "V": 20
+   },
+   "missing_penalty": 300,
+   "bandwidth": 40
+  },
+  "benchmarks": [
+   {
+    "name": "基准01",
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西临汾",
+    "props": {
+     "A": 9,
+     "S": 0.5,
+     "V": 20,
+     "G": 85
+    },
+    "price": 2250,
+    "date": "2026-10-15",
+    "source": "fixture"
+   },
+   {
+    "name": "基准02",
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西晋中",
+    "props": {
+     "A": 10.5,
+     "S": 1.3,
+     "V": 25,
+     "G": 80,
+     "CSR": 65
+    },
+    "price": 2050,
+    "date": "2026-10-15",
+    "source": "fixture"
+   },
+   {
+    "name": "基准03",
+    "coal_type": "肥煤",
+    "form": "精煤",
+    "region": "山西临汾",
+    "props": {
+     "A": 11,
+     "S": 3.8,
+     "V": 29,
+     "G": 95,
+     "Y": 32
+    },
+    "price": 2145,
+    "date": "2026-10-09",
+    "source": "fixture"
+   },
+   {
+    "name": "基准04",
+    "coal_type": "肥煤",
+    "form": "精煤",
+    "region": "山西吕梁",
+    "props": {
+     "A": 11,
+     "S": 1.3,
+     "V": 33,
+     "G": 90,
+     "Y": 25,
+     "CSR": 70
+    },
+    "price": 2250,
+    "date": "2026-10-14",
+    "source": "fixture"
+   },
+   {
+    "name": "基准05",
+    "coal_type": "瘦煤",
+    "form": "精煤",
+    "region": "山西吕梁",
+    "props": {
+     "A": 8.5,
+     "S": 2.8,
+     "V": 20,
+     "G": 60,
+     "Y": 10,
+     "CSR": 55
+    },
+    "price": 1870,
+    "date": "2026-10-15",
+    "source": "fixture"
+   },
+   {
+    "name": "基准06",
+    "coal_type": "瘦煤",
+    "form": "精煤",
+    "region": "山西长治",
+    "props": {
+     "A": 8,
+     "S": 0.5,
+     "G": 60
+    },
+    "price": 2329,
+    "date": "2026-10-15",
+    "source": "fixture"
+   },
+   {
+    "name": "基准07",
+    "coal_type": "1/3焦煤",
+    "form": "精煤",
+    "region": "山西忻州",
+    "props": {
+     "A": 10.5,
+     "S": 1,
+     "V": 32,
+     "G": 70
+    },
+    "price": 1585,
+    "date": "2026-10-15",
+    "source": "fixture"
+   },
+   {
+    "name": "基准08",
+    "coal_type": "贫瘦煤",
+    "form": "精煤",
+    "region": "山西长治",
+    "props": {
+     "A": 10.5,
+     "S": 0.4,
+     "V": 15,
+     "G": 13
+    },
+    "price": 1580,
+    "date": "2026-10-15",
+    "source": "fixture"
+   },
+   {
+    "name": "基准09",
+    "coal_type": "贫瘦煤",
+    "form": "精煤",
+    "region": "山西运城",
+    "props": {
+     "A": 10,
+     "S": 1,
+     "V": 16,
+     "G": 15
+    },
+    "price": 1698,
+    "date": "2026-10-15",
+    "source": "fixture"
+   }
+  ],
+  "extra_coals": [
+   {
+    "name": "样煤01",
+    "props": {
+     "S": 0.82,
+     "A": 14.78,
+     "V": 21,
+     "G": 88,
+     "M": 13,
+     "petro": 0.13,
+     "Y": 20,
+     "CSR": 65
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西"
+   },
+   {
+    "name": "样煤02",
+    "props": {
+     "S": 1.4,
+     "A": 10.5,
+     "V": 19,
+     "G": 80,
+     "petro": 0.13,
+     "Y": 15,
+     "CSR": 65,
+     "M": 10
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西"
+   },
+   {
+    "name": "样煤03",
+    "props": {
+     "S": 1.4,
+     "A": 9.5,
+     "V": 21.5,
+     "G": 88,
+     "M": 12,
+     "petro": 0.13,
+     "Y": 24,
+     "CSR": 68
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西灵石"
+   },
+   {
+    "name": "样煤04",
+    "props": {
+     "S": 0.6,
+     "A": 16,
+     "V": 26,
+     "G": 80,
+     "petro": 0.13,
+     "Y": 12,
+     "CSR": 72,
+     "M": 10
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西"
+   },
+   {
+    "name": "样煤05",
+    "props": {
+     "S": 2.2,
+     "A": 10.3,
+     "V": 23,
+     "G": 94,
+     "petro": 0.13,
+     "Y": 15,
+     "CSR": 65,
+     "M": 10
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西"
+   },
+   {
+    "name": "样煤06",
+    "props": {
+     "S": 1.3,
+     "A": 12,
+     "V": 22,
+     "G": 85,
+     "petro": 0.13,
+     "Y": 22,
+     "CSR": 60,
+     "M": 10
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西"
+   },
+   {
+    "name": "样煤07",
+    "props": {
+     "S": 0.95,
+     "A": 14,
+     "V": 28.5,
+     "G": 100,
+     "Y": 28,
+     "CSR": 55,
+     "M": 12,
+     "petro": 0.13
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "肥煤",
+    "form": "精煤",
+    "region": "山西灵石"
+   },
+   {
+    "name": "样煤08",
+    "props": {
+     "S": 0.6,
+     "A": 12,
+     "V": 25,
+     "G": 92,
+     "petro": 0.13,
+     "Y": 18,
+     "CSR": 70,
+     "M": 10
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西"
+   },
+   {
+    "name": "样煤09",
+    "props": {
+     "S": 2.2,
+     "A": 10.5,
+     "V": 22,
+     "G": 87,
+     "petro": 0.13,
+     "Y": 15,
+     "CSR": 70,
+     "M": 10
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "焦煤",
+    "form": "精煤",
+    "region": "山西"
+   },
+   {
+    "name": "样煤10",
+    "props": {
+     "S": 3.46,
+     "A": 9.14,
+     "V": 31.82,
+     "G": 97,
+     "petro": 0.13,
+     "Y": 27,
+     "CSR": 70,
+     "M": 8
+    },
+    "fob": 0.0,
+    "frt": 0.0,
+    "coal_type": "1/3焦煤",
+    "form": "精煤",
+    "region": "山西"
+   }
+  ],
+  "estimate_unpriced": true
+ }
+}

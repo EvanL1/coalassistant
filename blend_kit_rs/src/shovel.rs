@@ -10,14 +10,17 @@
 //!    或煤阶交互时重解带启发式迭代, 子节点成本不保证单调, 剪枝可能错过更便宜的组合.
 //!    节点数有上限, 到了就用已找到的最好解.
 //! 2. **整铲**: 各煤铲数按最大余数法凑成合计 N (入选的煤至少 1 铲), 再按铲数验算, 岩相
-//!    按真实配比做精确复核. 凑整让某项超标时, 试着在两种煤之间挪一铲, 取不超标里最便宜的;
+//!    按真实配比做精确复核. 凑整让某项超标或低于配比下限 (`min_ratios`) 时, 试着在两种煤
+//!    之间挪一铲, 取不超标里最便宜的;
 //!    都不行就退回未凑整的配方并提示.
 //!
 //! 配煤价值 (盈亏平衡价) 取原问题的 LP 解: 分支定界的节点去掉了煤、加了下限, 对偶价已变了味.
 //! LP 解里占比 ≤ 1e-5 的煤不进 recipe, 凑整时按 0 处理.
 
 use crate::model::*;
-use crate::optimizer::{finalize_quality_status, review_petrography, FIXED_PETRO_NOTE};
+use crate::optimizer::{
+    finalize_quality_status, review_petrography, FIXED_PETRO_NOTE, MIN_RATIO_TOLERANCE,
+};
 use std::collections::{HashMap, HashSet};
 
 /// 已有可行解后, 分支定界最多重解几次.
@@ -93,6 +96,11 @@ pub(crate) fn solve(request: &BlendRequest, resolve: &Resolve) -> BlendResult {
     };
     let mut result = whole_shovels(&node, lp, total, tons, resolve);
     result.blend_values = root.blend_values;
+    if result.orders.iter().any(|order| order.shovels.is_some()) {
+        result
+            .warnings
+            .extend(quantity_mismatch(quantity, tons, total));
+    }
     if search.truncated {
         result
             .warnings
@@ -164,6 +172,26 @@ impl Search<'_> {
             .min_by(|left, right| left.1.total_cmp(right.1).then(left.0.cmp(right.0)))
             .map(|(name, _)| name.clone())
     }
+}
+
+/// 总铲数 N = round(采购量 / 一铲), 订单吨数与成本仍按采购量算; 两者对不上时如实说差多少.
+/// 差额按 0.0001 吨取整后为 0 的只是浮点零头, 不提示.
+fn quantity_mismatch(quantity: f64, tons: f64, total: u32) -> Option<String> {
+    let rounded = |value: f64| (value * 1e4).round() / 1e4;
+    let actual = f64::from(total) * tons;
+    let gap = rounded((actual - quantity).abs());
+    if gap == 0.0 {
+        return None;
+    }
+    let side = if actual < quantity { "少" } else { "多" };
+    Some(format!(
+        "采购总量 {} 吨不是一铲 {} 吨的整数倍: {total} 铲实际是 {} 吨, 比采购总量{side} {gap} 吨; \
+         订单吨数与成本仍按 {} 吨计",
+        rounded(quantity),
+        rounded(tons),
+        rounded(actual),
+        rounded(quantity)
+    ))
 }
 
 fn net_cost(result: &BlendResult) -> Option<f64> {
@@ -240,6 +268,23 @@ fn evaluate(
         .zip(counts)
         .map(|(name, count)| ((*name).clone(), f64::from(*count)))
         .collect();
+    let total = f64::from(counts.iter().sum::<u32>());
+    // 验算路径不看 min_ratios, 凑整只认满足配比下限的铲数; 不满足就当这组铲数不可用,
+    // 交给挪铲修复, 再不行退回未凑整的配方.
+    // 下限只针对实际在配方里的煤, 与 LP 侧一致: 被剔出煤池的煤下限不生效, LP 解成
+    // 零头 (≤1e-5) 的煤不进配方, 凑整按 0 处理.
+    let mut floors: Vec<(&String, &f64)> = node.min_ratios.iter().collect();
+    floors.sort_by(|left, right| left.0.cmp(right.0));
+    if let Some((name, floor)) = floors.into_iter().find(|(name, floor)| {
+        shares
+            .get(*name)
+            .is_some_and(|count| count / total + MIN_RATIO_TOLERANCE < **floor)
+    }) {
+        return BlendResult::infeasible(
+            &format!("整铲配比低于 {name} 的配比下限 {floor}"),
+            Vec::new(),
+        );
+    }
     let mut trial = node.clone();
     trial.shovel_tons = None;
     trial.min_ratios.clear();
@@ -251,7 +296,6 @@ fn evaluate(
     result
         .warnings
         .retain(|warning| warning != FIXED_PETRO_NOTE);
-    let total = f64::from(counts.iter().sum::<u32>());
     let participating: Vec<(&Coal, f64)> = node
         .coals
         .iter()

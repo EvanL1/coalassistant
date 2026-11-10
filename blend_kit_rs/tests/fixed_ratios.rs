@@ -236,3 +236,66 @@ fn test_share_on_a_culled_coal_is_an_error() {
         result.reason
     );
 }
+
+/// 每份都是有限数, 合计却溢出成 inf: 归一化后配比全 0, 不能报"验算成功, 成本 0".
+#[test]
+fn test_share_sum_overflow_is_an_error() {
+    let result = solve(&request(
+        four_coals(),
+        vec![Spec::upper("S", 2.5)],
+        shares(&[("荣欣", 1e308), ("北沟", 1e308)]),
+    ));
+    assert!(!result.ok, "{:?}", result.recipe);
+    assert!(
+        result.reason.as_deref().unwrap_or("").contains("份数"),
+        "{:?}",
+        result.reason
+    );
+}
+
+/// 验算不求最优, 不会去满足 min_ratios; 给定配比低于下限时要明确告警, 不能静默放过.
+#[test]
+fn test_fixed_ratios_below_min_ratio_warn() {
+    let mut req = request(
+        four_coals(),
+        vec![Spec::upper("S", 2.5)],
+        shares(&[("荣欣", 3.0), ("新星", 1.0)]),
+    );
+    let plain = solve(&req);
+    assert!(plain.ok, "{:?}", plain.reason);
+    assert!(plain.warnings.iter().all(|w| !w.contains("下限")));
+
+    req.min_ratios.insert("新星".into(), 0.5);
+    req.min_ratios.insert("北沟".into(), 0.1);
+    let result = solve(&req);
+    assert!(result.ok, "{:?}", result.reason);
+    assert_eq!(result.recipe, plain.recipe, "告警不改配比");
+    for name in ["新星", "北沟"] {
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains(name) && w.contains("下限")),
+            "{name}: {:?}",
+            result.warnings
+        );
+    }
+}
+
+/// 满足下限的验算不多出告警.
+#[test]
+fn test_fixed_ratios_meeting_min_ratio_stay_quiet() {
+    let mut req = request(
+        four_coals(),
+        vec![Spec::upper("S", 2.5)],
+        shares(&[("荣欣", 1.0), ("新星", 1.0)]),
+    );
+    req.min_ratios.insert("新星".into(), 0.5);
+    let result = solve(&req);
+    assert!(result.ok, "{:?}", result.reason);
+    assert!(
+        result.warnings.iter().all(|w| !w.contains("下限")),
+        "{:?}",
+        result.warnings
+    );
+}

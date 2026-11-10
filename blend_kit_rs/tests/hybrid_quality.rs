@@ -411,3 +411,49 @@ fn test_stored_result_without_diagnosis_still_deserializes() {
         serde_json::from_str(&stored.to_string()).expect("存量记录必须仍能反序列化");
     assert!(result.infeasible_bounds.is_empty());
 }
+
+/// 软约束只体检、不进 LP. 池里多一种**没入选**、缺胶质的煤, 不该让入选配方的胶质
+/// 变成 0.0 / 未验证 —— 混合指标只取决于配方里实际用到的煤.
+#[test]
+fn test_soft_check_ignores_unused_coal_missing_indicator() {
+    let soft_y = json!({
+        "indicator": "Y", "direction": "Lower", "min": 20.0, "enforcement": "Soft"
+    });
+    let hard_s = json!({"indicator": "S", "direction": "Upper", "max": 1.0});
+    let base = solve(json!({
+        "coals": [coal("甲", 0.8, 10.0, 80.0, 1000.0), coal("乙", 0.9, 10.0, 82.0, 1100.0)],
+        "specs": [hard_s.clone(), soft_y.clone()],
+        "truncate_decimal": false
+    }));
+    assert_eq!(base["ok"], true, "{base}");
+
+    let mut unused = coal("丙", 0.7, 10.0, 85.0, 5000.0);
+    unused["props"].as_object_mut().unwrap().remove("Y");
+    let result = solve(json!({
+        "coals": [coal("甲", 0.8, 10.0, 80.0, 1000.0), coal("乙", 0.9, 10.0, 82.0, 1100.0), unused],
+        "specs": [hard_s, soft_y],
+        "truncate_decimal": false
+    }));
+    assert_eq!(result["ok"], true, "{result}");
+    assert!(result["recipe"].get("丙").is_none(), "丙 太贵不该入选");
+
+    let y_check = |value: &Value| {
+        value["indicator_check"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["indicator"] == "Y")
+            .cloned()
+            .expect("体检应含胶质")
+    };
+    let expected = y_check(&base);
+    let got = y_check(&result);
+    // 配方胶质 15 < 软下限 20: 违约要照常判出来.
+    assert_eq!(expected["status"], "Fail");
+    assert_eq!(got["status"], expected["status"], "{got}");
+    assert!(
+        (got["value"].as_f64().unwrap() - expected["value"].as_f64().unwrap()).abs() < 1e-9,
+        "{got}"
+    );
+    assert_eq!(result["quality_status"], base["quality_status"]);
+}
