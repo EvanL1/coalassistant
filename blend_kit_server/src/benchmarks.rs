@@ -563,7 +563,10 @@ pub(crate) async fn estimate(
     let master = master_value(&state).await;
     let benchmarks = current(&state, &master).await;
     fill_price_request(&mut input, &master, &benchmarks);
-    let output = blend_kit::estimate_json(&input.to_string());
+    // 估价同求解一样是 CPU 活, 挪出异步线程, 并受同一并发上限与超时约束.
+    let output = crate::limits::run_solver(move || blend_kit::estimate_json(&input.to_string()))
+        .await
+        .unwrap_or_else(|error| json!({ "ok": false, "reason": error.reason("估价") }).to_string());
     (
         [(
             axum::http::header::CONTENT_TYPE,
