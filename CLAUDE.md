@@ -95,6 +95,14 @@ rounding breaks a spec. Blend values come from the root LP; price-robustness re-
 wrapper. The shovel size is a per-user setting (我的 page, `web_user_state.shovel_tons`, NULL = default 3 t; saved with
 COALESCE so pre-deploy clients can't reset it). Absent = byte-identical.
 
+**求解失败分两种, 不要混报.** 求解器证实不可行, 或逐项诊断找到了真凶, 报"约束冲突, LP 不可行" (原文被界面
+和历史记录照存, 不要改字)。求解器迭代用尽/数值错误而诊断也证实不了时, 如实说没算出可靠结论, 并置
+`BlendResult.undetermined` (只在为真时序列化) —— 界面与 MCP 据此不引导用户去放宽合同。解后复核差一丝没过时
+只收紧没过的行重解, 重解得到的解要按实际输出的配方 (占比 ≤1e-5 的零头不进配方) 再复核一遍才算数。
+
+**服务端的计算闸门** (`blend_kit_server/src/limits.rs`): 求解与估价共用一个按核数的并发上限加超时;
+登录有全站并发上限, 按来源 IP 锁定默认关 (`LOGIN_IP_LOCKOUT`, 见 `docs/railway-deployment.md`)。
+
 **Frontend screens** (`doudou_blend/src/screens/`): 今日 `TodayScreen` (solve + cost/recipe/8-indicator view,
 real purchase-qty input, export orders, save-to-history, input-summary panel), 煤池 `CoalPoolScreen`
 (enable/hide + assay overrides; **no price entry**), 合同 `ContractScreen` (quality specs), 历史 `HistoryScreen` (saved
@@ -109,6 +117,13 @@ frontend bundle. Screens read master data through `master_loader.ts`'s `loadMast
 `GET /api/master`) is the canonical coal set and is never mutated. User edits (enable/hide, assay overrides) persist separately:
 `localStorage` acts as a synchronous cache (`doudou_blend/src/storage.ts`) and `cloudStorage.ts` mirrors it to
 PostgreSQL through `GET/PUT /api/storage` after login.
+
+**云端同步的规则.** 线上所有登录者共用一个 Web 账号、同一行数据, 写回是整份快照、服务端没有版本号。
+所以 `cloudStorage.ts` 在本机记两样东西: "有改动没同步"的标记, 和上次确认与云端一致时的基线
+(`canonicalUserSnapshot` 的稳定序列化)。初始化时与每次写回前都先拉云端和基线比: 云端还停在基线上才把本机
+推上去; 被别人改过就不推, 由 `SyncBanner` 让用户选用云端还是用本机, 选之前不往云端写任何东西。
+拉与写之间仍有一次往返的窗口, 要彻底堵住得给服务端加版本号。管理员会话不认领也不清空本机的用户数据
+(`localAccount.ts`)。所有接口经 `http.ts` 的 `apiFetch`, 401 统一回登录页。
 
 **估价与询价精算.** 求解默认全按估价: `domain/resolvedCoal.ts` 的 `toEstimateCoal` 与 `today.rs` 都不读
 master 或偏好里的价格键, 启用煤放进 `price_factor.extra_coals`, `coals: []`, 打开 `estimate_unpriced`.
