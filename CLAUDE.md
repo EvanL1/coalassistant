@@ -91,14 +91,22 @@ each coal is either unused or ≥ 1 shovel, in whole shovels (one shovel = 1/N, 
 Branch-and-bound over "drop it / floor it at one shovel" (floors go into the LP as `BlendRequest.min_ratios` rows),
 then largest-remainder rounding to whole shovels (`OrderItem.shovels`) evaluated through the fixed-ratio path plus the
 exact petrography review (`optimizer::review_petrography`, shared with the LP path), with a one-shovel-swap repair if
-rounding breaks a spec. Blend values come from the root LP; price-robustness re-solves also go through the shovel
+rounding breaks a spec. 合同按「保留 1 位小数、截断」判定 (用户确认的真实规则), LP 把上限用到下一格减 ε, 配方常顶在
+合同界上、一点余地都没有, 挪一铲也救不回; 这时给被凑整顶破的那几项加安全余量 (`Spec::margin`, 按判定步长的
+`HEADROOM_STEPS` 逐级加大) 重新分支定界再凑整, 凑整后的验算仍按原合同, 成功时置 `BlendResult.shovel_extra_cost`
+(比不凑整多花的元/吨, 只在有值时序列化); 都不行才退回未凑整的配方并提示。Blend values come from the root LP; price-robustness re-solves also go through the shovel
 wrapper. The shovel size is a per-user setting (我的 page, `web_user_state.shovel_tons`, NULL = default 3 t; saved with
 COALESCE so pre-deploy clients can't reset it). Absent = byte-identical.
 
 **求解失败分两种, 不要混报.** 求解器证实不可行, 或逐项诊断找到了真凶, 报"约束冲突, LP 不可行" (原文被界面
 和历史记录照存, 不要改字)。求解器迭代用尽/数值错误而诊断也证实不了时, 如实说没算出可靠结论, 并置
 `BlendResult.undetermined` (只在为真时序列化) —— 界面与 MCP 据此不引导用户去放宽合同。解后复核差一丝没过时
-只收紧没过的行重解, 重解得到的解要按实际输出的配方 (占比 ≤1e-5 的零头不进配方) 再复核一遍才算数。
+只收紧没过的行重解。
+
+**输出的配方必须自己经得起验算.** `recipe` 与订单默认只含占比 > 1e-5 的煤 (再小是求解残差)。但合同卡在判定
+边缘时, 解可能靠一种占比百万分之几的煤才达标; 截掉它, 照着输出的配方回放 (`fixed_ratios`) 就不达标。所以
+`optimizer::output_grain` 在"截掉零头后的配方按合同判定不达标"时, 从大到小把零头煤放回、取刚好达标的门槛。
+留下来的零头煤在按整铲配时会被分支定界看见: 要么去掉, 要么给足一铲。
 
 **服务端的计算闸门** (`blend_kit_server/src/limits.rs`): 求解与估价共用一个按核数的并发上限加超时;
 登录有全站并发上限, 按来源 IP 锁定默认关 (`LOGIN_IP_LOCKOUT`, 见 `docs/railway-deployment.md`)。
