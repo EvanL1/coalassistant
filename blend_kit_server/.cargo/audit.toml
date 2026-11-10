@@ -1,0 +1,15 @@
+# cargo audit 配置. 只忽略"锁文件里有、但从不编译进任何二进制、又无法靠升级消除"的条目;
+# 实际链接的依赖一律升级修复, 不在这里放行。
+# 复核方法: `cargo tree -i <crate> --target x86_64-unknown-linux-gnu -e normal,build` 无输出即未编译。
+# sqlx 0.8 升级到不再列出这两个 crate 的版本后, 删掉对应条目。
+
+[advisories]
+ignore = [
+    # rsa 0.9 Marvin 时序侧信道, 修复版是 0.10。
+    # 只被 sqlx-mysql 依赖; 本服务只开 sqlx 的 postgres 特性, sqlx-mysql 不参与编译,
+    # 它只因 sqlx-macros-core 的可选依赖留在锁文件里。sqlx 0.8 钉死 rsa 0.9, 无法单独升级。
+    "RUSTSEC-2023-0071",
+    # libsqlite3-sys 0.30 内置的 SQLite 有 WAL 未初始化内存问题, 修复版是 0.39。
+    # 只被 sqlx-sqlite 依赖, 同样不参与编译; sqlx 0.8 钉死 libsqlite3-sys 0.30, 无法单独升级。
+    "RUSTSEC-2026-0459",
+]
