@@ -74,9 +74,18 @@ fn range_of(field: &str) -> Option<(f64, f64)> {
 ///
 /// 返回每条不合法项的中文说明.
 pub fn validate(updates: &[CoalUpdate]) -> Result<(), Vec<String>> {
-    let master = match blend_kit::CoalMaster::load_embedded() {
+    validate_against(blend_kit::master_json(), updates)
+}
+
+/// 按给定的基线 master JSON 校验; 测试借此用 fixture, 不依赖内置数据的内容.
+fn validate_against(master_json: &str, updates: &[CoalUpdate]) -> Result<(), Vec<String>> {
+    let master: blend_kit::CoalMaster = match serde_json::from_str(master_json) {
         Ok(m) => m,
-        Err(e) => return Err(vec![format!("基线 master 加载失败: {e}")]),
+        Err(e) => {
+            return Err(vec![format!(
+                "基线 master 加载失败: master JSON 解析失败: {e}"
+            )])
+        }
     };
 
     let mut errors = Vec::new();
@@ -158,8 +167,13 @@ pub fn validate(updates: &[CoalUpdate]) -> Result<(), Vec<String>> {
 /// 只改动条目已有的 `props` / `confidence` / `note` 三个字段, 不引入新 schema,
 /// 因此 `doudou_blend/src/types.ts` 无需同步改动。
 pub fn merge(overrides: &[StoredOverride]) -> Result<String, String> {
-    let mut doc: Value = serde_json::from_str(blend_kit::master_json())
-        .map_err(|e| format!("基线 master 解析失败: {e}"))?;
+    merge_into(blend_kit::master_json(), overrides)
+}
+
+/// 把覆盖层叠加到给定的基线 master JSON 上.
+fn merge_into(master_json: &str, overrides: &[StoredOverride]) -> Result<String, String> {
+    let mut doc: Value =
+        serde_json::from_str(master_json).map_err(|e| format!("基线 master 解析失败: {e}"))?;
 
     if overrides.is_empty() {
         return serde_json::to_string(&doc).map_err(|e| e.to_string());
@@ -233,6 +247,21 @@ pub fn merge(overrides: &[StoredOverride]) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    /// 测试用基线: 甲缺 CSR, 乙 CSR 已有, 都带 S. 不依赖内置 master 的内容.
+    const FIXTURE: &str = r#"{
+        "version": "test",
+        "updated_at": "2026-01-01",
+        "description": "测试基线",
+        "default_contract": {"name": "测试合同", "specs": []},
+        "coals": [
+            {"name": "测试煤甲", "status": "active", "props": {"S": 0.6, "A": 9.5}},
+            {"name": "测试煤乙", "status": "verified", "props": {"S": 0.5, "CSR": 65.0},
+             "note": "原有备注"}
+        ]
+    }"#;
+    const GAP: &str = "测试煤甲";
+    const FULL: &str = "测试煤乙";
+
     fn update(coal: &str, field: &str, value: f64) -> CoalUpdate {
         CoalUpdate {
             coal: coal.into(),
@@ -243,156 +272,112 @@ mod tests {
         }
     }
 
-    /// 基线里确实缺 CSR 的煤可以补上.
+    fn check(updates: &[CoalUpdate]) -> Result<(), Vec<String>> {
+        validate_against(FIXTURE, updates)
+    }
+
+    fn stored(coal: &str, field: &str, value: f64, source: &str) -> StoredOverride {
+        StoredOverride {
+            coal_name: coal.into(),
+            field: field.into(),
+            value,
+            source: source.into(),
+            confidence: "medium".into(),
+            updated_at: "2026-09-17T00:00:00Z".into(),
+        }
+    }
+
+    fn merged_entry(overrides: &[StoredOverride], coal: &str) -> Value {
+        let doc: Value = serde_json::from_str(&merge_into(FIXTURE, overrides).unwrap()).unwrap();
+        doc["coals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == coal)
+            .cloned()
+            .unwrap()
+    }
+
+    /// 基线里缺的指标可以补上.
     #[test]
     fn accepts_filling_a_gap() {
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let target = master
-            .coals
-            .iter()
-            .find(|c| !c.props.is_empty() && !c.props.contains_key("CSR"))
-            .expect("基线里应有缺 CSR 的煤");
-        assert!(validate(&[update(&target.name, "CSR", 62.0)]).is_ok());
+        assert!(check(&[update(GAP, "CSR", 62.0)]).is_ok());
     }
 
     /// 基线已有的指标一律拒绝 —— 规格界限不得盖过实测值.
     #[test]
     fn rejects_overwriting_baseline() {
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let target = master
-            .coals
-            .iter()
-            .find(|c| c.props.contains_key("S"))
-            .expect("基线里应有带 S 的煤");
-        let errors = validate(&[update(&target.name, "S", 1.0)]).unwrap_err();
+        let errors = check(&[update(FULL, "CSR", 60.0)]).unwrap_err();
         assert!(errors[0].contains("只补空缺"), "实际: {}", errors[0]);
     }
 
     /// 2026-09-17 那批"岩相=2026"必须被拦下.
     #[test]
     fn rejects_out_of_range_petro() {
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let target = master
-            .coals
-            .iter()
-            .find(|c| !c.props.contains_key("petro"))
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| master.coals[0].name.clone());
-        let errors = validate(&[update(&target, "petro", 2026.0)]).unwrap_err();
-        assert!(
-            errors[0].contains("超出物理量程") || errors[0].contains("只补空缺"),
-            "实际: {}",
-            errors[0]
-        );
+        let errors = check(&[update(GAP, "petro", 2026.0)]).unwrap_err();
+        assert!(errors[0].contains("超出物理量程"), "实际: {}", errors[0]);
     }
 
     #[test]
     fn rejects_unknown_coal_and_field() {
-        let e = validate(&[update("不存在的煤", "S", 1.0)]).unwrap_err();
+        let e = check(&[update("不存在的煤", "S", 1.0)]).unwrap_err();
         assert!(e[0].contains("没有这个煤名"));
 
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let name = master.coals[0].name.clone();
-        let e = validate(&[update(&name, "灰分", 1.0)]).unwrap_err();
+        let e = check(&[update(GAP, "灰分", 1.0)]).unwrap_err();
         assert!(e[0].contains("未知指标"));
     }
 
     #[test]
     fn rejects_empty_batch_and_duplicates() {
-        assert!(validate(&[]).is_err());
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let target = master
-            .coals
-            .iter()
-            .find(|c| !c.props.is_empty() && !c.props.contains_key("CSR"))
-            .unwrap();
-        let errors = validate(&[
-            update(&target.name, "CSR", 60.0),
-            update(&target.name, "CSR", 65.0),
-        ])
-        .unwrap_err();
+        assert!(check(&[]).is_err());
+        let errors = check(&[update(GAP, "CSR", 60.0), update(GAP, "CSR", 65.0)]).unwrap_err();
         assert!(errors[0].contains("重复"));
     }
 
     #[test]
     fn rejects_bad_confidence_and_blank_source() {
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let target = master
-            .coals
-            .iter()
-            .find(|c| !c.props.is_empty() && !c.props.contains_key("CSR"))
-            .unwrap();
-
-        let mut bad = update(&target.name, "CSR", 60.0);
+        let mut bad = update(GAP, "CSR", 60.0);
         bad.confidence = "很高".into();
-        assert!(validate(&[bad]).unwrap_err()[0].contains("confidence"));
+        assert!(check(&[bad]).unwrap_err()[0].contains("confidence"));
 
-        let mut blank = update(&target.name, "CSR", 60.0);
+        let mut blank = update(GAP, "CSR", 60.0);
         blank.source = "   ".into();
-        assert!(validate(&[blank]).unwrap_err()[0].contains("source"));
+        assert!(check(&[blank]).unwrap_err()[0].contains("source"));
+    }
+
+    /// 对外入口按内置 master 校验; 这里只用不可能存在的煤名, 不依赖其内容.
+    #[test]
+    fn validate_uses_embedded_master() {
+        let e = validate(&[update("不存在的煤", "S", 1.0)]).unwrap_err();
+        assert!(e[0].contains("没有这个煤名"), "实际: {}", e[0]);
     }
 
     /// 合并把值写进 props, 并把来源追加到 note.
     #[test]
     fn merge_applies_override_and_records_provenance() {
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let target = master
-            .coals
-            .iter()
-            .find(|c| !c.props.is_empty() && !c.props.contains_key("CSR"))
-            .unwrap();
-
-        let merged = merge(&[StoredOverride {
-            coal_name: target.name.clone(),
-            field: "CSR".into(),
-            value: 63.0,
-            source: "2026-09-17 Mysteel 规格 CSR≥63".into(),
-            confidence: "medium".into(),
-            updated_at: "2026-09-17T00:00:00Z".into(),
-        }])
-        .unwrap();
-
-        let doc: Value = serde_json::from_str(&merged).unwrap();
-        let entry = doc["coals"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["name"] == target.name.as_str())
-            .unwrap();
+        let entry = merged_entry(
+            &[stored(GAP, "CSR", 63.0, "2026-09-17 Mysteel 规格 CSR≥63")],
+            GAP,
+        );
         assert_eq!(entry["props"]["CSR"], 63.0);
         assert_eq!(entry["confidence"]["CSR"], "medium");
-        assert!(entry["note"].as_str().unwrap().contains("[覆盖层]"));
+        assert!(entry["note"].as_str().unwrap().starts_with("[覆盖层]"));
+    }
+
+    /// 已有备注时, 覆盖层来源追加在原备注之后.
+    #[test]
+    fn merge_appends_to_existing_note() {
+        let entry = merged_entry(&[stored(FULL, "A", 9.0, "测试来源")], FULL);
+        assert_eq!(entry["props"]["A"], 9.0);
+        let note = entry["note"].as_str().unwrap();
+        assert!(note.starts_with("原有备注 | [覆盖层]"), "实际: {note}");
     }
 
     /// 基线已有的值, 合并时基线优先 (防御: 基线后来补上了同一指标).
     #[test]
     fn merge_never_clobbers_baseline() {
-        let master = blend_kit::CoalMaster::load_embedded().unwrap();
-        let target = master
-            .coals
-            .iter()
-            .find(|c| c.props.contains_key("S"))
-            .unwrap();
-        let baseline = target.props["S"];
-
-        let merged = merge(&[StoredOverride {
-            coal_name: target.name.clone(),
-            field: "S".into(),
-            value: baseline + 1.0,
-            source: "应当被忽略".into(),
-            confidence: "low".into(),
-            updated_at: "2026-09-17T00:00:00Z".into(),
-        }])
-        .unwrap();
-
-        let doc: Value = serde_json::from_str(&merged).unwrap();
-        let entry = doc["coals"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["name"] == target.name.as_str())
-            .unwrap();
-        assert_eq!(entry["props"]["S"], baseline);
+        let entry = merged_entry(&[stored(FULL, "CSR", 66.0, "应当被忽略")], FULL);
+        assert_eq!(entry["props"]["CSR"], 65.0);
         assert!(!entry["note"]
             .as_str()
             .unwrap_or_default()

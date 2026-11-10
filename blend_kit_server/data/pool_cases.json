@@ -1,0 +1,214 @@
+{
+  "_comment": [
+    "煤池解析规则的共享用例 (输入 master 片段、用户自建煤、偏好 → 每种煤的状态). 两端各跑一遍同一份数据:",
+    "  - Rust: blend_kit_server/src/today.rs 的 tests::shared_pool_cases_match_fixture (手机 Agent 的求解请求)",
+    "  - TS:   doudou_blend/src/domain/resolvedCoal.parity.test.ts (网页今日屏的求解请求)",
+    "today.rs 是 resolvedCoal.ts 的服务端镜像; 一旦分叉, 手机上算出的配方就和网页不一样.",
+    "改任何一端的煤池规则时, 先在这里加一条用例, 两端都会跟着红.",
+    "expected 按煤池顺序 (用户自建煤在前, 再 master) 列出 [煤名, 状态];",
+    "状态取网页 CoalReadiness: ready / disabled / hidden / duplicate_name / invalid_override.",
+    "props 给出每种 ready 煤进求解时的指标 (master + 偏好里改过的化验值).",
+    "overridden 给出用户改过、且与 master 不同的指标 (按字母序); 没写的煤一项都没改过.",
+    "prefs 与 user_coals 是服务端存的那一份: 网页经存储层 (getCoalPrefs / getUserCoals) 归一化后再解析,",
+    "所以整条偏好不是对象 (含 null) 判为数据非法, 名字为空、status 不认识、props 不是对象的自建煤直接丢掉."
+  ],
+  "cases": [
+    {
+      "name": "默认只有 verified 启用",
+      "master_coals": [
+        {"name": "甲一", "status": "verified", "props": {"S": 0.5, "A": 10}},
+        {"name": "甲二", "status": "active", "props": {"S": 0.6}},
+        {"name": "甲三", "status": "draft", "props": {"S": 0.7}},
+        {"name": "甲四", "status": "incomplete", "props": {"S": 0.8}}
+      ],
+      "user_coals": [],
+      "prefs": {},
+      "expected": [["甲一", "ready"], ["甲二", "disabled"], ["甲三", "disabled"], ["甲四", "disabled"]],
+      "props": {"甲一": {"S": 0.5, "A": 10}}
+    },
+    {
+      "name": "偏好的 enabled 覆盖默认, 已停用一票否决",
+      "master_coals": [
+        {"name": "乙一", "status": "active", "props": {"S": 0.6}},
+        {"name": "乙二", "status": "verified", "props": {"S": 0.6}},
+        {"name": "乙三", "status": "archived", "props": {"S": 0.6}}
+      ],
+      "user_coals": [],
+      "prefs": {"乙一": {"enabled": true}, "乙二": {"enabled": false, "props_override": {"S": 0.7}}, "乙三": {"enabled": true}},
+      "expected": [["乙一", "ready"], ["乙二", "disabled"], ["乙三", "disabled"]],
+      "props": {"乙一": {"S": 0.6}},
+      "overridden": {"乙二": ["S"]}
+    },
+    {
+      "name": "整条偏好不是对象 (含 null) 判为数据非法",
+      "master_coals": [
+        {"name": "丙一", "status": "verified", "props": {"S": 0.5}},
+        {"name": "丙二", "status": "active", "props": {"S": 0.5}},
+        {"name": "丙四", "status": "verified", "props": {"S": 0.5}},
+        {"name": "丙五", "status": "active", "props": {"S": 0.5}},
+        {"name": "丙六", "status": "verified", "props": {"S": 0.5}}
+      ],
+      "user_coals": [],
+      "prefs": {"丙一": null, "丙二": null, "丙四": false, "丙五": 0, "丙六": {}},
+      "expected": [["丙一", "invalid_override"], ["丙二", "disabled"], ["丙四", "invalid_override"], ["丙五", "disabled"], ["丙六", "ready"]],
+      "props": {"丙六": {"S": 0.5}}
+    },
+    {
+      "name": "偏好里的字段为 null 等同没写",
+      "master_coals": [
+        {"name": "丙三", "status": "verified", "props": {"S": 0.5}}
+      ],
+      "user_coals": [],
+      "prefs": {"丙三": {"enabled": null, "hidden": null, "props_override": null}},
+      "expected": [["丙三", "ready"]],
+      "props": {"丙三": {"S": 0.5}}
+    },
+    {
+      "name": "缺 props 或 props 不是对象判为数据非法",
+      "master_coals": [
+        {"name": "丁一", "status": "verified"},
+        {"name": "丁二", "status": "active", "props": null},
+        {"name": "丁三", "status": "verified", "props": [0.5]},
+        {"name": "丁四", "status": "active"}
+      ],
+      "user_coals": [],
+      "prefs": {"丁二": {"enabled": true}},
+      "expected": [["丁一", "invalid_override"], ["丁二", "invalid_override"], ["丁三", "invalid_override"], ["丁四", "disabled"]],
+      "props": {}
+    },
+    {
+      "name": "master 指标非法: 非数字、负数、未知指标; null 跳过",
+      "master_coals": [
+        {"name": "戊一", "status": "verified", "props": {"S": "0.5"}},
+        {"name": "戊二", "status": "verified", "props": {"S": -1}},
+        {"name": "戊三", "status": "verified", "props": {"Q": 1}},
+        {"name": "戊四", "status": "verified", "props": {"S": null, "A": 10}}
+      ],
+      "user_coals": [],
+      "prefs": {},
+      "expected": [["戊一", "invalid_override"], ["戊二", "invalid_override"], ["戊三", "invalid_override"], ["戊四", "ready"]],
+      "props": {"戊四": {"A": 10}}
+    },
+    {
+      "name": "隐藏优先于其他状态",
+      "master_coals": [
+        {"name": "己一", "status": "verified", "props": {"S": 0.5}},
+        {"name": "己二", "status": "verified", "props": {"S": 0.5}},
+        {"name": "己三", "status": "active", "props": {"S": 0.5}}
+      ],
+      "user_coals": [],
+      "prefs": {
+        "己一": {"hidden": true},
+        "己二": {"hidden": true, "props_override": {"S": -1}},
+        "己三": {"enabled": true, "hidden": false}
+      },
+      "expected": [["己一", "hidden"], ["己二", "hidden"], ["己三", "ready"]],
+      "props": {"己三": {"S": 0.5}}
+    },
+    {
+      "name": "改过的化验值覆盖 master, 非法覆盖值判为数据非法",
+      "master_coals": [
+        {"name": "庚一", "status": "verified", "props": {"S": 0.5, "A": 10}},
+        {"name": "庚二", "status": "verified", "props": {"S": 0.5}},
+        {"name": "庚三", "status": "verified", "props": {"S": 0.5}},
+        {"name": "庚四", "status": "verified", "props": {"S": 0.5}},
+        {"name": "庚五", "status": "verified", "props": {"S": 0.5}}
+      ],
+      "user_coals": [],
+      "prefs": {
+        "庚一": {"props_override": {"S": 0.8, "G": 70, "A": 10}},
+        "庚二": {"props_override": {"S": -1}},
+        "庚三": {"props_override": {"X": 1}},
+        "庚四": {"props_override": {"S": null}},
+        "庚五": {"props_override": [1]}
+      },
+      "expected": [["庚一", "ready"], ["庚二", "invalid_override"], ["庚三", "invalid_override"], ["庚四", "ready"], ["庚五", "invalid_override"]],
+      "props": {"庚一": {"S": 0.8, "A": 10, "G": 70}, "庚四": {"S": 0.5}},
+      "overridden": {"庚一": ["G", "S"]}
+    },
+    {
+      "name": "偏好结构非法",
+      "master_coals": [
+        {"name": "辛一", "status": "verified", "props": {"S": 0.5}},
+        {"name": "辛二", "status": "active", "props": {"S": 0.5}},
+        {"name": "辛三", "status": "verified", "props": {"S": 0.5}},
+        {"name": "辛四", "status": "verified", "props": {"S": 0.5}},
+        {"name": "辛五", "status": "verified", "props": {"S": 0.5}}
+      ],
+      "user_coals": [],
+      "prefs": {
+        "辛一": "yes",
+        "辛二": [],
+        "辛三": {"enabled": "true"},
+        "辛四": {"hidden": "no"},
+        "辛五": {"invalid_data": true}
+      },
+      "expected": [["辛一", "invalid_override"], ["辛二", "disabled"], ["辛三", "disabled"], ["辛四", "invalid_override"], ["辛五", "invalid_override"]],
+      "props": {}
+    },
+    {
+      "name": "旧版本录过的价格键忽略, 不算坏数据",
+      "master_coals": [
+        {"name": "壬一", "status": "verified", "props": {"S": 1.0}, "fob": 1000, "frt": 50}
+      ],
+      "user_coals": [],
+      "prefs": {"壬一": {"fob_override": 900, "frt_override": 24, "is_price_anchor": true}},
+      "expected": [["壬一", "ready"]],
+      "props": {"壬一": {"S": 1.0}}
+    },
+    {
+      "name": "重名 (忽略大小写与全角空格) 整组排除, 用户自建煤排在前",
+      "master_coals": [
+        {"name": "abc　", "status": "verified", "props": {"S": 0.5}},
+        {"name": "癸一", "status": "active", "props": {"S": 0.5}},
+        {"name": "癸二", "status": "verified", "props": {"S": 0.5}}
+      ],
+      "user_coals": [
+        {"name": "ABC", "status": "verified", "props": {"S": 0.4}},
+        {"name": "癸一", "status": "verified", "props": {"S": 0.4}},
+        {"name": "癸三", "status": "active", "props": {"S": 0.3}}
+      ],
+      "prefs": {"癸三": {"enabled": true}},
+      "expected": [
+        ["ABC", "duplicate_name"], ["癸一", "duplicate_name"], ["癸三", "ready"],
+        ["abc　", "duplicate_name"], ["癸一", "duplicate_name"], ["癸二", "ready"]
+      ],
+      "props": {"癸三": {"S": 0.3}, "癸二": {"S": 0.5}}
+    },
+    {
+      "name": "自建煤缺 props、名字为空、status 不认识的直接丢掉, 不与 master 判重名",
+      "master_coals": [
+        {"name": "子一", "status": "verified", "props": {"S": 0.5}},
+        {"name": "子二", "status": "verified", "props": {"S": 0.5}},
+        {"name": "子三", "status": "verified", "props": {"S": 0.5}},
+        {"name": "子四", "status": "verified", "props": {"S": 0.5}},
+        {"name": "子五", "status": "verified", "props": {"S": 0.5}}
+      ],
+      "user_coals": [
+        {"name": "子一", "status": "verified"},
+        {"name": "子二", "status": "bogus", "props": {"S": 0.4}},
+        {"name": "子三", "status": null, "props": {"S": 0.4}},
+        {"name": "子四", "status": "verified", "props": null},
+        {"name": "子五", "status": "verified", "props": [0.4]},
+        {"name": "", "status": "verified", "props": {"S": 0.4}},
+        {"name": "　 ", "status": "verified", "props": {"S": 0.4}},
+        {"status": "verified", "props": {"S": 0.4}},
+        {"name": 7, "status": "verified", "props": {"S": 0.4}},
+        null,
+        "子一",
+        {"name": "子六", "status": "active", "props": {"S": 0.3}},
+        {"name": "子七", "status": "archived", "props": {"S": 0.3}}
+      ],
+      "prefs": {"子六": {"enabled": true}, "子一": {"props_override": {"A": 9}}},
+      "expected": [
+        ["子六", "ready"], ["子七", "disabled"],
+        ["子一", "ready"], ["子二", "ready"], ["子三", "ready"], ["子四", "ready"], ["子五", "ready"]
+      ],
+      "props": {
+        "子六": {"S": 0.3}, "子一": {"S": 0.5, "A": 9}, "子二": {"S": 0.5},
+        "子三": {"S": 0.5}, "子四": {"S": 0.5}, "子五": {"S": 0.5}
+      },
+      "overridden": {"子一": ["A"]}
+    }
+  ]
+}
