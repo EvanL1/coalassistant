@@ -10,7 +10,9 @@ import { LoginScreen } from "./LoginScreen";
 import { getSession } from "./auth";
 import { AdminScreen } from "./screens/AdminScreen";
 import { IndexTicker } from "./IndexTicker";
-import { initializeCloudStorage } from "./cloudStorage";
+import { initializeCloudStorage, resetSyncState } from "./cloudStorage";
+import { SESSION_EXPIRED_EVENT, SESSION_EXPIRED_MESSAGE } from "./http";
+import { SyncBanner } from "./SyncBanner";
 
 function App() {
   const [tab, setTab] = useState<TabId>("today");
@@ -18,8 +20,9 @@ function App() {
   const [admin, setAdmin] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
+  const [loginNotice, setLoginNotice] = useState<string | null>(null);
 
-  // 监听认证变化 (登录/登出后自动切屏)
+  // 监听认证变化 (登录/登出后自动切屏); 任一接口回 401 = 会话失效, 直接回登录页.
   useEffect(() => {
     let active = true;
     const refresh = async () => {
@@ -27,13 +30,23 @@ function App() {
       if (!active) return;
       setAdmin(session.admin);
       setAuthed(session.authenticated);
+      if (session.authenticated) setLoginNotice(null);
     };
     const onChange = () => void refresh();
+    const onExpired = () => {
+      // 会话失效后同步状态 (写回失败/冲突) 不再成立, 一并复位, 下次登录重新初始化.
+      resetSyncState();
+      setAdmin(false);
+      setAuthed(false);
+      setLoginNotice(SESSION_EXPIRED_MESSAGE);
+    };
     window.addEventListener("doudou:auth_changed", onChange);
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
     void refresh();
     return () => {
       active = false;
       window.removeEventListener("doudou:auth_changed", onChange);
+      window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
     };
   }, []);
 
@@ -86,7 +99,7 @@ function App() {
   }
 
   if (!authed) {
-    return <LoginScreen />;
+    return <LoginScreen notice={loginNotice} />;
   }
 
   return (
@@ -94,18 +107,13 @@ function App() {
       <TabBar active={tab} onChange={setTab} />
       <main className="app-content">
         <section className={`screen screen-${tab}`} aria-label="当前功能页面">
-          {tab === "today" && (
-            <>
-              <IndexTicker />
-              <TodayScreen onNavigate={setTab} />
-            </>
-          )}
-          {tab === "pool" && (
-            <>
-              <IndexTicker />
-              <CoalPoolScreen />
-            </>
-          )}
+          {/* 同步横幅与行情条装进同一个吸顶容器, 上下排开; 两个各自 top:0 会互相盖住. */}
+          <div className="sticky-top">
+            <SyncBanner />
+            {(tab === "today" || tab === "pool") && <IndexTicker />}
+          </div>
+          {tab === "today" && <TodayScreen onNavigate={setTab} />}
+          {tab === "pool" && <CoalPoolScreen />}
           {tab === "contract" && <ContractScreen />}
           {tab === "history" && <HistoryScreen />}
           {tab === "me" && <MeScreen />}

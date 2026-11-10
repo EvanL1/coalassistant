@@ -9,6 +9,8 @@ export interface SolveSnapshot {
   enabledCount: number;
   /** 采购扣款模板缺失告警 (Step 8); 空数组 = 没发现孤儿保证值. */
   orphanedGuarantees?: OrphanedGuaranteeWarning[];
+  /** 基准报价没取到、按内置基准估的价. */
+  benchmarksStale?: boolean;
 }
 
 export class LatestRequestTracker {

@@ -53,6 +53,16 @@ describe("draftToBenchmark", () => {
       draftToBenchmark(draft({ props: { S: "", A: "", V: "", G: "", Y: "" } })),
     ).toBe("至少要填硫分 S");
   });
+
+  it("价格认千分位与全角, 指标认逗号小数点; 认不出的给例子", () => {
+    expect(
+      draftToBenchmark(draft({ price: "２,０５０", props: { S: "1,3", A: "", V: "", G: "", Y: "" } })),
+    ).toMatchObject({ price: 2050, props: { S: 1.3 } });
+    expect(draftToBenchmark(draft({ price: "2050元" }))).toBe("报价: 请输入数字, 例如 2050");
+    expect(
+      draftToBenchmark(draft({ props: { S: "1.3x", A: "", V: "", G: "", Y: "" } })),
+    ).toBe("S: 请输入数字, 例如 65.3");
+  });
 });
 
 describe("BenchmarkCard", () => {

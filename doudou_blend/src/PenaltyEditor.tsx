@@ -146,7 +146,7 @@ export function PenaltyEditor({ draft, unit, direction, error, onChange }: Props
           拒收线（{crossWord}它整批不收，不再按扣款算）
         </span>
         <input
-          type="number"
+          type="text"
           inputMode="decimal"
           aria-label={`拒收线（${crossWord}它整批不收）`}
           value={draft.reject}
@@ -192,7 +192,7 @@ function InlineNumber({
 }) {
   return (
     <input
-      type="number"
+      type="text"
       inputMode="decimal"
       aria-label={ariaLabel}
       value={value}

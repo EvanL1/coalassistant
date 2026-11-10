@@ -73,6 +73,7 @@ function add(name: string) { fireEvent.change(screen.getByLabelText("添加煤")
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  sessionStorage.clear();
   mocks.prefs = {};
   mocks.contract = null;
   mocks.quantity = 900;
@@ -104,6 +105,8 @@ it("输入始终为空, 最近询价只作 placeholder, 返回再进也为空", 
   expect(input("甲 运费").value).toBe("");
   expect(input("甲 运费").placeholder).toBe("上次 80 (10-28)");
   priceBoth();
+  // 没返回就切走页签会留草稿 (见下方草稿用例); 这里验的是点了返回之后
+  fireEvent.click(screen.getByRole("button", { name: "← 返回今日" }));
   view.unmount();
   await open();
   expect(input("甲 出厂价").value).toBe("");
@@ -117,6 +120,9 @@ it("少于两种有效出厂价不能发请求", async () => {
   fireEvent.click(screen.getByRole("button", { name: "精算" }));
   expect(mocks.solve).not.toHaveBeenCalled();
   expect(mocks.archive).not.toHaveBeenCalled();
+  // 填了 0 是填错, 先指出来; 清掉后才回到"至少填两种"
+  expect(screen.getByText("先改正: 乙 出厂价")).toBeTruthy();
+  fill("乙 出厂价", "");
   expect(screen.getByText("至少填两种煤的出厂价")).toBeTruthy();
 });
 
@@ -164,11 +170,16 @@ it("精算与存档只带本次填价煤和实际指标, 不读旧价格、不�
   expect(master.coals[0].props.S).toBe(0.6);
 });
 
-it("空或非数字指标沿用煤池值, 非数字提示且不存为改动", async () => {
+it("空指标沿用煤池值; 非数字指标提示并禁止精算, 指明哪种煤哪一项", async () => {
   await open(); priceBoth();
   fireEvent.click(screen.getByRole("button", { name: "改这批指标 甲" }));
   fill("甲 S", ""); fill("甲 A", "abc");
-  expect(screen.getByText(/A 不是有效数字/)).toBeTruthy();
+  expect(screen.getByText("请输入数字, 例如 65.3")).toBeTruthy();
+  expect(screen.getByText(/甲 灰/, { selector: ".quote-actionbar-text" })).toBeTruthy();
+  expect((screen.getByRole("button", { name: "精算" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  expect(mocks.archive).not.toHaveBeenCalled();
+  fill("甲 A", "");
   fireEvent.click(screen.getByRole("button", { name: "精算" }));
   await waitFor(() => expect(mocks.archive).toHaveBeenCalled());
   expect(mocks.archive.mock.calls[0][1][1]).toMatchObject({ props: { S: 0.6, A: 9.8 }, changed: [] });
@@ -358,4 +369,128 @@ it("操作条显示已填几种煤, 算完滚到精算结果", async () => {
   const section = await screen.findByRole("region", { name: "精算结果" });
   await waitFor(() => expect(scroll).toHaveBeenCalled());
   expect(scroll.mock.contexts[0]).toBe(section);
+});
+
+it("全角数字、价格千分位、指标里的逗号小数点都认", async () => {
+  await open();
+  fill("甲 出厂价", "２,１５０"); fill("乙 出厂价", "1980");
+  fireEvent.click(screen.getByRole("button", { name: "改这批指标 甲" }));
+  fill("甲 S", "1,1");
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  await waitFor(() => expect(mocks.solve).toHaveBeenCalledTimes(1));
+  const request = JSON.parse(mocks.solve.mock.calls[0][0]);
+  const jia = request.coals.find((c: { name: string }) => c.name === "甲");
+  expect(jia.fob).toBe(2150);
+  expect(jia.props.S).toBe(1.1);
+});
+
+it("出厂价认不出时提示例子, 禁用精算并指明哪种煤哪一项", async () => {
+  await open(); priceBoth(); fill("甲 出厂价", "21五0");
+  expect(screen.getByText("请输入数字, 例如 2050")).toBeTruthy();
+  expect(screen.getByText(/甲 出厂价/, { selector: ".quote-actionbar-text" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  expect(mocks.solve).not.toHaveBeenCalled();
+});
+
+it("只填运费没填出厂价时提示这种煤不参与", async () => {
+  await open(); add("丙"); fill("丙 运费", "80");
+  expect(screen.getByText("没填出厂价, 这种煤不参与")).toBeTruthy();
+});
+
+it("结果注明几种煤未填运费按 0 计", async () => {
+  await open(); priceBoth(); fill("甲 运费", "80");
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  const section = await screen.findByRole("region", { name: "精算结果" });
+  expect(within(section).getByText("1 种煤未填运费, 按 0 计")).toBeTruthy();
+});
+
+it("结果页对明显低于今日估价的报价给警告, 不拦精算", async () => {
+  await open(); fill("甲 出厂价", "2150"); fill("乙 出厂价", "1200");
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  const section = await screen.findByRole("region", { name: "精算结果" });
+  expect(within(section).getByText(/乙 报价比今日估价低 40%/)).toBeTruthy();
+  expect(within(section).queryByText(/甲 报价比今日估价/)).toBeNull();
+  expect(mocks.solve).toHaveBeenCalledTimes(1);
+});
+
+it("精算结果没凑成整铲时提示", async () => {
+  await open(); priceBoth();
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  const section = await screen.findByRole("region", { name: "精算结果" });
+  expect(within(section).getByText(/这次没凑成整铲 \(一铲 3 吨\)/)).toBeTruthy();
+});
+
+it("没点精算就切走页签, 回来接着填; 同一批 batchId", async () => {
+  const first = render(<TodayScreen onNavigate={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "询价精算" }));
+  await screen.findByLabelText("添加煤");
+  fill("甲 出厂价", "2150"); fill("乙 运费", "60");
+  first.unmount();
+  vi.mocked(crypto.randomUUID).mockReturnValue("00000000-0000-4000-8000-000000000002");
+
+  render(<TodayScreen onNavigate={vi.fn()} />);
+  await screen.findByLabelText("添加煤");
+  expect(input("甲 出厂价").value).toBe("2150");
+  expect(input("乙 运费").value).toBe("60");
+  fill("乙 出厂价", "1980");
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  await waitFor(() => expect(mocks.archive).toHaveBeenCalledTimes(1));
+  expect(mocks.archive.mock.calls[0][0]).toBe("00000000-0000-4000-8000-000000000001");
+});
+
+it("精算请求失败不清草稿, 切走再进报价还在", async () => {
+  mocks.solve
+    // 第一次是今日页自己的求解, 第二次才是精算.
+    .mockResolvedValueOnce(JSON.stringify(result()))
+    .mockRejectedValueOnce(new Error("断网"));
+  const first = render(<TodayScreen onNavigate={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "询价精算" }));
+  await screen.findByLabelText("添加煤");
+  priceBoth();
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  await screen.findByText(/精算失败/);
+  first.unmount();
+
+  render(<TodayScreen onNavigate={vi.fn()} />);
+  await screen.findByLabelText("添加煤");
+  expect(input("甲 出厂价").value).toBe("2150");
+  expect(input("乙 出厂价").value).toBe("1980");
+});
+
+it("出厂价敲到一半 (末尾逗号) 不闪红, 失焦才报", async () => {
+  await open();
+  fill("甲 出厂价", "2150,");
+  expect(screen.queryByText("请输入数字, 例如 2050")).toBeNull();
+  expect(screen.queryByText(/先改正/)).toBeNull();
+
+  fireEvent.blur(input("甲 出厂价"));
+  expect(screen.getByText("请输入数字, 例如 2050")).toBeTruthy();
+  expect(screen.getByText(/先改正: 甲 出厂价/)).toBeTruthy();
+});
+
+it("精算后草稿清掉, 再进今日页回到估价结果", async () => {
+  const first = render(<TodayScreen onNavigate={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "询价精算" }));
+  await screen.findByLabelText("添加煤");
+  priceBoth();
+  fireEvent.click(screen.getByRole("button", { name: "精算" }));
+  await screen.findByRole("region", { name: "精算结果" });
+  first.unmount();
+
+  render(<TodayScreen onNavigate={vi.fn()} />);
+  expect(await screen.findByText("今日配煤")).toBeTruthy();
+});
+
+it("返回今日后草稿清掉, 再进精算页输入为空", async () => {
+  const first = render(<TodayScreen onNavigate={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "询价精算" }));
+  await screen.findByLabelText("添加煤");
+  fill("甲 出厂价", "2150");
+  fireEvent.click(screen.getByRole("button", { name: "← 返回今日" }));
+  first.unmount();
+
+  render(<TodayScreen onNavigate={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "询价精算" }));
+  await screen.findByLabelText("添加煤");
+  expect(input("甲 出厂价").value).toBe("");
 });

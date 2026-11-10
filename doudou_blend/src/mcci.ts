@@ -5,6 +5,7 @@
  * 只做展示, 求解用的基准由 /api/benchmarks 给.
  */
 import type { McciSeries, McciPoint } from "./types";
+import { apiFetch } from "./http";
 
 /** 指标展示顺序与写法 (M 按行业习惯写 Mt). */
 const SPEC_ORDER: [key: string, label: string][] = [
@@ -22,7 +23,7 @@ const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 /** 指数总览. 取不到 (离线、服务异常) 返回空表, 卡片不显示. */
 export async function fetchMcci(): Promise<McciSeries[]> {
   try {
-    const response = await fetch("/api/mcci", { credentials: "same-origin", cache: "no-store" });
+    const response = await apiFetch("/api/mcci", { credentials: "same-origin", cache: "no-store" });
     if (!response.ok) return [];
     const result = (await response.json()) as { series?: McciSeries[] };
     return result.series ?? [];

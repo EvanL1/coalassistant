@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   fetchMcci: vi.fn(),
   quantity: { value: 3_700 },
   coalPrefs: { value: {} as CoalPrefs },
+  userContract: { value: null as import("../types").Spec[] | null },
 }));
 
 vi.mock("../coal_index", () => ({
@@ -52,7 +53,7 @@ vi.mock("../storage", () => ({
   getCoalPrefs: () => mocks.coalPrefs.value,
   getQuantity: () => mocks.quantity.value,
   getShovelTons: () => 3,
-  getUserContract: () => null,
+  getUserContract: () => mocks.userContract.value,
   getUserCoals: () => [],
   setQuantity: mocks.setQuantity,
 }));
@@ -141,7 +142,9 @@ beforeEach(() => {
   mocks.fetchMcci.mockResolvedValue([]);
   mocks.quantity.value = 3_700;
   mocks.coalPrefs.value = {};
+  mocks.userContract.value = null;
   localStorage.clear();
+  sessionStorage.clear();
   mocks.getBackend.mockReset();
   mocks.loadMaster.mockReset();
   mocks.setQuantity.mockReset();
@@ -738,6 +741,141 @@ describe("TodayScreen 不可行", () => {
     expect(
       (screen.getByLabelText("采购总吨数") as HTMLInputElement).value,
     ).toBe("3700");
+  });
+
+  it("核心原文里的 LP 术语只在显示时换成人话", async () => {
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeInfeasible([]))),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("✗ 不可行");
+
+    expect(screen.getByText("合同要求互相冲突, 现有的煤怎么配都达不到")).toBeTruthy();
+    expect(screen.queryByText(/LP/)).toBeNull();
+  });
+
+  it("合同缺上限/下限时不给放宽建议、不给重试, 只指向合同页", async () => {
+    // 合同完不完整由今日页直接校验发给核心的 specs, 不靠核心报错文案 ——
+    // 这里核心的 reason 故意写成不相干的话, 指引也必须一样.
+    mocks.userContract.value = [
+      { indicator: "A", direction: "Upper", min: null, max: null, enabled: true },
+    ];
+    const infeasible = makeInfeasible([]);
+    infeasible.reason = "约束冲突, LP 不可行";
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(infeasible)),
+      saveHistory: vi.fn(),
+    });
+    const onNavigate = vi.fn();
+
+    render(<TodayScreen onNavigate={onNavigate} />);
+    await screen.findByText("✗ 不可行");
+
+    expect(screen.queryByText(/放宽某项约束/)).toBeNull();
+    expect(screen.queryByText(/启用更多煤源/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "去「合同」补全" }));
+    expect(onNavigate).toHaveBeenCalledWith("contract");
+  });
+
+  it("合同完整时的不可行仍有重试", async () => {
+    mocks.userContract.value = [
+      { indicator: "A", direction: "Upper", min: null, max: 10, enabled: true },
+    ];
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeInfeasible([]))),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("✗ 不可行");
+
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "去「合同」补全" })).toBeNull();
+  });
+});
+
+describe("TodayScreen 采购吨数输入", () => {
+  it("全角数字与千分位照常认, 输入框是文本框 + 数字键盘", async () => {
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(makeResult(1_000, 3_700))),
+      saveHistory: vi.fn(),
+    });
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+    const input = screen.getByLabelText("采购总吨数") as HTMLInputElement;
+    expect(input.type).toBe("text");
+    fireEvent.change(input, { target: { value: "３,８００" } });
+    fireEvent.blur(input);
+    expect(mocks.setQuantity).toHaveBeenCalledWith(3_800);
+    expect(input.value).toBe("3800");
+  });
+});
+
+describe("TodayScreen 结果提示", () => {
+  function mockSolve(result: BlendResult) {
+    const backend = {
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(result)),
+      saveHistory: vi.fn(),
+    };
+    mocks.getBackend.mockResolvedValue(backend);
+    return backend;
+  }
+
+  it("带了一铲吨数却没凑成整铲: 配方卡与导出清单都提示", async () => {
+    mockSolve(makeResult(1_000, 3_700));
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    expect(screen.getByText(/这次没凑成整铲 \(一铲 3 吨\)/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "导出订单" }));
+    await waitFor(() => expect(mocks.writeText).toHaveBeenCalledTimes(1));
+    expect(mocks.writeText.mock.calls[0][0]).toContain("这次没凑成整铲 (一铲 3 吨)");
+  });
+
+  it("凑成整铲时不提示", async () => {
+    const result = makeResult(1_000, 3_700);
+    result.orders = [{ ...result.orders[0], shovels: 1_233 }];
+    mockSolve(result);
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    expect(screen.queryByText(/没凑成整铲/)).toBeNull();
+  });
+
+  it("基准报价没取到、退回内置基准时, 成本卡提示估价可能不是最新的", async () => {
+    mocks.fetchBenchmarks.mockRejectedValue(new Error("服务异常"));
+    mockSolve(makeResult(1_000, 3_700));
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    expect(screen.getByText(/基准报价没取到/)).toBeTruthy();
+  });
+
+  it("基准报价正常取到时不提示", async () => {
+    mockSolve(makeResult(1_000, 3_700));
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("今日配方");
+
+    expect(screen.queryByText(/基准报价没取到/)).toBeNull();
+  });
+
+  it("求解失败只显示原因, 不带 Error: 前缀", async () => {
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockRejectedValue(new Error("服务暂时不可用")),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+
+    expect(await screen.findByText("服务暂时不可用")).toBeTruthy();
+    expect(screen.queryByText(/Error:/)).toBeNull();
   });
 });
 

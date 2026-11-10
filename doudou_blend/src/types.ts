@@ -551,6 +551,8 @@ export interface BlendResult {
    * 空 = 没有单独一项能解释 (冲突牵涉两项以上, 或煤池本身不够); 旧历史结果亦无此字段.
    */
   infeasible_bounds?: InfeasibleBound[];
+  /** 求解器没算出结论, 也没能证实不可行 (合同也许本来可行). 只在为真时出现. */
+  undetermined?: boolean;
   recipe: Record<string, number>;
   cost?: CostBreakdown | null;
   orders: OrderItem[];

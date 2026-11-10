@@ -1,4 +1,5 @@
 import { INDICATOR_LABEL } from "./types";
+import { numberOrNull } from "./domain/numberInput";
 import type {
   Direction,
   Penalty,
@@ -249,9 +250,14 @@ export function indicatorUnit(indicator: string): string {
   return INDICATOR_UNIT[indicator] ?? "";
 }
 
-/** 空白视作 NaN: `Number("")` 是 0, 会把"没填"错当成"填了 0". */
+/** 空白与认不出的都视作 NaN: `Number("")` 是 0, 会把"没填"错当成"填了 0". */
 function draftNumber(raw: string): number {
-  return raw.trim() === "" ? Number.NaN : Number(raw);
+  return numberOrNull(raw, "indicator") ?? Number.NaN;
+}
+
+/** 扣款金额 (元/吨) 是钱不是指标: 按价格类解析, 千分位 "1,000" 是 1000, 不能按指标逗号算成 1. */
+function draftMoney(raw: string): number {
+  return numberOrNull(raw, "price") ?? Number.NaN;
 }
 
 /** 去掉浮点噪声再转字符串, 免得错误提示里出现 59.999999999999996. */
@@ -337,7 +343,7 @@ export function penaltyFromDraft(
   for (const [index, tier] of draft.tiers.entries()) {
     const position = index + 1;
     const step = draftNumber(tier.step);
-    const amount = draftNumber(tier.amount);
+    const amount = draftMoney(tier.amount);
     // 合法与否只由 tierRate 说了算(0 元是合法档位, 不能拿 0 当错误信号);
     // 下面两条分支只负责把"哪一栏填坏了"讲清楚, 不重复判定。
     const rate = tierRate({ step, amount });
@@ -468,8 +474,8 @@ export interface TemplateDraft {
 /** 0~100 之间的可选百分数; 留空返回 null, 填坏返回 undefined. */
 function optionalPercent(raw: string): number | null | undefined {
   if (raw.trim() === "") return null;
-  const value = Number(raw);
-  return Number.isFinite(value) && value >= 0 && value <= 100 ? value : undefined;
+  const value = numberOrNull(raw, "indicator");
+  return value != null && value >= 0 && value <= 100 ? value : undefined;
 }
 
 /**

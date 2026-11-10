@@ -42,7 +42,16 @@ import {
   getUserCoals,
   setQuantity,
 } from "../storage";
-import { estimateRequest, loadPriceFactor } from "../domain/blendRequest";
+import { estimateRequest, loadPriceFactorWithStatus } from "../domain/blendRequest";
+import {
+  friendlySolverText,
+  shovelRoundingMissed,
+  shovelRoundingNotice,
+} from "../domain/resultNotes";
+import { isContractIncomplete } from "../domain/contract";
+import { clearQuoteDraft, loadQuoteDraft } from "../domain/quoteDraft";
+import { errorMessage } from "../http";
+import { numberOrNull } from "../domain/numberInput";
 import { coalTypeMap } from "../domain/coalTypes";
 import { CostCard } from "./CostCard";
 import { QuoteScreen } from "./QuoteScreen";
@@ -66,6 +75,7 @@ function buildOrderText(
   contractName: string,
   isoDate: string,
   quantity: number,
+  shovelTons: number | null | undefined,
 ): string {
   const cost = result.cost;
   const contractChecks = result.indicator_check.filter(isContractIndicator);
@@ -103,6 +113,9 @@ function buildOrderText(
   if (total_amount != null) {
     lines.push(`总额 ${yuan(total_amount)}`);
   }
+  if (shovelTons != null && shovelRoundingMissed({ shovel_tons: shovelTons }, result)) {
+    lines.push(`注: ${shovelRoundingNotice(shovelTons)}`);
+  }
   return lines.join("\n");
 }
 
@@ -139,8 +152,10 @@ type SolveState =
 
 export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   // 询价精算开着时记下进入那一刻的估价结果: 后台重算 (同步、改煤池) 失败或重算中都不能把精算页
-  // 卸掉, 否则用户当场填的报价就丢了.
-  const [quoting, setQuoting] = useState<BlendResult | null>(null);
+  // 卸掉, 否则用户当场填的报价就丢了. 切走页签再回来时从草稿接着开精算页.
+  const [quoting, setQuoting] = useState<BlendResult | null>(
+    () => loadQuoteDraft()?.todayResult ?? null,
+  );
   const [state, setState] = useState<SolveState>({ status: "loading" });
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -256,7 +271,9 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         ? "用户自定义合同"
         : master.default_contract.name;
 
-      const priceFactor = await loadPriceFactor(master.price_factor);
+      const { priceFactor, benchmarksStale } = await loadPriceFactorWithStatus(
+        master.price_factor,
+      );
       if (!tracker.isCurrent(requestId)) return;
       const request = estimateRequest({
         specs, totalQuantity, shovelTons: getShovelTons(), priceFactor,
@@ -274,12 +291,13 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             contractName,
             enabledCount: estimated.length,
             orphanedGuarantees,
+            benchmarksStale,
           },
         });
       });
     } catch (e) {
       tracker.accept(requestId, () => {
-        setState({ status: "error", error: String(e) });
+        setState({ status: "error", error: errorMessage(e) });
       });
     } finally {
       if (!initial && tracker.isCurrent(requestId)) {
@@ -376,8 +394,9 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
 
   /** 提交采购吨数: 合法则持久化并重算, 非法则回退上次值. */
   function commitQty() {
-    const n = Number(qtyInputRef.current);
-    if (Number.isFinite(n) && n > 0) {
+    // 吨数可能带千分位 (3,700), 按价格类解析.
+    const n = numberOrNull(qtyInputRef.current, "price");
+    if (n != null && n > 0) {
       const normalized = String(n);
       const currentSnapshot =
         state.status === "ok" ? state.snapshot : null;
@@ -423,6 +442,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       snapshot.contractName,
       iso,
       quantity,
+      snapshot.request.shovel_tons,
     );
     const ok = await copyText(text);
     if (
@@ -473,6 +493,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   );
   // 不可行不再提前 return: 页头、输入摘要这些上下文与求解成败无关,
   // 而恰恰是用户排查不可行时唯一的抓手 —— 只把结果区换成诊断面板.
+  // 合同完不完整直接拿发给核心的那份 specs 校验, 不匹配核心报错的中文句子.
+  const contractIncomplete = !result.ok && isContractIncomplete(snapshot.request.specs);
   const cost = result.ok ? result.cost ?? null : null;
   // 总额展示优先 total_net (真实应付合计); 没算扣款条款前两者相等.
   const totalCost = cost ? cost.total_net ?? cost.total_cif : null;
@@ -516,8 +538,8 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </button>
         <span>· 采购</span>
         <input
-          type="number"
-          inputMode="numeric"
+          type="text"
+          inputMode="decimal"
           value={qtyInput}
           onChange={(e) => {
             qtyInputRef.current = e.target.value;
@@ -576,7 +598,11 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
       {cost ? (
       <div className="today-dashboard">
       <div className="today-cost">
-        <CostCard cost={cost} orphanedGuarantees={snapshot.orphanedGuarantees ?? []} />
+        <CostCard
+          cost={cost}
+          orphanedGuarantees={snapshot.orphanedGuarantees ?? []}
+          benchmarksStale={snapshot.benchmarksStale}
+        />
         <div className="cost-card cost-status-card">
           <div className="cost-meta">
             <span className="badge">
@@ -597,12 +623,16 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         </div>
       </div>
 
-      <RecipeCard result={result} coalTypes={coalTypes} />
+      <RecipeCard
+        result={result}
+        coalTypes={coalTypes}
+        shovelTons={snapshot.request.shovel_tons}
+      />
       <IndicatorCard result={result} />
       </div>
       ) : (
         <>
-          <InfeasiblePanel result={result} />
+          <InfeasiblePanel result={result} contractIncomplete={contractIncomplete} />
           {/* 求解侧提示只在没解出来时给: 剔煤、岩相复核这类原因能解释为什么不可行.
               解出来时不显示 —— 今日页只留配方、成本、指标. */}
           {result.warnings.length > 0 && (
@@ -616,13 +646,21 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
             >
               <div className="binding-list-title">提示</div>
               {result.warnings.map((w, i) => (
-                <div key={i}>{w}</div>
+                <div key={i}>{friendlySolverText(w)}</div>
               ))}
             </div>
           )}
           {/* 只在真·不可行时给这条建议: ok 却没有成本结构是结果不完整, 放宽合同
               解决不了, 那时这句是错的指路. */}
-          {!result.ok && (
+          {contractIncomplete && (
+            <p style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}>
+              <button onClick={() => onNavigate("contract")} style={summaryLink}>
+                去「合同」补全
+              </button>
+            </p>
+          )}
+          {/* 合同本身没填完整时放宽、加煤都没用, 不给这条建议. */}
+          {!result.ok && !contractIncomplete && (
             <p style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}>
               建议: 去「合同」放宽某项约束, 或去「煤池」启用更多煤源.
             </p>
@@ -634,23 +672,29 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         <button
           className="btn btn-secondary"
           disabled={refreshing}
-          onClick={() => setQuoting(result)}
+          onClick={() => {
+            clearQuoteDraft();
+            setQuoting(result);
+          }}
         >
           询价精算
         </button>
-        <button
-          className="btn btn-secondary"
-          onClick={() => runSolve(false)}
-          disabled={recompute === "running"}
-        >
-          {recompute === "running"
-            ? "重算中..."
-            : recompute === "done"
-            ? "✓ 已重算"
-            : result.ok
-            ? "重新计算"
-            : "重试"}
-        </button>
+        {/* 合同没填完整时重算多少遍都一样, 不给点了没用的「重试」, 只留去合同页的入口. */}
+        {(result.ok || !contractIncomplete) && (
+          <button
+            className="btn btn-secondary"
+            onClick={() => runSolve(false)}
+            disabled={recompute === "running"}
+          >
+            {recompute === "running"
+              ? "重算中..."
+              : recompute === "done"
+              ? "✓ 已重算"
+              : result.ok
+              ? "重新计算"
+              : "重试"}
+          </button>
+        )}
         {/* 没有配方就没有可导出、可保存的东西, 这两个按钮只在成功时出现. */}
         {result.ok && (
           <>

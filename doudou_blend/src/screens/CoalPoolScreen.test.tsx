@@ -164,3 +164,24 @@ describe("煤池估价走势", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });
+
+describe("煤池加载失败", () => {
+  it("煤库加载失败时说明原因并可重试, 不一直停在加载中", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(reply(snapshot))));
+    mocks.loadMaster.mockReset()
+      .mockRejectedValueOnce(new Error("网络断了"))
+      .mockResolvedValue(master);
+    render(<CoalPoolScreen />);
+    expect(await screen.findByText(/煤池加载失败: 网络断了/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(await screen.findByText("共享煤")).toBeTruthy();
+  });
+
+  it("煤库标为停用的煤, 卡片写明是煤库停用而不是让人去点开启用", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(reply(snapshot))));
+    render(<CoalPoolScreen />);
+    await screen.findByText("停用煤");
+    expect(card("停用煤").textContent).toContain("煤库已停用");
+    expect(card("停用煤").textContent).not.toContain("点击编辑");
+  });
+});

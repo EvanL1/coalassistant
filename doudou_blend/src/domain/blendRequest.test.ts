@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { estimateRequest, loadPriceFactor, quoteRequest, type BlendBase } from "./blendRequest";
+import { estimateRequest, loadPriceFactor, loadPriceFactorWithStatus, quoteRequest, type BlendBase } from "./blendRequest";
 import { resolveCoal, toEstimateCoal } from "./resolvedCoal";
 import type { MasterPriceFactor } from "../types";
 
@@ -36,7 +36,7 @@ describe("请求拼装", () => {
     expect(request.price_factor?.estimate_unpriced).toBe(false);
     expect(request.shovel_tons).toBe(3);
     expect(request.total_quantity).toBe(900);
-    expect(request.specs).toBe(base.specs);
+    expect(request.specs).toEqual(base.specs);
     expect(request.truncate_decimal).toBe(true);
   });
 
@@ -53,5 +53,16 @@ describe("请求拼装", () => {
     expect((await loadPriceFactor({ adjusts: [], benchmarks: [benchmark] })).benchmarks).toEqual([benchmark]);
     expect(mocks.index).not.toHaveBeenCalled();
     expect((await loadPriceFactor({ adjusts: [] })).market_price).toBe(1800);
+  });
+
+  it("基准报价取不到时退回内置基准并标出来, 取到了 (哪怕为空) 不标", async () => {
+    const benchmark = { name: "默认", props: { S: 0.6 }, price: 2000, date: "2026-10-30" };
+    mocks.benchmarks.mockRejectedValueOnce(new Error("服务异常"));
+    const failed = await loadPriceFactorWithStatus({ adjusts: [], benchmarks: [benchmark] });
+    expect(failed.benchmarksStale).toBe(true);
+    expect(failed.priceFactor.benchmarks).toEqual([benchmark]);
+    expect(mocks.benchmarks).toHaveBeenCalledWith({ strict: true });
+    const ok = await loadPriceFactorWithStatus({ adjusts: [], benchmarks: [benchmark] });
+    expect(ok.benchmarksStale).toBe(false);
   });
 });

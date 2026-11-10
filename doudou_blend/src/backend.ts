@@ -8,6 +8,7 @@
  */
 
 import type { BlendResult, HistoryRecord, MeasuredQuality, MixedIndicators } from './types';
+import { apiFetch, readOk } from './http';
 
 interface Backend {
   solveJson: (input: string) => Promise<string>;
@@ -48,12 +49,7 @@ function deriveMixed(result: BlendResult): MixedIndicators | null {
 let cached: Backend | null = null;
 
 async function requestApi(path: string, init?: RequestInit): Promise<string> {
-  const response = await fetch(`/api/${path}`, init);
-  const body = await response.text();
-  if (!response.ok) {
-    throw new Error(body || `HTTP ${response.status}`);
-  }
-  return body;
+  return readOk(await apiFetch(`/api/${path}`, init));
 }
 
 async function makeHttpBackend(): Promise<Backend> {

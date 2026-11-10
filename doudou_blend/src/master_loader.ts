@@ -3,14 +3,21 @@
 import { getBackend } from "./backend";
 import type { CoalMaster } from "./types";
 
-let masterCache: CoalMaster | null = null;
+let masterCache: Promise<CoalMaster> | null = null;
 
-export async function loadMaster(): Promise<CoalMaster> {
+/** 并发调用共用同一个请求; 失败时清掉缓存, 下次调用重新请求. */
+export function loadMaster(): Promise<CoalMaster> {
   if (masterCache) return masterCache;
-  const backend = await getBackend();
-  const json = await backend.getMasterJson();
-  masterCache = JSON.parse(json) as CoalMaster;
-  return masterCache;
+  const pending = (async () => {
+    const backend = await getBackend();
+    const json = await backend.getMasterJson();
+    return JSON.parse(json) as CoalMaster;
+  })();
+  masterCache = pending;
+  pending.catch(() => {
+    if (masterCache === pending) masterCache = null;
+  });
+  return pending;
 }
 
 /** 强制刷新 master cache (用户改了 master 后调用). */

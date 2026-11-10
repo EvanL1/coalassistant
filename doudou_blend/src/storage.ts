@@ -17,7 +17,8 @@ export { normalizeCoalName } from "./domain/coalName";
 
 const KEY_COAL_PREFS = "doudou_blend.coal_prefs.v1";
 const KEY_CONTRACT = "doudou_blend.contract.v1";
-const KEY_HISTORY = "doudou_blend.history.v1";
+/** 本机遗留历史: 登出也要留着 (还没导入云端), localAccount 据此保留. */
+export const KEY_HISTORY = "doudou_blend.history.v1";
 const KEY_USER_COALS = "doudou_blend.user_coals.v1";
 
 /** 单个煤的用户偏好: 启用 + 化验值覆盖. 不存价格: 煤价一律按质量估算. */
@@ -356,6 +357,35 @@ export function getUserStorageSnapshot(): UserStorageSnapshot {
     user_coals: getUserCoals(),
     shovel_tons: getShovelTons(),
   };
+}
+
+/**
+ * 用户快照的稳定序列化 (对象键排序, 煤偏好摘掉旧价格键): 供同步层比较
+ * "本机与云端是不是同一份", 不受键顺序和旧字段影响.
+ */
+export function canonicalUserSnapshot(snapshot: UserStorageSnapshot): string {
+  const prefs: CoalPrefs = {};
+  for (const [name, value] of Object.entries(snapshot.coal_prefs)) {
+    prefs[name] = isRecord(value)
+      ? (withoutLegacyPrice(value) as CoalPref)
+      : { invalid_data: true };
+  }
+  return stableStringify({ ...snapshot, coal_prefs: prefs });
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (value != null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 /** 用服务端快照原子替换本地缓存；调用方应在启动同步监听前执行。 */

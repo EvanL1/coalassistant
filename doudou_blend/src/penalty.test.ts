@@ -209,6 +209,25 @@ describe("penaltyFromDraft 单位换算", () => {
     expect(penalty).toEqual({ tiers: [{ rate: 80 }], reject: 12 });
   });
 
+  it("全角数字与逗号小数点照常认", () => {
+    const { penalty, error } = penaltyFromDraft(
+      { tiers: [{ step: "０,１", amount: "８", width: "" }], reject: "１２" },
+      ashOptions,
+    );
+    expect(error).toBeNull();
+    expect(penalty).toEqual({ tiers: [{ rate: 80 }], reject: 12 });
+  });
+
+  it("扣款金额是钱, 按价格类认千分位: 1,000 是一千不是一", () => {
+    const draft: PenaltyDraft = {
+      tiers: [{ step: "1", amount: "1,000", width: "" }],
+      reject: "12",
+    };
+    const { penalty, error } = penaltyFromDraft(draft, ashOptions);
+    expect(error).toBeNull();
+    expect(penalty).toEqual({ tiers: [{ rate: 1000 }], reject: 12 });
+  });
+
   it("末档不带 width —— core 用缺席表示无上限", () => {
     const { penalty } = penaltyFromDraft(ashDraft, ashOptions);
     expect(penalty?.tiers[0]).not.toHaveProperty("width");
