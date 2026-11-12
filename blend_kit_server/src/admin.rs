@@ -242,6 +242,9 @@ fn master_ranks(master_json: &str) -> HashMap<String, Option<f64>> {
                 coal_type: entry.coal_type,
                 form: None,
                 region: None,
+                province: None,
+                city: None,
+                county: None,
             };
             (entry.name, blend_kit::coal_rank(&coal))
         })

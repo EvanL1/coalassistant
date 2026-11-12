@@ -132,7 +132,7 @@ pub(crate) fn index_benchmarks(
                 "origin": "mcci",
                 "index_code": code,
             });
-            for key in ["coal_type", "form", "region"] {
+            for key in blend_kit::COAL_TAG_KEYS {
                 if let Some(text) = series[key].as_str() {
                     benchmark[key] = json!(text);
                 }
@@ -267,7 +267,8 @@ fn master_benchmarks(master: &Value) -> Vec<Value> {
 async fn all_stored(pool: &PgPool) -> Result<Vec<Value>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT id, name, coal_type, form, region, props, price, quoted_on, source, created_by
+        SELECT id, name, coal_type, form, region, province, city, county,
+               props, price, quoted_on, source, created_by
         FROM price_benchmarks
         ORDER BY name, quoted_on, created_at
         "#,
@@ -275,6 +276,12 @@ async fn all_stored(pool: &PgPool) -> Result<Vec<Value>, sqlx::Error> {
     .fetch_all(pool)
     .await?;
     rows.into_iter().map(stored_row).collect()
+}
+
+/// 数据库测试 (在别的模块里) 读库表基准用.
+#[cfg(test)]
+pub(crate) async fn stored_for_test(pool: &PgPool) -> Vec<Value> {
+    all_stored(pool).await.unwrap()
 }
 
 fn stored_row(row: sqlx::postgres::PgRow) -> Result<Value, sqlx::Error> {
@@ -289,7 +296,7 @@ fn stored_row(row: sqlx::postgres::PgRow) -> Result<Value, sqlx::Error> {
         "created_by": row.try_get::<String, _>("created_by")?,
         "origin": "stored",
     });
-    for key in ["coal_type", "form", "region", "source"] {
+    for key in blend_kit::COAL_TAG_KEYS.into_iter().chain(["source"]) {
         if let Some(text) = row.try_get::<Option<String>, _>(key)? {
             benchmark[key] = json!(text);
         }
@@ -431,7 +438,37 @@ fn parse_benchmark(body: &[u8], master: &Value) -> Result<blend_kit::Benchmark, 
         ..Default::default()
     };
     blend_kit::price_factor::validate(&factor)?;
+    validate_place(
+        &benchmark.name,
+        [&benchmark.province, &benchmark.city, &benchmark.county],
+    )?;
     Ok(benchmark)
+}
+
+/// 省 / 市 / 县一栏最长多少字 (行政区划全称最长 15 字).
+const MAX_PLACE_CHARS: usize = 30;
+
+/// 产地的省 / 市 / 县: 逐级填, 不能跳级 (填了市要有省, 填了县要有市), 不能是空串.
+/// 是不是真有这个地方不在这里查 —— 录入界面只能从行政区划名录里选.
+pub(crate) fn validate_place(name: &str, levels: [&Option<String>; 3]) -> Result<(), String> {
+    const LABELS: [&str; 3] = ["省", "市", "县"];
+    for (index, level) in levels.iter().enumerate() {
+        let Some(text) = level else { continue };
+        if text.trim().is_empty() || text.trim() != text || text.chars().count() > MAX_PLACE_CHARS {
+            return Err(format!(
+                "{name} 的产地 ({}) 须为 1–{MAX_PLACE_CHARS} 字, 前后不带空格",
+                LABELS[index]
+            ));
+        }
+        if index > 0 && levels[index - 1].is_none() {
+            return Err(format!(
+                "{name} 的产地填了{}, 也要填{}",
+                LABELS[index],
+                LABELS[index - 1]
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// POST /api/admin/benchmarks —— 补录一条基准报价 (管理员).
@@ -463,8 +500,10 @@ pub(crate) async fn create(
     let id = Uuid::new_v4().to_string();
     let inserted = sqlx::query(
         r#"
-        INSERT INTO price_benchmarks (id, name, coal_type, form, region, props, price, quoted_on, source, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO price_benchmarks
+            (id, name, coal_type, form, region, province, city, county,
+             props, price, quoted_on, source, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         "#,
     )
     .bind(&id)
@@ -472,6 +511,9 @@ pub(crate) async fn create(
     .bind(&benchmark.coal_type)
     .bind(&benchmark.form)
     .bind(&benchmark.region)
+    .bind(&benchmark.province)
+    .bind(&benchmark.city)
+    .bind(&benchmark.county)
     .bind(json!(benchmark.props))
     .bind(benchmark.price)
     .bind(quoted_on)
@@ -633,7 +675,7 @@ mod tests {
     fn index_config() -> Vec<Value> {
         vec![
             json!({"code": "LJM_DLZJM", "type_name": "低硫主焦煤", "name": "低硫主焦煤指数",
-                   "coal_type": "焦煤", "form": "精煤", "region": "山西",
+                   "coal_type": "焦煤", "form": "精煤", "province": "山西省",
                    "props": {"A": 9.5, "S": 0.6, "V": 25, "G": 85, "M": 10}}),
             json!({"code": "LJM_GLZJM", "type_name": "高硫主焦煤", "name": "高硫主焦煤指数",
                    "coal_type": "焦煤", "form": "精煤", "region": "山西",
@@ -668,6 +710,16 @@ mod tests {
         assert_eq!(low["price"], 2321.0);
         assert_eq!(low["date"], "2026-10-26");
         assert_eq!(low["coal_type"], "焦煤");
+        // 指数按省发布: 只带省, 不带市 —— 省内的煤都把它当本地.
+        assert_eq!(low["province"], "山西省");
+        assert!(low.get("city").is_none() && low.get("region").is_none());
+        // 旧写法的配置 (只有 region) 照抄, 不替它猜省市.
+        let high = indexed
+            .iter()
+            .find(|b| b["name"] == "高硫主焦煤指数")
+            .unwrap();
+        assert_eq!(high["region"], "山西");
+        assert!(high.get("province").is_none());
         assert_eq!(low["props"]["S"], 0.6);
         assert_eq!(low["origin"], "mcci");
         assert_eq!(low["index_code"], "LJM_DLZJM");
@@ -836,6 +888,54 @@ mod tests {
         let forged =
             br#"{"name":"x","props":{"S":1.3},"price":2000,"date":"2026-10-16","current_price":1}"#;
         assert!(parse_benchmark(forged, &master).is_err());
+        let placed = r#"{"name":"x","props":{"S":1.3},"price":2000,"date":"2026-10-16","province":"山西省","city":"晋中市","county":"灵石县"}"#;
+        let parsed = parse_benchmark(placed.as_bytes(), &master).unwrap();
+        assert_eq!(parsed.city.as_deref(), Some("晋中市"));
+        let skipped = r#"{"name":"x","props":{"S":1.3},"price":2000,"date":"2026-10-16","province":"山西省","county":"灵石县"}"#;
+        assert!(parse_benchmark(skipped.as_bytes(), &master)
+            .unwrap_err()
+            .contains("也要填市"));
+    }
+
+    #[test]
+    fn test_validate_place_wants_whole_levels_without_gaps() {
+        let text = |value: &str| Some(value.to_string());
+        let check = |province: Option<String>, city: Option<String>, county: Option<String>| {
+            validate_place("某煤", [&province, &city, &county])
+        };
+        // 知道到哪一级填到哪一级, 都不填也行.
+        assert_eq!(check(None, None, None), Ok(()));
+        assert_eq!(check(text("山西省"), None, None), Ok(()));
+        assert_eq!(check(text("山西省"), text("晋中市"), None), Ok(()));
+        assert_eq!(
+            check(text("山西省"), text("晋中市"), text("灵石县")),
+            Ok(())
+        );
+        // 跳级.
+        assert!(check(None, text("晋中市"), None)
+            .unwrap_err()
+            .contains("也要填省"));
+        assert!(check(text("山西省"), None, text("灵石县"))
+            .unwrap_err()
+            .contains("也要填市"));
+        // 空串、首尾空格、超长.
+        for bad in [
+            "",
+            "  ",
+            " 山西省",
+            "山西省 ",
+            &"省".repeat(MAX_PLACE_CHARS + 1),
+        ] {
+            let error = check(text(bad), None, None).unwrap_err();
+            assert!(
+                error.contains("某煤") && error.contains("(省)"),
+                "{bad:?}: {error}"
+            );
+        }
+        assert_eq!(
+            check(text(&"省".repeat(MAX_PLACE_CHARS)), None, None),
+            Ok(())
+        );
     }
 
     #[test]

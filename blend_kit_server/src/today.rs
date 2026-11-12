@@ -531,8 +531,8 @@ pub fn build(
 /// 进求解的煤: 不带报价, 核心按估算价并入煤池.
 fn request_coal(coal: &ResolvedCoal) -> Value {
     let mut out = json!({ "name": coal.name, "props": coal.props, "fob": 0.0, "frt": 0.0 });
-    // 煤种、形态、地区不进 LP, 估价按它们逐层对标基准.
-    for key in ["coal_type", "form", "region"] {
+    // 煤种、形态、产地不进 LP, 估价按它们对标基准.
+    for key in blend_kit::COAL_TAG_KEYS {
         if let Some(text) = coal.entry.get(key).and_then(Value::as_str) {
             out[key] = json!(text);
         }
@@ -549,7 +549,7 @@ mod tests {
             "price_factor": {"description": "出处", "adjusts": []},
             "coals": [
                 {"name": "有价", "status": "verified", "coal_type": "焦煤", "props": {"S": 1.0}, "fob": 1000, "frt": 50},
-                {"name": "无价", "status": "active", "coal_type": "瘦煤", "form": "筛选精煤", "region": "山西临汾", "props": {"S": 0.5}, "frt": 30},
+                {"name": "无价", "status": "active", "coal_type": "瘦煤", "form": "筛选精煤", "region": "山西临汾", "province": "山西省", "city": "临汾市", "county": "安泽县", "props": {"S": 0.5}, "frt": 30},
                 {"name": "停了", "status": "archived", "props": {"S": 0.5}},
                 {"name": "没启用", "status": "active", "props": {"S": 0.5}},
             ]
@@ -600,7 +600,8 @@ mod tests {
             json!([
                 {"name": "有价", "props": {"S": 1.0}, "fob": 0.0, "frt": 0.0, "coal_type": "焦煤"},
                 {"name": "无价", "props": {"S": 0.5}, "fob": 0.0, "frt": 0.0, "coal_type": "瘦煤",
-                 "form": "筛选精煤", "region": "山西临汾"}
+                 "form": "筛选精煤", "region": "山西临汾",
+                 "province": "山西省", "city": "临汾市", "county": "安泽县"}
             ])
         );
         // 与网页一致: 不做价格稳健性分析
