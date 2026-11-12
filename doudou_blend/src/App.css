@@ -1483,3 +1483,16 @@ button {
     bottom: 16px;
   }
 }
+
+/* 产地: 省 / 市 / 县三个下拉并排, 窄屏折行. */
+.edit-place {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 8px;
+  flex: 2;
+}
+.edit-place .edit-input {
+  width: auto;
+  max-width: 9em;
+}

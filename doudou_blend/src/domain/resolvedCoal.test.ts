@@ -39,6 +39,19 @@ describe("resolveCoal", () => {
     ).toBe("筛选精煤");
   });
 
+  it("产地的省、市、县随煤进求解请求; 没填的不带键", () => {
+    const placed: MasterCoalEntry = {
+      ...masterCoal, region: null, province: "山西省", city: "晋中市", county: "灵石县",
+    };
+    expect(toEstimateCoal(resolveCoal(placed, null, "master"))).toMatchObject({
+      province: "山西省", city: "晋中市", county: "灵石县",
+    });
+    const provinceOnly = toEstimateCoal(resolveCoal({ ...placed, city: null, county: null }, null, "master"));
+    expect(provinceOnly).toMatchObject({ province: "山西省" });
+    expect(provinceOnly).not.toHaveProperty("city");
+    expect(provinceOnly).not.toHaveProperty("county");
+  });
+
   it("master 里残留的出厂价/运费不进求解", () => {
     const resolved = resolveCoal({ ...masterCoal, fob: 1_000, frt: 100 }, null, "master");
 

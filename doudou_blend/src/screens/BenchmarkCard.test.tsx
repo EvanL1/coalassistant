@@ -21,7 +21,7 @@ function draft(extra: Partial<Parameters<typeof draftToBenchmark>[0]> = {}) {
     name: "晋中中硫主焦",
     coal_type: "焦煤",
     form: "精煤",
-    region: " 山西晋中 ",
+    place: { province: "山西省", city: "晋中市" },
     price: "2050",
     date: "2026-10-16",
     source: "",
@@ -36,14 +36,19 @@ describe("draftToBenchmark", () => {
       name: "晋中中硫主焦",
       coal_type: "焦煤",
       form: "精煤",
-      region: "山西晋中",
+      province: "山西省",
+      city: "晋中市",
       props: { S: 1.3, A: 10.5, G: 80 },
       price: 2050,
       date: "2026-10-16",
       source: undefined,
     });
-    expect(draftToBenchmark(draft({ region: "" })))
-      .toMatchObject({ region: undefined });
+    // 没选产地: 三个键都不带. 只选了县没选市 (界面上选不出来) 也不带县.
+    const unplaced = draftToBenchmark(draft({ place: {} }));
+    expect(unplaced).not.toHaveProperty("province");
+    expect(unplaced).not.toHaveProperty("region");
+    expect(draftToBenchmark(draft({ place: { province: "山西省", county: "灵石县" } })))
+      .not.toHaveProperty("county");
   });
 
   it("缺品名、价格非正、缺硫分都拦下", () => {

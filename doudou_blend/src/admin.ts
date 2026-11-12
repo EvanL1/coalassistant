@@ -137,6 +137,7 @@ export async function fetchQuoteComparison(): Promise<Omit<QuoteComparisonRespon
     || !result.quotes.every((quote) => quote
       && [quote.id, quote.username, quote.batch_id, quote.quoted_on, quote.name, quote.created_at].every((value) => typeof value === "string")
       && [quote.coal_type, quote.form, quote.region, quote.benchmark].every((value) => value === null || typeof value === "string")
+      && [quote.province, quote.city, quote.county].every((value) => value == null || typeof value === "string")
       && Number.isFinite(quote.fob) && Number.isFinite(quote.frt)
       && [quote.estimate, quote.points, quote.gap, quote.ratio].every((value) => value === null || Number.isFinite(value))
       && quote.props && typeof quote.props === "object" && !Array.isArray(quote.props)

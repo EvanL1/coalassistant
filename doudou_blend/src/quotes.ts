@@ -9,6 +9,9 @@ export interface QuoteItemInput {
   coal_type?: string;
   form?: string;
   region?: string;
+  province?: string;
+  city?: string;
+  county?: string;
   props: Partial<Record<IndicatorKey, number | null>>;
   changed: IndicatorKey[];
 }

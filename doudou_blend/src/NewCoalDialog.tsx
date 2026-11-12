@@ -2,7 +2,7 @@
  * 新增煤种对话框.
  *
  * 入口: 煤池界面右上 + 按钮
- * 字段: 煤名 (必填) / 产地 / 煤种 / 产品形态
+ * 字段: 煤名 (必填) / 产地 (省、市、县逐级下拉) / 煤种 / 产品形态
  * 煤种与形态是受控词表, 选项从 master.schema 读 —— 不在前端另写一份,
  * 否则它会和 check_master_data.mjs 校验的那份漂开 (自建煤不过那道校验).
  * 校验: 实时查重 (Master + 用户已新增), trim + 全角空格 + 大小写无关
@@ -16,6 +16,9 @@ import {
   findDuplicateCoalName,
   normalizeCoalName,
 } from "./storage";
+import { PlaceSelect } from "./PlaceSelect";
+import { placeFields } from "./domain/place";
+import type { Place } from "./domain/place";
 
 interface Props {
   /** 当前所有已存在的煤 (master + user-added) - 用来查重 */
@@ -25,7 +28,7 @@ interface Props {
 
 export function NewCoalDialog({ existing, onClose }: Props) {
   const [name, setName] = useState("");
-  const [region, setRegion] = useState("");
+  const [place, setPlace] = useState<Place>({});
   const [coalType, setCoalType] = useState("");
   const [form, setForm] = useState("");
   const [schema, setSchema] = useState<MasterSchema | null>(null);
@@ -63,7 +66,7 @@ export function NewCoalDialog({ existing, onClose }: Props) {
     if (!canSubmit) return;
     const entry: MasterCoalEntry = {
       name: name.trim(),
-      region: region.trim() || null,
+      ...placeFields(place),
       coal_type: coalType || null,
       form: form || null,
       status: "draft",
@@ -122,13 +125,9 @@ export function NewCoalDialog({ existing, onClose }: Props) {
 
             <div className="edit-row">
               <div className="edit-row-label">产地</div>
-              <input
-                type="text"
-                className="edit-input"
-                value={region}
-                onChange={(e) => setRegion(e.target.value)}
-                placeholder="可选, 如: 山西"
-              />
+              <div className="edit-place">
+                <PlaceSelect value={place} onChange={setPlace} className="edit-input" />
+              </div>
             </div>
 
             <div className="edit-row">

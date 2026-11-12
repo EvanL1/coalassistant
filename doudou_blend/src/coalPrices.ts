@@ -1,6 +1,7 @@
 import type { ResolvedCoal } from "./domain/resolvedCoal";
 import type { Coal, CoalPriceHistory, CoalPriceSnapshot, CoalValue, PriceResult } from "./types";
 import { apiFetch } from "./http";
+import { placeFields } from "./domain/place";
 
 export type CardPrice =
   | { kind: "snapshot"; price: number; change: number | null; missing: string[] }
@@ -79,6 +80,7 @@ export function coalsToEstimate(coals: ResolvedCoal[], snapshot: CoalPriceSnapsh
     .map((coal) => ({
       name: coal.name, props: { ...coal.props }, fob: 0, frt: 0,
       coal_type: coal.coal_type, form: coal.form, region: coal.region,
+      ...placeFields(coal),
     }));
 }
 

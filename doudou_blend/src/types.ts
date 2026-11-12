@@ -119,8 +119,14 @@ export interface Coal {
   coal_type?: string | null;
   /** 产品形态 (精煤/筛选精煤/浮选精煤…), 与煤种并列. 不进 LP; 估价对标用. */
   form?: string | null;
-  /** 产地 (如 "山西临汾"), 与煤种并列. 不进 LP; 估价对标用. */
+  /** 产地的旧写法 (自由文本); 只在没填 province 时用, 按整串是否相同对标. */
   region?: string | null;
+  /** 产地所在省 (行政区划全称, 如 "山西省"); 估价对标按 省 → 市 逐级比. */
+  province?: string | null;
+  /** 产地所在市; 空 = 只知道省. */
+  city?: string | null;
+  /** 产地所在县 / 区; 只记录与展示, 对标不比到县. */
+  county?: string | null;
 }
 
 /** 本次指标评估实际采用的模型摘要. */
@@ -190,8 +196,10 @@ export interface PriceFactor {
   uncertainty?: PriceUncertainty | null;
   /** 基准报价 (带日期的市场价); 有就按指标最接近的基准估价, 优先于 market_price. */
   benchmarks?: Benchmark[];
-  /** 对标时外地基准的距离加罚 (点); 地区只是软偏好. 缺省 = 不看地区. */
+  /** 对标时外地 (外省; 旧写法下是产地写得不一样) 基准的距离加罚 (点); 地区只是软偏好. 缺省 = 不看地区. */
   region_penalty?: number | null;
+  /** 同省不同市的基准的距离加罚 (点), 不大于 region_penalty. 缺省 = 同省就算本地. */
+  city_penalty?: number | null;
   /** 按指标数据对标 (不先分煤种); 缺省 = 按煤种 → 形态分层后取最近的一条. */
   matching?: MatchConfig | null;
 }
@@ -210,9 +218,16 @@ export interface MatchConfig {
 export interface Benchmark {
   name: string;
   coal_type?: string | null;
-  /** 产品形态, 与 Coal.form 同一词表; 估价按 煤种 → 形态 → 地区 逐层对标. */
+  /** 产品形态, 与 Coal.form 同一词表. */
   form?: string | null;
+  /** 产地的旧写法; 只在煤没填 province 时用. */
   region?: string | null;
+  /** 报价所在省, 与 Coal.province 同一词表. */
+  province?: string | null;
+  /** 报价所在市; 空 = 这条报价代表全省 (如按省发布的指数), 省内的煤都不加罚. */
+  city?: string | null;
+  /** 报价所在县 / 区; 只记录与展示. */
+  county?: string | null;
   /** 基准品的指标. */
   props: Partial<Record<string, number>>;
   /** 报价 (元/吨). */
@@ -245,6 +260,9 @@ export interface IndexSeries {
   coal_type: string;
   form?: string;
   region?: string;
+  province?: string;
+  city?: string;
+  county?: string;
   props: Record<string, number>;
 }
 
@@ -267,6 +285,9 @@ export interface McciSeries extends DisplaySeries {
   coal_type?: string;
   form?: string;
   region?: string;
+  province?: string;
+  city?: string;
+  county?: string;
   props?: Record<string, number>;
   display_only?: boolean;
   points: McciPoint[];
@@ -643,7 +664,11 @@ export type Confidence = "high" | "medium" | "low" | "spec";
 
 export interface MasterCoalEntry {
   name: string;
+  /** 产地的旧写法 (自由文本); 新数据用 province / city / county. */
   region?: string | null;
+  province?: string | null;
+  city?: string | null;
+  county?: string | null;
   coal_type?: string | null;
   /** 产品形态 (原煤/精煤/浮选精煤/中煤/煤泥), 与 coal_type 正交. */
   form?: string | null;
@@ -708,6 +733,10 @@ export interface QuoteRecord {
   coal_type: string | null;
   form: string | null;
   region: string | null;
+  /** 旧版服务端不带这三项. */
+  province?: string | null;
+  city?: string | null;
+  county?: string | null;
   fob: number;
   frt: number;
   props: Partial<Record<IndicatorKey, number | null>>;

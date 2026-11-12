@@ -5,6 +5,7 @@
  * 读: 登录即可 (今日屏求解要用). 写: 管理员补录 / 删补录的 (master 的默认值删不了).
  */
 import type { Benchmark, BenchmarkEntry, MasterPriceFactor, PriceFactor } from "./types";
+import { placeFields } from "./domain/place";
 import { apiFetch, readOk } from "./http";
 
 async function request(path: string, init?: RequestInit): Promise<unknown> {
@@ -55,6 +56,7 @@ export function toRequestBenchmark(entry: BenchmarkEntry): Benchmark {
     coal_type: entry.coal_type ?? undefined,
     form: entry.form ?? undefined,
     region: entry.region ?? undefined,
+    ...placeFields(entry),
     props: { ...entry.props },
     price: entry.price,
     date: entry.date,
