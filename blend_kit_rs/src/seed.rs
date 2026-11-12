@@ -66,6 +66,10 @@ pub struct CoalMasterEntry {
     #[serde(default)]
     pub form: Option<String>,
     pub status: MasterStatus,
+    /// 镜质组最大反射率估算值 (Ro,max %, 煤阶): 没有反射率化验时由挥发换算, 见 master
+    /// schema.fields.ro_estimate. 只是存档, 求解器不读.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ro_estimate: Option<f64>,
     /// 8 项化验指标, 缺失项不放
     #[serde(default)]
     pub props: HashMap<String, f64>,

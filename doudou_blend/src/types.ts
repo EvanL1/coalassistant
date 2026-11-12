@@ -673,6 +673,8 @@ export interface MasterCoalEntry {
   /** 产品形态 (原煤/精煤/浮选精煤/中煤/煤泥), 与 coal_type 正交. */
   form?: string | null;
   status: CoalStatus;
+  /** 镜质组最大反射率估算值 (Ro,max %, 煤阶), 由挥发换算; 只是存档, 求解器不读. */
+  ro_estimate?: number | null;
   props: Partial<Record<string, number>>;
   fob?: number | null;
   frt?: number | null;

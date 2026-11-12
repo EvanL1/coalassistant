@@ -128,6 +128,9 @@ function gbCoalType(props) {
   return G > 35 ? "气煤" : "长焰煤";
 }
 
+/** 由挥发换算反射率 (Ro,max %): 与 master schema.fields.ro_estimate、求解器煤阶交互项同一公式. */
+const roFromVdaf = (vdaf) => 2.478 - 0.0458 * vdaf;
+
 // 煤种与国标判据不一致只提示, 不判失败: 有的是用户按实情改标 (如庞庞塔), 有的是
 // Y 只有规格值、真实值可能不过 25, 要人看.
 const notices = [];
@@ -169,6 +172,20 @@ for (const coal of master.coals) {
     if (value < min || value > max) {
       fail(`${label}: ${key}=${value} 超出物理量程 [${min}, ${max}]`);
     }
+  }
+
+  // 反射率估算值: 由 V 换算 (与 schema.fields.ro_estimate 同一公式), 改了 V 要重算.
+  if (coal.ro_estimate != null) {
+    const ro = coal.ro_estimate;
+    if (typeof ro !== "number" || !Number.isFinite(ro) || ro < 0.3 || ro > 3) {
+      fail(`${label}: ro_estimate=${ro} 须为 0.3–3 的数 (Ro,max %)`);
+    } else if (typeof props.V !== "number") {
+      fail(`${label}: 有 ro_estimate 却没有 V, 估算值无从换算`);
+    } else if (Math.abs(ro - roFromVdaf(props.V)) > 0.006) {
+      fail(`${label}: ro_estimate=${ro} 与 V${props.V} 换算值 ${roFromVdaf(props.V).toFixed(2)} 不符 (改了 V 要重算)`);
+    }
+  } else if (typeof props.V === "number") {
+    fail(`${label}: 有 V 却缺 ro_estimate (按 schema.fields.ro_estimate 的公式补)`);
   }
 
   for (const [key, level] of Object.entries(coal.confidence ?? {})) {
