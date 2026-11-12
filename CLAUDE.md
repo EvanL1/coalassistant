@@ -56,8 +56,12 @@ linearized per round so the LP stays linear); absent or k = 0 must leave results
 `price_factor.adjusts`) + pricing against **benchmarks** (`price_factor.benchmarks`: dated market quotes per coal type) —
 each coal is priced by **indicator distance, not by coal type** (`price_factor.matching`): distance = premium differences
 (points) + unpriced indicators such as V (`matching.weights`, points/unit; coal types are defined by V/G/Y, so once V is in
-the distance the `coal_type` label is redundant) + `region_penalty` for other-region benchmarks (soft preference — forcing
-a sparse local benchmark mis-prices by hundreds); all benchmarks compete, shares ∝ exp(−d/`bandwidth`), and
+the distance the `coal_type` label is redundant) + a place penalty for non-local benchmarks (soft preference — forcing
+a sparse local benchmark mis-prices by hundreds; place is three fields `province` / `city` / `county` holding official
+administrative-division names, compared 省 → 市: other province `region_penalty`, same province other city
+`city_penalty`, same city or a province-wide benchmark 0; county is recorded but not compared; the free-text `region`
+is legacy, used only when a coal has no `province`. Entry UIs pick from `doudou_blend/src/data/divisions.json` via
+`PlaceSelect`, and `check:data` validates master against the same file); all benchmarks compete, shares ∝ exp(−d/`bandwidth`), and
 `price = Σ share × benchmark × Q(coal)/Q(benchmark)` (`CoalValue.benchmark_mix` lists the shares). The form layer (`Coal.form`:
 精煤/筛选精煤/浮选精煤…; applied only if such a benchmark exists) stays hard — form is not encoded in V/G/Y. Only when the
 coal lacks a `matching.weights` indicator (or `matching` is absent) is the hard coal-type layer applied first (blending, if
