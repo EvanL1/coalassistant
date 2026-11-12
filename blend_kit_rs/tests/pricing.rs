@@ -233,3 +233,160 @@ fn test_solver_uses_benchmark_prices_for_unpriced_coals() {
     assert_close(&result["cost"]["fob_per_ton"], 2250.0 * 1101.8 / 1099.0);
     assert_eq!(result["coal_values"][0]["benchmark"], "安泽低硫主焦");
 }
+
+/// 分级地区 (省 / 市 / 县): 指标全相同的一组基准, 只靠地区加罚分出远近.
+fn placed(name: &str, province: Option<&str>, city: Option<&str>, county: Option<&str>) -> Value {
+    let mut value = tagged(name, "焦煤", "精煤", None, 1.3);
+    value.as_object_mut().unwrap().remove("region");
+    for (key, text) in [("province", province), ("city", city), ("county", county)] {
+        if let Some(text) = text {
+            value[key] = json!(text);
+        }
+    }
+    value
+}
+
+fn placed_benchmark(
+    name: &str,
+    province: Option<&str>,
+    city: Option<&str>,
+    county: Option<&str>,
+    s: f64,
+) -> Value {
+    let mut value = placed(name, province, city, county);
+    value["props"]["S"] = json!(s);
+    value["price"] = json!(2000.0);
+    value["date"] = json!("2026-10-10");
+    value
+}
+
+/// 外省、同省外市、同市、全省 (只写到省, 硫差 2.5 点) 各一条; 先列的在同分时胜出,
+/// 所以本地的那条放在后面 —— 选中它只能是因为地区.
+fn placed_benchmarks() -> Value {
+    json!([
+        placed_benchmark("外省报价", Some("陕西省"), Some("榆林市"), None, 1.3),
+        placed_benchmark("临汾报价", Some("山西省"), Some("临汾市"), None, 1.3),
+        placed_benchmark(
+            "晋中报价",
+            Some("山西省"),
+            Some("晋中市"),
+            Some("榆次区"),
+            1.3
+        ),
+        placed_benchmark("全省指数", Some("山西省"), None, None, 1.32)
+    ])
+}
+
+fn placed_factor(extra: Value) -> Value {
+    let mut factor = json!({"adjusts": adjusts(), "benchmarks": placed_benchmarks(),
+                            "region_penalty": 10.0, "city_penalty": 4.0});
+    for (key, value) in extra.as_object().unwrap() {
+        factor[key] = value.clone();
+    }
+    factor
+}
+
+#[test]
+fn test_place_penalty_follows_province_then_city() {
+    let output = estimate(&json!({
+        "coals": [
+            // 同市 (县不同也算同市): 不罚.
+            placed("灵石的煤", Some("山西省"), Some("晋中市"), Some("灵石县")),
+            // 同省但没有本市的基准: 市级报价各罚 4 点, 全省指数 (2.5 点) 不罚.
+            placed("长治的煤", Some("山西省"), Some("长治市"), None),
+            // 只知道省: 说不准是哪个市的, 市级报价按同省外市罚; 全省指数不罚.
+            placed("只知道省", Some("山西省"), None, None),
+            // 外省的基准罚满, 本省的不罚.
+            placed("榆林的煤", Some("陕西省"), Some("榆林市"), None)
+        ],
+        "price_factor": placed_factor(json!({}))
+    }));
+    assert_eq!(output["ok"], true, "{output}");
+    let anchor = |name: &str| value(&output, name)["benchmark"].clone();
+    assert_eq!(anchor("灵石的煤"), "晋中报价");
+    assert_eq!(anchor("长治的煤"), "全省指数");
+    assert_eq!(anchor("只知道省"), "全省指数");
+    assert_eq!(anchor("榆林的煤"), "外省报价");
+}
+
+#[test]
+fn test_city_penalty_sets_the_share_of_other_cities() {
+    // 带宽 4 点, 同省外市罚 4 点: 外市报价的份额是本市的 e^-1.
+    let output = estimate(&json!({
+        "coals": [placed("灵石的煤", Some("山西省"), Some("晋中市"), Some("灵石县"))],
+        "price_factor": {
+            "adjusts": adjusts(),
+            "benchmarks": [
+                placed_benchmark("临汾报价", Some("山西省"), Some("临汾市"), None, 1.3),
+                placed_benchmark("晋中报价", Some("山西省"), Some("晋中市"), None, 1.3)
+            ],
+            "region_penalty": 10.0, "city_penalty": 4.0,
+            "matching": {"weights": {}, "bandwidth": 4.0}
+        }
+    }));
+    assert_eq!(output["ok"], true, "{output}");
+    let mix = value(&output, "灵石的煤")["benchmark_mix"]
+        .as_array()
+        .unwrap();
+    let share =
+        |name: &str| mix.iter().find(|entry| entry["name"] == name).unwrap()["share"].clone();
+    let local = 1.0 / (1.0 + (-1.0f64).exp());
+    assert_close(&share("晋中报价"), local);
+    assert_close(&share("临汾报价"), 1.0 - local);
+}
+
+#[test]
+fn test_cities_are_not_told_apart_without_city_penalty() {
+    // 没配 city_penalty: 同省就算本地, 同分取先列的.
+    let mut factor = placed_factor(json!({}));
+    factor.as_object_mut().unwrap().remove("city_penalty");
+    let output = estimate(&json!({
+        "coals": [placed("灵石的煤", Some("山西省"), Some("晋中市"), None)],
+        "price_factor": factor
+    }));
+    assert_eq!(value(&output, "灵石的煤")["benchmark"], "临汾报价");
+}
+
+#[test]
+fn test_benchmark_without_province_counts_as_elsewhere() {
+    // 煤写了省而基准没写: 和旧写法一样当外地, 罚满.
+    let output = estimate(&json!({
+        "coals": [placed("灵石的煤", Some("山西省"), Some("晋中市"), None)],
+        "price_factor": {
+            "adjusts": adjusts(),
+            "benchmarks": [
+                placed_benchmark("没写地区", None, None, None, 1.3),
+                placed_benchmark("临汾报价", Some("山西省"), Some("临汾市"), None, 1.3)
+            ],
+            "region_penalty": 10.0, "city_penalty": 4.0
+        }
+    }));
+    assert_eq!(value(&output, "灵石的煤")["benchmark"], "临汾报价");
+}
+
+#[test]
+fn test_rejects_bad_city_penalty() {
+    for bad in [json!(-1.0), json!(11.0)] {
+        // 负数; 或比外省的加罚还大 (同省外市不该比外省更远).
+        let output = estimate(&json!({
+            "coals": [placed("灵石的煤", Some("山西省"), Some("晋中市"), None)],
+            "price_factor": placed_factor(json!({"city_penalty": bad}))
+        }));
+        assert_eq!(output["ok"], false, "{output}");
+    }
+    // 只配同省外市、没配外地的加罚: 说清楚缺哪个, 不让人去猜 "不能大于 0".
+    let mut factor = placed_factor(json!({}));
+    factor.as_object_mut().unwrap().remove("region_penalty");
+    let output = estimate(&json!({
+        "coals": [placed("灵石的煤", Some("山西省"), Some("晋中市"), None)],
+        "price_factor": factor
+    }));
+    assert_eq!(output["ok"], false, "{output}");
+    assert!(
+        output["reason"]
+            .as_str()
+            .unwrap()
+            .contains("region_penalty"),
+        "{output}"
+    );
+}
