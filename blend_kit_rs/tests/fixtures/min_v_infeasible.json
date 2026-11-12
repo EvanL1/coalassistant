@@ -1,0 +1,35 @@
+{
+ "coals": [
+  {
+   "name": "甲",
+   "props": {
+    "S": 2.2,
+    "A": 10.5,
+    "V": 22,
+    "G": 87
+   },
+   "fob": 1680.73,
+   "frt": 0
+  },
+  {
+   "name": "乙",
+   "props": {
+    "S": 1.85,
+    "A": 9.4,
+    "V": 27,
+    "G": 97
+   },
+   "fob": 1775.47,
+   "frt": 50
+  }
+ ],
+ "specs": [
+  {
+   "indicator": "V",
+   "direction": "Upper",
+   "max": 21.92
+  }
+ ],
+ "total_quantity": null,
+ "truncate_decimal": true
+}

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -198,16 +200,65 @@ pub async fn connect_from_env() -> Option<PgPool> {
         _ => return None,
     };
 
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect(&database_url)
-        .await
-        .unwrap_or_else(|error| panic!("无法连接 PostgreSQL: {error}"));
-    sqlx::migrate!()
+    let pool = retry_startup(&STARTUP_RETRY_DELAYS, || {
+        pool_options().connect(&database_url)
+    })
+    .await
+    .unwrap_or_else(|error| panic!("无法连接 PostgreSQL: {error}"));
+    migrator()
         .run(&pool)
         .await
         .unwrap_or_else(|error| panic!("数据库迁移失败: {error}"));
     Some(pool)
+}
+
+/// 取连接最多等这么久: 数据库出问题时请求快速失败, 不挂满默认的 30 秒.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn pool_options() -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(8)
+        .acquire_timeout(ACQUIRE_TIMEOUT)
+}
+
+/// 启动时首次连库失败后的重试间隔. 每次尝试仍受 [`ACQUIRE_TIMEOUT`] 约束, 合计最多等一分多钟:
+/// 数据库冷启动或跨区建连慢时不至于直接退出 (Railway 只重启几次).
+const STARTUP_RETRY_DELAYS: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(15),
+];
+
+/// 反复尝试 `attempt`, 每次失败后按 `delays` 依次等待; 间隔用完仍失败, 返回最后一次的错误.
+async fn retry_startup<T, E, F, Fut>(delays: &[Duration], mut attempt: F) -> Result<T, E>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut delays = delays.iter();
+    loop {
+        let error = match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let Some(delay) = delays.next() else {
+            return Err(error);
+        };
+        tracing::warn!(%error, retry_in = ?delay, "连接 PostgreSQL 失败, 稍后重试");
+        tokio::time::sleep(*delay).await;
+    }
+}
+
+/// 容忍库里有本二进制不认识的已应用迁移: 回滚到旧镜像时新版迁移已经跑过, 默认设置会
+/// 报 VersionMissing 让服务起不来. 前提是迁移只做加法、兼容上一版代码 (见部署文档).
+fn migrator() -> sqlx::migrate::Migrator {
+    let mut migrator = sqlx::migrate!();
+    migrator.set_ignore_missing(true);
+    migrator
 }
 
 pub async fn health(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -673,6 +724,196 @@ fn empty_array() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pool_fails_fast_and_migrator_tolerates_newer_migrations() {
+        assert_eq!(pool_options().get_acquire_timeout(), ACQUIRE_TIMEOUT);
+        assert!(ACQUIRE_TIMEOUT <= Duration::from_secs(10));
+        assert!(migrator().ignore_missing);
+    }
+
+    /// 按部署文档"回滚到这一版之前的镜像"的步骤走一遍: 旧二进制 (没有 0014、默认不容忍未知迁移)
+    /// 先起不来; 执行文档里的 SQL 后能起来, 临时快照清零; 之后再发布本版, 0014 及之后的迁移能重新执行.
+    /// 每次"启动"用一个新连接池并在用完后关掉, 同进程退出: 迁移失败时 sqlx 不释放咨询锁.
+    #[tokio::test]
+    #[ignore = "需要独立 PostgreSQL, 设置 DATABASE_URL 后用 --ignored 执行"]
+    async fn test_documented_rollback_lets_a_pre_0014_binary_start() {
+        let url = std::env::var("DATABASE_URL").expect("请设置独立测试库 DATABASE_URL");
+        let admin = PgPool::connect(&url).await.unwrap();
+        let schema = format!("rollback_test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let connect = || {
+            let schema = schema.clone();
+            PgPoolOptions::new()
+                .max_connections(1)
+                .after_connect(move |connection, _| {
+                    let schema = schema.clone();
+                    Box::pin(async move {
+                        sqlx::query("SELECT set_config('search_path', $1, false)")
+                            .bind(schema)
+                            .execute(connection)
+                            .await?;
+                        Ok(())
+                    })
+                })
+                .connect(&url)
+        };
+        let old_migrations = tempfile::tempdir().unwrap();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        for entry in std::fs::read_dir(&source).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.as_str() < "0014" {
+                std::fs::copy(&path, old_migrations.path().join(&name)).unwrap();
+            }
+        }
+        let old = sqlx::migrate::Migrator::new(old_migrations.path())
+            .await
+            .unwrap();
+
+        let steps = async {
+            let current = connect().await?;
+            migrator().run(&current).await?;
+            sqlx::query(
+                "INSERT INTO coal_price_daily (day, name, price, points, source)
+                 VALUES ('2026-11-01', '测试煤', 2000, 1000, 'partial')",
+            )
+            .execute(&current)
+            .await?;
+            current.close().await;
+
+            let rollback = connect().await?;
+            let refused = old.run(&rollback).await.is_err();
+            rollback.close().await;
+
+            let console = connect().await?;
+            sqlx::query("UPDATE coal_price_daily SET source = 'live' WHERE source = 'partial'")
+                .execute(&console)
+                .await?;
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 14")
+                .execute(&console)
+                .await?;
+            console.close().await;
+
+            let rollback = connect().await?;
+            let old_started = old.run(&rollback).await.map_err(|error| error.to_string());
+            let partial: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM coal_price_daily WHERE source = 'partial'",
+            )
+            .fetch_one(&rollback)
+            .await?;
+            rollback.close().await;
+
+            let redeploy = connect().await?;
+            let redeployed = migrator()
+                .run(&redeploy)
+                .await
+                .map_err(|error| error.to_string());
+            redeploy.close().await;
+            Ok::<_, sqlx::Error>((refused, old_started, partial, redeployed))
+        }
+        .await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let (refused, old_started, partial, redeployed) = steps.unwrap();
+        assert!(refused, "旧二进制应因不认识 0014 拒绝启动");
+        assert_eq!(old_started, Ok(()));
+        assert_eq!(partial, 0);
+        assert_eq!(redeployed, Ok(()));
+    }
+
+    /// 启动时首次连库: 重试的间隔加起来要有几十秒, 冷启动或跨区建连慢也等得到.
+    #[test]
+    fn test_startup_connect_waits_tens_of_seconds_in_total() {
+        let slept: Duration = STARTUP_RETRY_DELAYS.iter().sum();
+        let worst = slept + ACQUIRE_TIMEOUT * (STARTUP_RETRY_DELAYS.len() as u32 + 1);
+        assert!(slept >= Duration::from_secs(30), "{slept:?}");
+        assert!(worst <= Duration::from_secs(120), "{worst:?}");
+        assert!(STARTUP_RETRY_DELAYS
+            .windows(2)
+            .all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[tokio::test]
+    async fn test_startup_retry_succeeds_after_transient_failures() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let delays = [Duration::from_millis(1); 4];
+        let result: Result<&str, String> = retry_startup(&delays, || {
+            let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if call < 2 {
+                    Err(format!("第 {call} 次连不上"))
+                } else {
+                    Ok("连上了")
+                }
+            }
+        })
+        .await;
+        assert_eq!(result, Ok("连上了"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_startup_retry_gives_up_with_the_last_error() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let delays = [Duration::from_millis(1); 2];
+        let result: Result<(), String> = retry_startup(&delays, || {
+            let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Err(format!("第 {call} 次连不上")) }
+        })
+        .await;
+        assert_eq!(result, Err("第 2 次连不上".to_string()));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// 模拟回滚: 库里已有一条本二进制没有的 (更新的) 迁移, 再跑一遍迁移不能失败.
+    #[tokio::test]
+    #[ignore = "需要独立 PostgreSQL, 设置 DATABASE_URL 后用 --ignored 执行"]
+    async fn test_migrations_survive_rollback_to_older_binary() {
+        let url = std::env::var("DATABASE_URL").expect("请设置独立测试库 DATABASE_URL");
+        let admin = PgPool::connect(&url).await.unwrap();
+        let schema = format!("migrate_test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let session_schema = schema.clone();
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .after_connect(move |connection, _| {
+                let schema = session_schema.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('search_path', $1, false)")
+                        .bind(schema)
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&url)
+            .await
+            .unwrap();
+        migrator().run(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+             VALUES (99999999, 'future', TRUE, '\\x00', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let rerun = migrator().run(&pool).await;
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        rerun.unwrap();
+    }
 
     #[test]
     fn user_storage_rejects_invalid_shapes() {

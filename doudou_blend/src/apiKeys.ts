@@ -5,6 +5,8 @@
  * 复制, 页面刷新就再也取不回来了.
  */
 
+import { apiFetch, readOk } from "./http";
+
 /** 密钥用途: data = 写煤库 (调研录入), mcp = 手机 Agent 只读 + 求解. */
 export type KeyScope = "data" | "mcp";
 
@@ -19,20 +21,9 @@ export interface ApiKey {
 }
 
 async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(`/api/admin/${path}`, {
-    credentials: "same-origin",
-    ...init,
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    let reason = text;
-    try {
-      reason = (JSON.parse(text) as { reason?: string }).reason ?? text;
-    } catch {
-      // 非 JSON 错误体, 原样回显
-    }
-    throw new Error(reason || `HTTP ${response.status}`);
-  }
+  const text = await readOk(
+    await apiFetch(`/api/admin/${path}`, { credentials: "same-origin", ...init }),
+  );
   return text ? JSON.parse(text) : null;
 }
 

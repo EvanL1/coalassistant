@@ -83,7 +83,7 @@ export function TabBar({ active, onChange }: Props) {
       ))}
       <div className="tab-bar-footer">
         <span className="tab-bar-status" />
-        Rust API 已连接
+        服务已连接
       </div>
     </nav>
   );

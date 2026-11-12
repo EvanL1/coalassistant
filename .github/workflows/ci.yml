@@ -6,9 +6,27 @@ on:
     branches: [main, master]
   pull_request:
 
+env:
+  # 与根目录 Dockerfile 的 rust:1.88 对齐, 避免 CI 绿而镜像编不过; 两处要一起改.
+  RUST_TOOLCHAIN: "1.88"
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: doudou_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -29,16 +47,19 @@ jobs:
       - name: Check master data
         run: node scripts/check_master_data.mjs
 
-      - name: Test frontend
+      - name: Test frontend (with coverage thresholds)
         working-directory: doudou_blend
-        run: npm test
+        run: npm run test:coverage
 
       - name: Build frontend
         working-directory: doudou_blend
         run: npm run build
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -49,29 +70,79 @@ jobs:
 
       - name: Test blend_kit
         working-directory: blend_kit_rs
-        run: cargo test --release
+        run: cargo test --release --locked
 
       - name: Build blend_kit demo
         working-directory: blend_kit_rs
-        run: cargo run --release --example demo
+        run: cargo run --release --locked --example demo
 
       - name: Build blend_kit master_demo
         working-directory: blend_kit_rs
-        run: cargo run --release --example master_demo
+        run: cargo run --release --locked --example master_demo
 
       - name: Test Web server
         working-directory: blend_kit_server
         run: cargo test --locked
+
+      # 生产启动时按顺序执行全部迁移 (每个文件一个事务), 这里照样在空库上跑一遍.
+      - name: Apply server migrations to PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for f in blend_kit_server/migrations/*.sql; do
+            echo "== $f"
+            psql -h localhost -U postgres -d doudou_test \
+              -v ON_ERROR_STOP=1 --single-transaction -q -f "$f"
+          done
+
+      # 跑需要数据库的 #[ignore] 测试. 联网的 #[ignore] 测试 (如 mcci 实拉钢铁网) 不在这里跑:
+      # 约定这类测试的名字里带 live, 用 --skip 排除.
+      - name: Test Web server against PostgreSQL
+        working-directory: blend_kit_server
+        shell: bash
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/doudou_test
+        # 过滤名一旦对不上会"0 个测试也通过", 所以要求至少跑过一个.
+        run: |
+          cargo test --locked --lib -- --ignored --skip live --test-threads=1 2>&1 | tee "$RUNNER_TEMP/db_tests.log"
+          grep -Eq 'test result: ok\. [1-9]' "$RUNNER_TEMP/db_tests.log"
 
       - name: Format check
         run: |
           cargo fmt --manifest-path blend_kit_rs/Cargo.toml -- --check
           cargo fmt --manifest-path blend_kit_server/Cargo.toml -- --check
 
+      # clippy 1.88 把 uninlined_format_args 临时列为默认 lint (之后的版本又移回 pedantic),
+      # 现有代码按新版 clippy 写, 这里放行这一条, 其余 lint 照常拦.
       - name: Clippy (blend_kit)
         working-directory: blend_kit_rs
-        run: cargo clippy --release -- -D warnings
+        run: cargo clippy --release --locked -- -D warnings -A clippy::uninlined_format_args
 
       - name: Clippy (Web server)
         working-directory: blend_kit_server
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings -A clippy::uninlined_format_args
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 只审计会进生产包的依赖; 开发依赖的漏洞不阻塞合并.
+      - name: Audit frontend dependencies
+        working-directory: doudou_blend
+        run: npm audit --omit=dev
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # 放行项及原因见 blend_kit_server/.cargo/audit.toml.
+      - name: Audit server dependencies
+        working-directory: blend_kit_server
+        run: cargo audit

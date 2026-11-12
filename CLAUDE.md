@@ -56,8 +56,12 @@ linearized per round so the LP stays linear); absent or k = 0 must leave results
 `price_factor.adjusts`) + pricing against **benchmarks** (`price_factor.benchmarks`: dated market quotes per coal type) —
 each coal is priced by **indicator distance, not by coal type** (`price_factor.matching`): distance = premium differences
 (points) + unpriced indicators such as V (`matching.weights`, points/unit; coal types are defined by V/G/Y, so once V is in
-the distance the `coal_type` label is redundant) + `region_penalty` for other-region benchmarks (soft preference — forcing
-a sparse local benchmark mis-prices by hundreds); all benchmarks compete, shares ∝ exp(−d/`bandwidth`), and
+the distance the `coal_type` label is redundant) + a place penalty for non-local benchmarks (soft preference — forcing
+a sparse local benchmark mis-prices by hundreds; place is three fields `province` / `city` / `county` holding official
+administrative-division names, compared 省 → 市: other province `region_penalty`, same province other city
+`city_penalty`, same city or a province-wide benchmark 0; county is recorded but not compared; the free-text `region`
+is legacy, used only when a coal has no `province`. Entry UIs pick from `doudou_blend/src/data/divisions.json` via
+`PlaceSelect`, and `check:data` validates master against the same file); all benchmarks compete, shares ∝ exp(−d/`bandwidth`), and
 `price = Σ share × benchmark × Q(coal)/Q(benchmark)` (`CoalValue.benchmark_mix` lists the shares). The form layer (`Coal.form`:
 精煤/筛选精煤/浮选精煤…; applied only if such a benchmark exists) stays hard — form is not encoded in V/G/Y. Only when the
 coal lacks a `matching.weights` indicator (or `matching` is absent) is the hard coal-type layer applied first (blending, if
@@ -91,9 +95,25 @@ each coal is either unused or ≥ 1 shovel, in whole shovels (one shovel = 1/N, 
 Branch-and-bound over "drop it / floor it at one shovel" (floors go into the LP as `BlendRequest.min_ratios` rows),
 then largest-remainder rounding to whole shovels (`OrderItem.shovels`) evaluated through the fixed-ratio path plus the
 exact petrography review (`optimizer::review_petrography`, shared with the LP path), with a one-shovel-swap repair if
-rounding breaks a spec. Blend values come from the root LP; price-robustness re-solves also go through the shovel
+rounding breaks a spec. 合同按「保留 1 位小数、截断」判定 (用户确认的真实规则), LP 把上限用到下一格减 ε, 配方常顶在
+合同界上、一点余地都没有, 挪一铲也救不回; 这时给被凑整顶破的那几项加安全余量 (`Spec::margin`, 按判定步长的
+`HEADROOM_STEPS` 逐级加大) 重新分支定界再凑整, 凑整后的验算仍按原合同, 成功时置 `BlendResult.shovel_extra_cost`
+(比不凑整多花的元/吨, 只在有值时序列化); 都不行才退回未凑整的配方并提示。Blend values come from the root LP; price-robustness re-solves also go through the shovel
 wrapper. The shovel size is a per-user setting (我的 page, `web_user_state.shovel_tons`, NULL = default 3 t; saved with
 COALESCE so pre-deploy clients can't reset it). Absent = byte-identical.
+
+**求解失败分两种, 不要混报.** 求解器证实不可行, 或逐项诊断找到了真凶, 报"约束冲突, LP 不可行" (原文被界面
+和历史记录照存, 不要改字)。求解器迭代用尽/数值错误而诊断也证实不了时, 如实说没算出可靠结论, 并置
+`BlendResult.undetermined` (只在为真时序列化) —— 界面与 MCP 据此不引导用户去放宽合同。解后复核差一丝没过时
+只收紧没过的行重解。
+
+**输出的配方必须自己经得起验算.** `recipe` 与订单默认只含占比 > 1e-5 的煤 (再小是求解残差)。但合同卡在判定
+边缘时, 解可能靠一种占比百万分之几的煤才达标; 截掉它, 照着输出的配方回放 (`fixed_ratios`) 就不达标。所以
+`optimizer::output_grain` 在"截掉零头后的配方按合同判定不达标"时, 从大到小把零头煤放回、取刚好达标的门槛。
+留下来的零头煤在按整铲配时会被分支定界看见: 要么去掉, 要么给足一铲。
+
+**服务端的计算闸门** (`blend_kit_server/src/limits.rs`): 求解与估价共用一个按核数的并发上限加超时;
+登录有全站并发上限, 按来源 IP 锁定默认关 (`LOGIN_IP_LOCKOUT`, 见 `docs/railway-deployment.md`)。
 
 **Frontend screens** (`doudou_blend/src/screens/`): 今日 `TodayScreen` (solve + cost/recipe/8-indicator view,
 real purchase-qty input, export orders, save-to-history, input-summary panel), 煤池 `CoalPoolScreen`
@@ -109,6 +129,13 @@ frontend bundle. Screens read master data through `master_loader.ts`'s `loadMast
 `GET /api/master`) is the canonical coal set and is never mutated. User edits (enable/hide, assay overrides) persist separately:
 `localStorage` acts as a synchronous cache (`doudou_blend/src/storage.ts`) and `cloudStorage.ts` mirrors it to
 PostgreSQL through `GET/PUT /api/storage` after login.
+
+**云端同步的规则.** 线上所有登录者共用一个 Web 账号、同一行数据, 写回是整份快照、服务端没有版本号。
+所以 `cloudStorage.ts` 在本机记两样东西: "有改动没同步"的标记, 和上次确认与云端一致时的基线
+(`canonicalUserSnapshot` 的稳定序列化)。初始化时与每次写回前都先拉云端和基线比: 云端还停在基线上才把本机
+推上去; 被别人改过就不推, 由 `SyncBanner` 让用户选用云端还是用本机, 选之前不往云端写任何东西。
+拉与写之间仍有一次往返的窗口, 要彻底堵住得给服务端加版本号。管理员会话不认领也不清空本机的用户数据
+(`localAccount.ts`)。所有接口经 `http.ts` 的 `apiFetch`, 401 统一回登录页。
 
 **估价与询价精算.** 求解默认全按估价: `domain/resolvedCoal.ts` 的 `toEstimateCoal` 与 `today.rs` 都不读
 master 或偏好里的价格键, 启用煤放进 `price_factor.extra_coals`, `coals: []`, 打开 `estimate_unpriced`.

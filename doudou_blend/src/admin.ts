@@ -6,6 +6,7 @@
  */
 
 import type { QuoteComparisonResponse } from "./types";
+import { apiFetch, readOk } from "./http";
 
 export interface AdminSettings {
   /** 煤阶交互罚项系数; null 或 0 = 不启用. 设置后服务端对所有求解自动生效. */
@@ -70,21 +71,9 @@ export interface CoalUpdate {
  * 都原样回显给用户 —— "这个字段基线已有" 之类的理由比 HTTP 码有用得多.
  */
 async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(`/api/${path}`, {
-    credentials: "same-origin",
-    ...init,
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    let reason = text;
-    try {
-      const body = JSON.parse(text) as { reason?: string; errors?: string[] };
-      reason = body.reason ?? body.errors?.join("; ") ?? text;
-    } catch {
-      // 非 JSON 错误体, 原样回显
-    }
-    throw new Error(reason || `HTTP ${response.status}`);
-  }
+  const text = await readOk(
+    await apiFetch(`/api/${path}`, { credentials: "same-origin", ...init }),
+  );
   return text ? JSON.parse(text) : null;
 }
 
@@ -148,6 +137,7 @@ export async function fetchQuoteComparison(): Promise<Omit<QuoteComparisonRespon
     || !result.quotes.every((quote) => quote
       && [quote.id, quote.username, quote.batch_id, quote.quoted_on, quote.name, quote.created_at].every((value) => typeof value === "string")
       && [quote.coal_type, quote.form, quote.region, quote.benchmark].every((value) => value === null || typeof value === "string")
+      && [quote.province, quote.city, quote.county].every((value) => value == null || typeof value === "string")
       && Number.isFinite(quote.fob) && Number.isFinite(quote.frt)
       && [quote.estimate, quote.points, quote.gap, quote.ratio].every((value) => value === null || Number.isFinite(value))
       && quote.props && typeof quote.props === "object" && !Array.isArray(quote.props)

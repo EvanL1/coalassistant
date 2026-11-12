@@ -1,0 +1,131 @@
+{
+ "coals": [
+  {
+   "name": "样煤01",
+   "props": {
+    "S": 3.0,
+    "A": 9.0,
+    "V": 30.7,
+    "G": 61.0,
+    "Y": 11.0,
+    "petro": 0.11,
+    "CSR": 61.0,
+    "M": 10.0
+   },
+   "fob": 1501,
+   "frt": 0
+  },
+  {
+   "name": "样煤02",
+   "props": {
+    "S": 2.54,
+    "A": 11.0,
+    "V": 25.3,
+    "G": 91.0,
+    "Y": 28.0,
+    "petro": 0.13,
+    "CSR": 63.0,
+    "M": 10.0
+   },
+   "fob": 1793,
+   "frt": 85
+  },
+  {
+   "name": "样煤03",
+   "props": {
+    "S": 0.0,
+    "A": 11.1,
+    "V": 16.0,
+    "G": 92.0,
+    "Y": 11.0,
+    "petro": 0.2,
+    "CSR": 65.0,
+    "M": 8.0
+   },
+   "fob": 1362,
+   "frt": 0
+  },
+  {
+   "name": "样煤04",
+   "props": {
+    "S": 3.0,
+    "A": 10.0,
+    "V": 31.0,
+    "G": 78.0,
+    "Y": 8.0,
+    "petro": 0.1,
+    "CSR": 67.0,
+    "M": 10.0
+   },
+   "fob": 1918,
+   "frt": 0
+  },
+  {
+   "name": "样煤05",
+   "props": {
+    "S": 3.0,
+    "A": 8.0,
+    "V": 15.6,
+    "G": 61.0,
+    "Y": 26.0,
+    "petro": 0.13,
+    "CSR": 54.0,
+    "M": 10.0
+   },
+   "fob": 2167,
+   "frt": 85
+  },
+  {
+   "name": "样煤06",
+   "props": {
+    "S": 2.69,
+    "A": 11.8,
+    "V": 20.0,
+    "G": 71.0,
+    "Y": 12.0,
+    "petro": 0.13,
+    "CSR": 48.0,
+    "M": 10.0
+   },
+   "fob": 1181,
+   "frt": 85
+  }
+ ],
+ "specs": [
+  {
+   "indicator": "S",
+   "direction": "Upper",
+   "max": 3.01
+  },
+  {
+   "indicator": "V",
+   "direction": "Upper",
+   "max": 25.4
+  },
+  {
+   "indicator": "G",
+   "direction": "Lower",
+   "min": 78.8,
+   "enforcement": "Soft"
+  },
+  {
+   "indicator": "CSR",
+   "direction": "Lower",
+   "min": 62.8
+  },
+  {
+   "indicator": "M",
+   "direction": "Upper",
+   "max": 10.2,
+   "enforcement": "Advisory"
+  },
+  {
+   "indicator": "petro",
+   "direction": "Upper",
+   "max": 0.13
+  }
+ ],
+ "total_quantity": 1000,
+ "truncate_decimal": true,
+ "shovel_tons": 7
+}

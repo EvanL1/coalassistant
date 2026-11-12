@@ -26,10 +26,15 @@ async fn main() {
 
     info!(%address, static_dir = %public_dir.display(), "豆哥配煤服务已启动");
 
-    axum::serve(listener, blend_kit_server::app(public_dir).await)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("HTTP 服务异常退出");
+    // 带上 TCP 对端地址: 没有代理头时 (本机直连) 登录限速按它区分来源.
+    let app = blend_kit_server::app(public_dir).await;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("HTTP 服务异常退出");
 }
 
 async fn shutdown_signal() {

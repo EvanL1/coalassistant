@@ -17,7 +17,8 @@
 //!   api <METHOD> <路径> [< body]    任意接口
 //! ```
 //!
-//! 档案存在 `$DOUDOU_CONFIG_DIR` (默认 `~/.config/doudou`) 的 profiles.json, 权限 600;
+//! 档案存在 `$DOUDOU_CONFIG_DIR` (默认 `~/.config/doudou`) 的 profiles.json, 文件总是 600;
+//! 默认目录与本程序新建的目录设为 700, 用户指定的已有目录不改权限, 对外开放时只提醒;
 //! 只存会话 cookie, 不存密码. `--profile` 缺省取 `$DOUDOU_PROFILE`, 再缺省为 default.
 //! 输出为接口返回的 JSON. 退出码: 0 = 成功; 1 = 接口报错或 ok=false; 2 = 用法错误.
 
@@ -25,12 +26,20 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const DEFAULT_SERVER: &str = "https://doudou-blend.up.railway.app";
 const SESSION_COOKIE: &str = "doudou_session";
+/// 单次请求的总时长上限; 服务端求解自己最多 60 秒, 这里留足余量.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 认得的命令, 用来区分"命令不认识"和"参数不对".
+const COMMANDS: [&str; 10] = [
+    "login", "logout", "whoami", "profiles", "solve", "eval", "master", "history", "admin", "api",
+];
 const USAGE: &str =
     "用法: doudou [--profile 名称] login [--server URL] <账号> | logout | whoami | profiles \
 | solve|eval < request.json | master | history [measured <id> < x.json] \
@@ -100,14 +109,7 @@ fn parse(args: &[String], default_profile: Option<String>) -> Result<Invocation,
         body: Body::None,
     };
     let command = match args.as_slice() {
-        ["login", "--server", server, username] => Command::Login {
-            server: Some((*server).into()),
-            username: (*username).into(),
-        },
-        ["login", username] => Command::Login {
-            server: None,
-            username: (*username).into(),
-        },
+        ["login", rest @ ..] => parse_login(rest)?,
         ["logout"] => Command::Logout,
         ["whoami"] => Command::Whoami,
         ["profiles"] => Command::Profiles,
@@ -154,9 +156,57 @@ fn parse(args: &[String], default_profile: Option<String>) -> Result<Invocation,
                 body,
             }
         }
-        _ => return Err(USAGE.into()),
+        _ => return Err(usage_error(&args)),
     };
     Ok(Invocation { profile, command })
+}
+
+/// login 的参数: `--server URL` (或 `--server=URL`) 放在账号前后都行, 账号恰好一个.
+fn parse_login(rest: &[&str]) -> Result<Command, String> {
+    let mut server: Option<String> = None;
+    let mut username: Option<String> = None;
+    let mut args = rest.iter();
+    while let Some(arg) = args.next() {
+        let value = match *arg {
+            "--server" => Some(
+                args.next()
+                    .ok_or("login: --server 后面要跟服务地址, 如 --server https://example.com")?
+                    .to_string(),
+            ),
+            other => other.strip_prefix("--server=").map(str::to_string),
+        };
+        if let Some(value) = value {
+            if value.is_empty() || value.starts_with("--") {
+                return Err(format!(
+                    "login: --server 后面要跟服务地址, 收到的是 {value:?}"
+                ));
+            }
+            if server.replace(value).is_some() {
+                return Err("login: --server 只能给一次".into());
+            }
+        } else if arg.starts_with("--") {
+            return Err(format!("login: 不认识的选项 {arg} (只有 --server)"));
+        } else if let Some(first) = username.replace(arg.to_string()) {
+            return Err(format!("login: 只能登录一个账号, 收到了 {first} 和 {arg}"));
+        }
+    }
+    let username = username.ok_or("login: 缺少账号, 用法: doudou login [--server URL] <账号>")?;
+    Ok(Command::Login { server, username })
+}
+
+/// 用法错误说清楚错在哪: 命令不认识, 还是认识但参数不对.
+fn usage_error(args: &[&str]) -> String {
+    match args {
+        [] => USAGE.into(),
+        [command, rest @ ..] if COMMANDS.contains(command) => {
+            if rest.is_empty() {
+                format!("{command}: 缺少参数\n{USAGE}")
+            } else {
+                format!("{command}: 参数不对: {}\n{USAGE}", rest.join(" "))
+            }
+        }
+        [command, ..] => format!("不认识的命令: {command}\n{USAGE}"),
+    }
 }
 
 /// 路径段编码: 历史 id 是 UUID, 这里只防意外字符, 不做完整 URL 编码.
@@ -204,15 +254,39 @@ fn succeeded(status: u16, body: &str) -> bool {
             != Some(false)
 }
 
-fn config_dir() -> PathBuf {
+/// 档案目录. `dedicated`: 本程序专用的默认目录 (…/doudou), 可以收紧权限;
+/// 否则是用户用 `DOUDOU_CONFIG_DIR` 指定的, 可能是家目录或 /tmp 这类共用目录.
+#[derive(Debug, Clone, PartialEq)]
+struct ConfigDir {
+    path: PathBuf,
+    dedicated: bool,
+}
+
+impl ConfigDir {
+    fn dedicated(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            dedicated: true,
+        }
+    }
+
+    fn chosen(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            dedicated: false,
+        }
+    }
+}
+
+fn config_dir() -> ConfigDir {
     if let Some(dir) = std::env::var_os("DOUDOU_CONFIG_DIR") {
-        return PathBuf::from(dir);
+        return ConfigDir::chosen(dir);
     }
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(dir).join("doudou");
+        return ConfigDir::dedicated(PathBuf::from(dir).join("doudou"));
     }
     let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".config").join("doudou")
+    ConfigDir::dedicated(PathBuf::from(home).join(".config").join("doudou"))
 }
 
 fn load_store(dir: &Path) -> Result<Store, String> {
@@ -223,14 +297,29 @@ fn load_store(dir: &Path) -> Result<Store, String> {
     }
 }
 
-/// 写档案: 先写临时文件再改名, 权限 600 —— 里面是会话令牌.
-fn save_store(dir: &Path, store: &Store) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|error| format!("创建配置目录失败: {error}"))?;
-    let path = dir.join("profiles.json");
-    let temporary = dir.join("profiles.json.tmp");
+/// 写档案: 先写临时文件再改名. 里面是会话令牌, 文件总是 600. 目录: 本程序新建的、默认的专用
+/// 目录收紧到 700 (旧版本可能留下宽权限); 用户指定的已有目录不动, 对外开放时只提醒.
+fn save_store(dir: &ConfigDir, store: &Store) -> Result<(), String> {
+    let root = dir.path.as_path();
+    if !root.exists() {
+        create_private_dir(root).map_err(|error| format!("创建配置目录失败: {error}"))?;
+    } else if dir.dedicated {
+        restrict(root, 0o700).map_err(|error| format!("设置配置目录权限失败: {error}"))?;
+    } else if let Some(warning) = exposure_warning(root) {
+        eprintln!("{warning}");
+    }
+    let path = root.join("profiles.json");
+    let temporary = root.join("profiles.json.tmp");
     let text = serde_json::to_string_pretty(store).expect("Store 可序列化");
+    // 上次中断可能留下旧的临时文件 (权限、链接都不可信): 删掉后新建, 不沿用.
+    match std::fs::remove_file(&temporary) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("清理旧的临时档案失败: {error}"));
+        }
+        _ => {}
+    }
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -241,7 +330,61 @@ fn save_store(dir: &Path, store: &Store) -> Result<(), String> {
         .map_err(|error| format!("写档案失败: {error}"))?;
     file.write_all(text.as_bytes())
         .map_err(|error| format!("写档案失败: {error}"))?;
-    std::fs::rename(&temporary, &path).map_err(|error| format!("写档案失败: {error}"))
+    std::fs::rename(&temporary, &path).map_err(|error| format!("写档案失败: {error}"))?;
+    restrict(&path, 0o600).map_err(|error| format!("设置档案权限失败: {error}"))
+}
+
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    restrict(path, 0o700)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
+#[cfg(unix)]
+fn restrict(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn restrict(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// 目录对组或其他用户开放时的提醒; 读不到权限或已收紧时为 None.
+#[cfg(unix)]
+fn exposure_warning(dir: &Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(dir).ok()?.permissions().mode() & 0o777;
+    (mode & 0o077 != 0).then(|| {
+        format!(
+            "警告: 配置目录 {} 对组或其他用户开放 (权限 {mode:o}); 档案文件本身为 600, \
+             但建议把 DOUDOU_CONFIG_DIR 指向只有自己能进的目录",
+            dir.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn exposure_warning(_dir: &Path) -> Option<String> {
+    None
+}
+
+fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(CONNECT_TIMEOUT.min(timeout))
+        .build()
+        .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
 }
 
 fn read_stdin() -> Result<String, String> {
@@ -348,9 +491,9 @@ async fn login(
     }
 }
 
-async fn run(invocation: Invocation, dir: &Path) -> Result<bool, String> {
-    let client = reqwest::Client::new();
-    let mut store = load_store(dir)?;
+async fn run(invocation: Invocation, dir: &ConfigDir) -> Result<bool, String> {
+    let client = http_client(REQUEST_TIMEOUT)?;
+    let mut store = load_store(&dir.path)?;
     let name = invocation.profile;
     let current = || {
         store.profiles.get(&name).cloned().ok_or_else(|| {
@@ -522,6 +665,69 @@ mod tests {
     }
 
     #[test]
+    fn test_login_accepts_server_flag_anywhere() {
+        let expected = Command::Login {
+            server: Some("http://x".into()),
+            username: "zhangsan".into(),
+        };
+        for text in [
+            "login zhangsan --server http://x",
+            "login --server http://x zhangsan",
+            "login --server=http://x zhangsan",
+        ] {
+            assert_eq!(
+                parse(&args(text), None).unwrap().command,
+                expected,
+                "{text}"
+            );
+        }
+        assert_eq!(
+            parse(&args("login zhangsan"), None).unwrap().command,
+            Command::Login {
+                server: None,
+                username: "zhangsan".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_usage_errors_say_what_is_wrong() {
+        let error = |text: &str| parse(&args(text), None).unwrap_err();
+        assert!(error("login").contains("缺少账号"));
+        assert!(error("login zhangsan --server").contains("--server"));
+        assert!(error("login a b").contains('b'));
+        assert!(error("login a --port 1").contains("--port"));
+        assert!(error("login --server x --server y a").contains("一次"));
+        assert!(error("frobnicate").contains("不认识的命令: frobnicate"));
+        assert!(error("history measured").contains("history: 参数不对: measured"));
+        assert!(error("api").contains("api: 缺少参数"));
+    }
+
+    #[tokio::test]
+    async fn test_http_client_gives_up_on_a_silent_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        // 收下连接但从不回应.
+        let _hold = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let profile = Profile {
+            server: format!("http://{address}"),
+            username: "u".into(),
+            admin: false,
+            cookie: "doudou_session=t".into(),
+        };
+        let client = http_client(Duration::from_millis(200)).unwrap();
+        let started = std::time::Instant::now();
+        let result = call(&client, &profile, "GET", "/api/auth/session", None).await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
     fn test_history_measured_encodes_id() {
         let parsed = parse(&args("history measured a/b"), None).unwrap();
         assert!(
@@ -571,7 +777,7 @@ mod tests {
                 cookie: "doudou_session=t".into(),
             },
         );
-        save_store(dir.path(), &store).unwrap();
+        save_store(&ConfigDir::chosen(dir.path()), &store).unwrap();
         assert_eq!(load_store(dir.path()).unwrap(), store);
         #[cfg(unix)]
         {
@@ -582,6 +788,89 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// 默认的专用目录: 旧版本留下的宽权限目录与档案, 写一次就收紧.
+    #[cfg(unix)]
+    #[test]
+    fn test_store_tightens_the_dedicated_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("doudou");
+        std::fs::create_dir(&dir).unwrap();
+        set_mode(&dir, 0o755);
+        std::fs::write(dir.join("profiles.json"), "{}").unwrap();
+        set_mode(&dir.join("profiles.json"), 0o644);
+        save_store(&ConfigDir::dedicated(&dir), &Store::default()).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("profiles.json")), 0o600);
+    }
+
+    /// 用户用 DOUDOU_CONFIG_DIR 指定的已有目录 (家目录、/tmp 之类) 不改权限, 只提醒.
+    #[cfg(unix)]
+    #[test]
+    fn test_store_leaves_a_chosen_existing_dir_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("shared");
+        std::fs::create_dir(&dir).unwrap();
+        set_mode(&dir, 0o755);
+        save_store(&ConfigDir::chosen(&dir), &Store::default()).unwrap();
+        assert_eq!(mode(&dir), 0o755);
+        assert_eq!(mode(&dir.join("profiles.json")), 0o600);
+        assert!(exposure_warning(&dir).unwrap().contains("755"));
+        set_mode(&dir, 0o700);
+        assert_eq!(exposure_warning(&dir), None);
+    }
+
+    /// 指定的目录还不存在: 由本程序新建, 建成 700.
+    #[cfg(unix)]
+    #[test]
+    fn test_store_creates_a_missing_chosen_dir_private() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("a").join("doudou");
+        save_store(&ConfigDir::chosen(&dir), &Store::default()).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("profiles.json")), 0o600);
+    }
+
+    /// 上次中断留下的临时文件先删掉再新建, 不往旧文件 (可能被别人硬链接着) 里写令牌.
+    #[cfg(unix)]
+    #[test]
+    fn test_store_replaces_a_stale_temporary_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("doudou");
+        std::fs::create_dir(&dir).unwrap();
+        let stale = dir.join("profiles.json.tmp");
+        std::fs::write(&stale, "stale").unwrap();
+        set_mode(&stale, 0o644);
+        let other = root.path().join("other");
+        std::fs::hard_link(&stale, &other).unwrap();
+        let mut store = Store::default();
+        store.profiles.insert(
+            "default".into(),
+            Profile {
+                server: "http://x".into(),
+                username: "u".into(),
+                admin: false,
+                cookie: "doudou_session=secret".into(),
+            },
+        );
+        save_store(&ConfigDir::dedicated(&dir), &store).unwrap();
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "stale");
+        assert!(!stale.exists());
+        assert_eq!(load_store(&dir).unwrap(), store);
+        assert_eq!(mode(&dir.join("profiles.json")), 0o600);
     }
 
     /// 端到端: 起一个真实的本地服务, 两个档案分别以普通用户和管理员登录.

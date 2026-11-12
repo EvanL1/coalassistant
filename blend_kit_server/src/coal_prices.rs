@@ -76,10 +76,11 @@ fn snapshot_coal(coal: &Value) -> Result<Value, String> {
         .filter(|(_, value)| !value.is_null())
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    Ok(json!({
-        "name": coal["name"], "props": props, "fob": 0, "frt": 0,
-        "coal_type": coal["coal_type"], "form": coal["form"], "region": coal["region"]
-    }))
+    let mut out = json!({ "name": coal["name"], "props": props, "fob": 0, "frt": 0 });
+    for key in blend_kit::COAL_TAG_KEYS {
+        out[key] = coal[key].clone();
+    }
+    Ok(out)
 }
 
 fn snapshot_rows(master: &Value, benchmarks: &[Value]) -> Result<Vec<PriceRow>, String> {
@@ -256,12 +257,28 @@ fn backfill_rows(
     (rows, skipped)
 }
 
-/// 删写在同一个事务内, 插入失败则原快照完整保留. 实时行, source 取默认 live.
+/// 输入齐全时的实时快照.
+const LIVE: &str = "live";
+/// 输入不全 (CCP 取不到、某条指数序列还没历史) 时的临时快照: 不覆盖当天已有的完整快照,
+/// 自己可被之后的实时快照或补算覆盖, 不会因过了零点就定格.
+const PARTIAL: &str = "partial";
+
+fn snapshot_source(gap: Option<&str>) -> &'static str {
+    if gap.is_some() {
+        PARTIAL
+    } else {
+        LIVE
+    }
+}
+
+/// 删写在同一个事务内, 插入失败则原快照完整保留. 临时快照遇到当天已有完整快照时不写,
+/// 返回 false.
 async fn write_snapshot(
     pool: &PgPool,
     day: NaiveDate,
     rows: &[PriceRow],
-) -> Result<(), sqlx::Error> {
+    source: &str,
+) -> Result<bool, sqlx::Error> {
     let names: Vec<_> = rows.iter().map(|row| row.name.as_str()).collect();
     let prices: Vec<_> = rows.iter().map(|row| row.price).collect();
     let points: Vec<_> = rows.iter().map(|row| row.points).collect();
@@ -269,14 +286,27 @@ async fn write_snapshot(
     let benchmark_prices: Vec<_> = rows.iter().map(|row| row.benchmark_price).collect();
     let missing: Vec<_> = rows.iter().map(|row| json!(row.missing)).collect();
     let mut transaction = pool.begin().await?;
+    if source == PARTIAL {
+        // 锁住当天已有的行, 判断与删写之间不会被并发写入插队.
+        let complete: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM coal_price_daily WHERE day = $1 AND source <> 'partial' FOR UPDATE",
+        )
+        .bind(day)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if !complete.is_empty() {
+            return Ok(false);
+        }
+    }
     sqlx::query("DELETE FROM coal_price_daily WHERE day = $1")
         .bind(day)
         .execute(&mut *transaction)
         .await?;
     sqlx::query(
         r#"
-        INSERT INTO coal_price_daily (day, name, price, points, benchmark, benchmark_price, missing)
-        SELECT $1, name, price, points, benchmark, benchmark_price, missing
+        INSERT INTO coal_price_daily
+            (day, name, price, points, benchmark, benchmark_price, missing, source)
+        SELECT $1, name, price, points, benchmark, benchmark_price, missing, $8
         FROM UNNEST($2::text[], $3::float8[], $4::float8[], $5::text[], $6::float8[], $7::jsonb[])
             AS t(name, price, points, benchmark, benchmark_price, missing)
         "#,
@@ -288,31 +318,63 @@ async fn write_snapshot(
     .bind(&benchmarks)
     .bind(&benchmark_prices)
     .bind(&missing)
+    .bind(source)
     .execute(&mut *transaction)
     .await?;
     // 读库或锁等待跨过零点时回滚, 不能再改昨天.
     if day != beijing_day(Utc::now()) {
         return Err(sqlx::Error::Protocol("估价写入时已跨日, 保留旧快照".into()));
     }
-    transaction.commit().await
+    transaction.commit().await?;
+    Ok(true)
 }
 
-async fn refresh(pool: &PgPool) -> Result<(), String> {
+/// 这一轮实时快照的结果: 输入缺了什么 (None = 齐全), 以及是否写进了库.
+struct RefreshReport {
+    gap: Option<String>,
+    written: bool,
+}
+
+async fn refresh(pool: &PgPool) -> Result<RefreshReport, String> {
     let day = beijing_day(Utc::now());
     let master: Value = serde_json::from_str(&merged_master_json_from_pool(Some(pool)).await?)
         .map_err(|error| error.to_string())?;
-    let (benchmarks, error) = benchmarks::current_from_pool(Some(pool), &master).await;
+    let (inputs, error) = benchmarks::load_inputs(Some(pool)).await;
     if let Some(error) = error {
         return Err(error);
     }
+    let gap = input_gap(&master, &inputs);
+    let benchmarks = benchmarks::as_of(&master, &inputs, day);
     let rows = snapshot_rows(&master, &benchmarks)?;
-    write_snapshot(pool, day, &rows)
+    let written = write_snapshot(pool, day, &rows, snapshot_source(gap.as_deref()))
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(RefreshReport { gap, written })
 }
 
-/// 补算只接受完整输入, 空 CCP 也视为不可用; 交互估价仍可逐层降级.
-/// 只留当基准的序列 (`index_series`) 的历史: 综合指数这类只展示的序列也在 mcci_daily 里,
+/// 定价输入缺了什么: CCP 取不到 (空也算), 或某条当基准的指数序列 (`index_series`) 还没有历史.
+/// 首次启动时指数逐条入库, 查询成功也可能还缺序列. None = 齐全.
+fn input_gap(master: &Value, inputs: &benchmarks::BenchmarkInputs) -> Option<String> {
+    if inputs.ccp.as_ref().is_none_or(Vec::is_empty) {
+        return Some("CCP 指数取不到, 推算缺一层".into());
+    }
+    benchmark_series(master)
+        .into_iter()
+        .find(|code| inputs.history.get(*code).is_none_or(Vec::is_empty))
+        .map(|code| format!("钢铁网指数序列 {code} 尚无历史"))
+}
+
+fn benchmark_series(master: &Value) -> Vec<&str> {
+    master["price_factor"]["index_series"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|series| series["code"].as_str())
+        .collect()
+}
+
+/// 补算只接受完整输入 (见 [`input_gap`]): 补下去就定格了, 不能把缺料的估价永久定格;
+/// 交互估价仍可逐层降级. 只留当基准的序列的历史: 综合指数这类只展示的序列也在 mcci_daily 里,
 /// 但定不出价, 不能决定补算范围 (见 [`latest_index`]、[`earliest_input`]).
 fn require_backfill_inputs(
     master: &Value,
@@ -322,22 +384,10 @@ fn require_backfill_inputs(
     if let Some(error) = error {
         return Err(error);
     }
-    if inputs.ccp.as_ref().is_none_or(Vec::is_empty) {
-        return Err("CCP 指数取不到, 推算缺一层, 不补算".into());
+    if let Some(gap) = input_gap(master, &inputs) {
+        return Err(format!("{gap}, 不补算"));
     }
-    let codes: Vec<&str> = master["price_factor"]["index_series"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|series| series["code"].as_str())
-        .collect();
-    // 首次启动时指数逐条入库, 查询成功也可能还缺序列; 不能把缺料的估价永久定格.
-    if let Some(code) = codes
-        .iter()
-        .find(|code| inputs.history.get(**code).is_none_or(Vec::is_empty))
-    {
-        return Err(format!("钢铁网指数序列 {code} 尚无历史, 不补算"));
-    }
+    let codes = benchmark_series(master);
     inputs
         .history
         .retain(|code, _| codes.contains(&code.as_str()));
@@ -354,16 +404,20 @@ async fn existing_keys(
     pool: &PgPool,
     (start, end): (NaiveDate, NaiveDate),
 ) -> Result<HashSet<(NaiveDate, String)>, sqlx::Error> {
-    let rows: Vec<(NaiveDate, String)> =
-        sqlx::query_as("SELECT day, name FROM coal_price_daily WHERE day BETWEEN $1 AND $2")
-            .bind(start)
-            .bind(end)
-            .fetch_all(pool)
-            .await?;
+    // 临时快照不算已有: 补算按那天的完整输入重算, 替换掉它.
+    let rows: Vec<(NaiveDate, String)> = sqlx::query_as(
+        "SELECT day, name FROM coal_price_daily
+         WHERE day BETWEEN $1 AND $2 AND source <> 'partial'",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().collect())
 }
 
-/// 补算的行只填空: 已有的 (实时定格的、之前补过的) 一律不动. 每批自身幂等, 中途失败下次接着补.
+/// 补算的行只填空: 已有的 (实时定格的、之前补过的) 一律不动, 只替换输入不全时的临时快照.
+/// 每批自身幂等, 中途失败下次接着补.
 async fn insert_backfill(
     pool: &PgPool,
     rows: &[(NaiveDate, PriceRow)],
@@ -388,7 +442,15 @@ async fn insert_backfill(
             FROM UNNEST($1::date[], $2::text[], $3::float8[], $4::float8[], $5::text[],
                         $6::float8[], $7::jsonb[])
                 AS t(day, name, price, points, benchmark, benchmark_price, missing)
-            ON CONFLICT (day, name) DO NOTHING
+            ON CONFLICT (day, name) DO UPDATE SET
+                price = EXCLUDED.price,
+                points = EXCLUDED.points,
+                benchmark = EXCLUDED.benchmark,
+                benchmark_price = EXCLUDED.benchmark_price,
+                missing = EXCLUDED.missing,
+                source = EXCLUDED.source,
+                computed_at = NOW()
+            WHERE coal_price_daily.source = 'partial'
             "#,
         )
         .bind(&days)
@@ -460,7 +522,15 @@ pub(crate) fn spawn_hourly(pool: PgPool) {
             ticker.tick().await;
             let round_pool = pool.clone();
             match tokio::spawn(async move { refresh(&round_pool).await }).await {
-                Ok(Ok(())) => {}
+                Ok(Ok(RefreshReport { gap: None, .. })) => {}
+                Ok(Ok(RefreshReport {
+                    gap: Some(gap),
+                    written,
+                })) => tracing::warn!(
+                    %gap,
+                    written,
+                    "估价输入不全: 没有完整快照时写临时快照 (之后可被覆盖), 否则保留当天已有的完整快照"
+                ),
                 Ok(Err(error)) => tracing::error!(%error, "每日估价快照更新失败, 保留旧数据"),
                 Err(error) => tracing::error!(%error, "每日估价快照这一轮异常退出, 下个小时再来"),
             }
@@ -552,9 +622,12 @@ pub(crate) struct HistoryQuery {
     name: Option<String>,
 }
 
+/// 对外只有 live / backfill 两种来历 (前端只认这两种): 临时快照也是当时的实时估价, 记作 live.
 async fn read_history(pool: &PgPool, name: &str) -> Result<Vec<CoalPricePoint>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT day, price, benchmark, source FROM coal_price_daily WHERE name = $1 ORDER BY day",
+        "SELECT day, price, benchmark,
+                CASE WHEN source = 'partial' THEN 'live' ELSE source END AS source
+         FROM coal_price_daily WHERE name = $1 ORDER BY day",
     )
     .bind(name)
     .fetch_all(pool)
@@ -586,6 +659,10 @@ pub(crate) async fn history(
         Err(error) => database_error(error),
     }
 }
+
+#[cfg(test)]
+#[path = "coal_prices_db_tests.rs"]
+mod db_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1060,5 +1137,23 @@ mod tests {
         // 首日不同、最新点早于今天都是合法输入, 不能借完整性检查改变按当日可得的口径.
         let (master, inputs) = backfill_index_fixture();
         assert!(require_backfill_inputs(&master, inputs, None).is_ok());
+    }
+
+    #[test]
+    fn test_input_gap_names_what_is_missing() {
+        let (master, inputs) = backfill_index_fixture();
+        assert_eq!(input_gap(&master, &inputs), None);
+        assert_eq!(snapshot_source(None), LIVE);
+
+        let (master, mut inputs) = backfill_index_fixture();
+        inputs.ccp = None;
+        let gap = input_gap(&master, &inputs).unwrap();
+        assert!(gap.contains("CCP"), "{gap}");
+        assert_eq!(snapshot_source(Some(&gap)), PARTIAL);
+
+        let (master, mut inputs) = backfill_index_fixture();
+        inputs.history.remove("LJM_FM");
+        let gap = input_gap(&master, &inputs).unwrap();
+        assert!(gap.contains("LJM_FM"), "{gap}");
     }
 }

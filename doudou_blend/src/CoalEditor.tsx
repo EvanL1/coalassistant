@@ -13,6 +13,8 @@ import { resolveCoal, type CoalOrigin } from "./domain/resolvedCoal";
 import { guaranteeIssue } from "./penalty";
 import { getPenaltyTemplate } from "./penaltyStorage";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "./types";
+import { isPartialNumberInput, numberInputError, numberOrNull } from "./domain/numberInput";
+import { placeLabel } from "./domain/place";
 import type { MasterCoalEntry } from "./types";
 import {
   getCoalPref,
@@ -63,9 +65,7 @@ function toForm(
 }
 
 function parseNumOrNull(s: string): number | null {
-  if (!s.trim()) return null;
-  const n = parseFloat(s);
-  return Number.isFinite(n) ? n : null;
+  return numberOrNull(s, "indicator");
 }
 
 export function CoalEditor({
@@ -85,6 +85,34 @@ export function CoalEditor({
   const [template] = useState(() => getPenaltyTemplate());
   const resolved = resolveCoal(coal, pref, origin);
   const isHidden = resolved.hidden;
+  // 煤库标了停用的煤, 用户偏好里的启用拉不回来 (见 resolveCoal), 开关点了也白点.
+  const archived = coal.status === "archived";
+  const propErrors = Object.fromEntries(
+    INDICATOR_ORDER.map((k) => [k, numberInputError(form.props[k], "indicator")]),
+  );
+  const guaranteeErrors = Object.fromEntries(
+    INDICATOR_ORDER.map((k) => [k, numberInputError(form.guarantees[k], "indicator")]),
+  );
+  // 输到一半的中间态 (末尾逗号/小数点) 输入中不亮错; 失焦或点过保存后照实报.
+  const [blurred, setBlurred] = useState<ReadonlySet<string>>(new Set());
+  const [triedSave, setTriedSave] = useState(false);
+  const markBlurred = (field: string) =>
+    setBlurred((prev) => (prev.has(field) ? prev : new Set(prev).add(field)));
+  const showError = (field: string, raw: string, error: string | null): string | null =>
+    error != null && (triedSave || blurred.has(field) || !isPartialNumberInput(raw))
+      ? error
+      : null;
+  const visiblePropError = (k: string) => showError(`prop:${k}`, form.props[k], propErrors[k]);
+  const visibleGuaranteeError = (k: string) =>
+    showError(`guarantee:${k}`, form.guarantees[k], guaranteeErrors[k]);
+  const invalidFields = [
+    ...INDICATOR_ORDER.filter((k) => propErrors[k]).map((k) => `${INDICATOR_LABEL[k]}化验值`),
+    ...INDICATOR_ORDER.filter((k) => guaranteeErrors[k]).map((k) => `${INDICATOR_LABEL[k]}保证值`),
+  ];
+  const visibleInvalidFields = [
+    ...INDICATOR_ORDER.filter((k) => visiblePropError(k)).map((k) => `${INDICATOR_LABEL[k]}化验值`),
+    ...INDICATOR_ORDER.filter((k) => visibleGuaranteeError(k)).map((k) => `${INDICATOR_LABEL[k]}保证值`),
+  ];
 
   // 锁住 body 滚动
   useEffect(() => {
@@ -96,6 +124,11 @@ export function CoalEditor({
   }, []);
 
   function save() {
+    if (invalidFields.length > 0) {
+      // 点保存才校验输到一半的中间态: 把所有错亮出来.
+      setTriedSave(true);
+      return;
+    }
     const propsOverride: Record<string, number> = {};
     for (const k of INDICATOR_ORDER) {
       const newVal = parseNumOrNull(form.props[k]);
@@ -130,7 +163,7 @@ export function CoalEditor({
     // 存在同一份 CoalPref 里, 重置会一并清掉 —— 得在确认框里说出来.
     const alsoDropped =
       filledGuarantees > 0 ? `\n已填的 ${filledGuarantees} 项采购保证值也会一并清掉。` : "";
-    if (!confirm(`重置 ${coal.name} 的所有修改, 回到 master 默认值?${alsoDropped}`)) {
+    if (!confirm(`重置 ${coal.name} 的所有修改, 回到煤库默认值?${alsoDropped}`)) {
       return;
     }
     clearCoalPref(coal.name);
@@ -170,7 +203,7 @@ export function CoalEditor({
           <div>
             <div className="modal-title">{coal.name}</div>
             <div className="modal-subtitle">
-              {coal.region || "未知"}
+              {placeLabel(coal) || "未知"}
               {coal.coal_type ? ` · ${coal.coal_type}` : ""}
               {hasOverrides && (
                 <span style={{ color: "var(--c-primary)", marginLeft: 6 }}>
@@ -190,31 +223,51 @@ export function CoalEditor({
             <div className="edit-row-label">在配煤中启用</div>
             <div
               className={`toggle ${form.enabled ? "on" : ""}`}
-              onClick={() => setForm({ ...form, enabled: !form.enabled })}
+              role="switch"
+              aria-label="在配煤中启用"
+              aria-checked={form.enabled}
+              aria-disabled={archived}
+              style={archived ? { opacity: 0.4, cursor: "not-allowed" } : undefined}
+              onClick={() => {
+                if (!archived) setForm({ ...form, enabled: !form.enabled });
+              }}
             />
           </div>
+          {archived && (
+            <div style={{ fontSize: 11, color: "var(--c-text-3)", padding: "0 0 8px" }}>
+              这种煤在煤库里已标为停用, 不能在配煤中启用
+            </div>
+          )}
 
           {/* 化验值 */}
           <div className="edit-section">
             <div className="edit-section-title">化验指标</div>
             {INDICATOR_ORDER.map((k) => (
-              <div className="edit-row" key={k}>
-                <div className="edit-row-label">{INDICATOR_LABEL[k]}</div>
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  className="edit-input"
-                  value={form.props[k]}
-                  onChange={(e) =>
-                    setForm({
-                      ...form,
-                      props: { ...form.props, [k]: e.target.value },
-                    })
-                  }
-                  placeholder={
-                    coal.props[k] != null ? String(coal.props[k]) : "未录入"
-                  }
-                />
+              <div key={k}>
+                <div className="edit-row">
+                  <div className="edit-row-label">{INDICATOR_LABEL[k]}</div>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    className="edit-input"
+                    aria-label={`${INDICATOR_LABEL[k]}化验值`}
+                    aria-invalid={visiblePropError(k) ? true : undefined}
+                    value={form.props[k]}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        props: { ...form.props, [k]: e.target.value },
+                      })
+                    }
+                    onBlur={() => markBlurred(`prop:${k}`)}
+                    placeholder={
+                      coal.props[k] != null ? String(coal.props[k]) : "未录入"
+                    }
+                  />
+                </div>
+                {visiblePropError(k) && (
+                  <div className="edit-input-error">{visiblePropError(k)}</div>
+                )}
               </div>
             ))}
           </div>
@@ -240,7 +293,7 @@ export function CoalEditor({
             {INDICATOR_ORDER.map((k) => {
               const raw = form.guarantees[k];
               const issue =
-                raw.trim() === ""
+                raw.trim() === "" || guaranteeErrors[k]
                   ? null
                   : guaranteeIssue({
                       template,
@@ -253,10 +306,11 @@ export function CoalEditor({
                   <div className="edit-row">
                     <div className="edit-row-label">{INDICATOR_LABEL[k]}</div>
                     <input
-                      type="number"
+                      type="text"
                       inputMode="decimal"
                       className="edit-input"
                       aria-label={`${INDICATOR_LABEL[k]}保证值`}
+                      aria-invalid={visibleGuaranteeError(k) ? true : undefined}
                       value={raw}
                       onChange={(e) =>
                         setForm({
@@ -264,9 +318,13 @@ export function CoalEditor({
                           guarantees: { ...form.guarantees, [k]: e.target.value },
                         })
                       }
+                      onBlur={() => markBlurred(`guarantee:${k}`)}
                       placeholder="未填"
                     />
                   </div>
+                  {visibleGuaranteeError(k) && (
+                    <div className="edit-input-error">{visibleGuaranteeError(k)}</div>
+                  )}
                   {issue && (
                     <div
                       style={{
@@ -293,7 +351,7 @@ export function CoalEditor({
               style={{ width: "100%", color: "var(--c-danger)" }}
               onClick={resetToMaster}
             >
-              重置为 master 默认值
+              重置为煤库默认值
             </button>
           )}
 
@@ -319,6 +377,11 @@ export function CoalEditor({
           </div>
         </div>
 
+        {visibleInvalidFields.length > 0 && (
+          <div role="alert" className="edit-input-error" style={{ padding: "0 16px" }}>
+            有 {visibleInvalidFields.length} 处没填对: {visibleInvalidFields.join("、")}，改好才能保存
+          </div>
+        )}
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={onClose}>
             取消

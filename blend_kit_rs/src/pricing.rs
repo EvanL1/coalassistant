@@ -17,7 +17,7 @@
 //!   1. **基准报价** (`benchmarks`, 带日期的市场报价): 按指标距离对标, 估价 = Σ 份额_b × 基准价_b × Q(c)/Q(b).
 //!      距离 d(c, b) = Σ|adj_i(c) − adj_i(b)| (两边都有该指标的计价规则) + Σ w_k·|x_k(c) − x_k(b)|
 //!      (`matching.weights`: 只比不计价的指标, 如 V; 基准缺该项加罚 `missing_penalty`),
-//!      地区不同的基准再加罚 `region_penalty`. 配了 `matching.bandwidth` τ 时份额 ∝ exp(−d/τ),
+//!      外地的基准再加罚 (省 → 市 逐级比: 外省 `region_penalty`, 同省外市 `city_penalty`). 配了 `matching.bandwidth` τ 时份额 ∝ exp(−d/τ),
 //!      否则只用最近的一条.
 //!      **不先分煤种**: 煤种本就是按 V、G、Y 划的, V 进了距离, 标签就不必当门槛 —— 标着焦煤的 V37 煤
 //!      自然落到气煤上, 煤种边界附近的煤在两边的基准之间平滑过渡. 形态 (精煤/煤泥/浮精) 不由 V、G、Y
@@ -111,6 +111,25 @@ pub fn validate(factor: &PriceFactor) -> Result<(), String> {
     {
         return Err(format!("外地基准加罚 {p} 无效, 须为 ≥0 的有限数"));
     }
+    if let Some(p) = factor.city_penalty {
+        if !(p.is_finite() && p >= 0.0) {
+            return Err(format!("同省外市基准加罚 {p} 无效, 须为 ≥0 的有限数"));
+        }
+        match factor.region_penalty {
+            None => {
+                return Err(
+                    "配了同省外市基准加罚 (city_penalty), 也要配外地基准加罚 (region_penalty)"
+                        .into(),
+                )
+            }
+            Some(ceiling) if p > ceiling => {
+                return Err(format!(
+                    "同省外市基准加罚 {p} 不能大于外地基准加罚 {ceiling}"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     if let Some(matching) = &factor.matching {
         validate_matching(matching)?;
     }
@@ -191,6 +210,9 @@ fn probe(benchmark: &Benchmark) -> Coal {
         coal_type: benchmark.coal_type.clone(),
         form: benchmark.form.clone(),
         region: benchmark.region.clone(),
+        province: benchmark.province.clone(),
+        city: benchmark.city.clone(),
+        county: benchmark.county.clone(),
     }
 }
 
@@ -376,14 +398,35 @@ fn ranked<'a>(
         narrow(pool, of(coal), *of)
     });
     let cost = |anchor: &Anchor| {
-        let elsewhere = coal.region.is_some() && anchor.probe.region != coal.region;
-        let penalty = factor.region_penalty.filter(|_| elsewhere).unwrap_or(0.0);
         let unpriced = matching.map_or(0.0, |m| match_distance(coal, &anchor.probe, m));
-        distance(value, &anchor.value) + unpriced + penalty
+        distance(value, &anchor.value) + unpriced + place_penalty(coal, &anchor.probe, factor)
     };
     let mut ranked: Vec<_> = pool.into_iter().map(|a| (a, cost(a))).collect();
     ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
     ranked
+}
+
+/// 基准相对这种煤的地区加罚 (点). 地区只是软偏好: 罚的是距离, 不是把外地基准排除.
+///
+/// 煤填了省: 按 省 → 市 逐级比. 外省 (或基准没写省) 罚 `region_penalty`; 同省里, 基准只写到省
+/// (代表全省, 如按省发布的指数) 或与煤同市不罚, 其余 —— 外市, 或煤只知道省 —— 罚 `city_penalty`.
+/// 县不比: 基准报价最细到市.
+///
+/// 煤没填省: 沿用旧写法, `region` 整串不同就罚 `region_penalty`.
+fn place_penalty(coal: &Coal, anchor: &Coal, factor: &PriceFactor) -> f64 {
+    let outside = factor.region_penalty.unwrap_or(0.0);
+    let Some(province) = &coal.province else {
+        let elsewhere = coal.region.is_some() && anchor.region != coal.region;
+        return if elsewhere { outside } else { 0.0 };
+    };
+    if anchor.province.as_ref() != Some(province) {
+        return outside;
+    }
+    match (&anchor.city, &coal.city) {
+        (None, _) => 0.0,
+        (Some(theirs), Some(mine)) if theirs == mine => 0.0,
+        _ => factor.city_penalty.unwrap_or(0.0),
+    }
 }
 
 /// 各候选的份额: 配了带宽 τ 时 ∝ exp(−(d − d_min)/τ); 没配只用最近的一条.
@@ -596,6 +639,7 @@ mod tests {
             uncertainty: None,
             benchmarks: Vec::new(),
             region_penalty: None,
+            city_penalty: None,
             matching: None,
         }
     }
@@ -734,6 +778,7 @@ mod tests {
             uncertainty: None,
             benchmarks: Vec::new(),
             region_penalty: None,
+            city_penalty: None,
             matching: None,
         };
         let coal = coal_from_tuple(
@@ -762,6 +807,7 @@ mod tests {
             uncertainty: None,
             benchmarks: Vec::new(),
             region_penalty: None,
+            city_penalty: None,
             matching: None,
         };
         let coal = coal_from_tuple(
@@ -838,6 +884,9 @@ mod tests {
             coal_type: Some(coal_type.into()),
             form: None,
             region: None,
+            province: None,
+            city: None,
+            county: None,
             props: props.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             price,
             date: "2026-11-02".into(),
@@ -1062,6 +1111,7 @@ mod tests {
                 uncertainty: None,
                 benchmarks: Vec::new(),
                 region_penalty: None,
+                city_penalty: None,
                 matching: None,
             }
         )

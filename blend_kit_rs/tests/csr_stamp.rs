@@ -140,3 +140,40 @@ fn test_mci_term_only_applies_when_given() {
         "MCI 3 应比基准低 11.4"
     );
 }
+
+/// 两种高挥发低 G/Y 的气煤: 公式外推出负的 CSR. 不展示荒谬的数, 附一条超出适用范围的警告.
+#[test]
+fn test_estimate_outside_formula_domain_is_withheld() {
+    let pool = vec![
+        coal_from_tuple(
+            "气煤甲",
+            (0.5, 9.0, 42.0, 40.0, 4.0, 0.1, 30.0, 10.0, 1200.0, 0.0),
+        ),
+        coal_from_tuple(
+            "气煤乙",
+            (0.6, 9.5, 41.0, 42.0, 5.0, 0.1, 32.0, 10.0, 1250.0, 0.0),
+        ),
+    ];
+    let raw = predict::csr_stamp_charging(42.0, 40.0, 4.0, None);
+    assert!(raw < 0.0, "fixture 应落在定义域外: {raw}");
+    let result = solve(&request(pool, None));
+    assert!(result.ok, "{:?}", result.reason);
+    assert_eq!(result.csr_stamp_estimate, None);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("捣固") && w.contains("适用范围")),
+        "{:?}",
+        result.warnings
+    );
+}
+
+/// 范围内的估算照常给, 不多出警告.
+#[test]
+fn test_estimate_inside_domain_has_no_warning() {
+    let result = solve(&request(coals(), None));
+    assert!(result.ok);
+    assert!(result.csr_stamp_estimate.is_some());
+    assert!(result.warnings.iter().all(|w| !w.contains("捣固")));
+}

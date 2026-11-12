@@ -66,6 +66,9 @@ pub fn coal_from_tuple(name: &str, t: (f64, f64, f64, f64, f64, f64, f64, f64, f
         coal_type: None,
         form: None,
         region: None,
+        province: None,
+        city: None,
+        county: None,
     }
 }
 

@@ -234,3 +234,102 @@ describe("合同屏档位录入", () => {
     expect((row("A").getByLabelText(/档扣款/) as HTMLInputElement).value).toBe("80");
   });
 });
+
+describe("合同屏上下限校验", () => {
+  it("上限留空时标红并挡住保存", async () => {
+    await renderScreen();
+    const max = row("A").getByLabelText("≤") as HTMLInputElement;
+    fireEvent.change(max, { target: { value: "" } });
+    expect(row("A").getByText("缺少上限")).toBeTruthy();
+    expect(max.getAttribute("aria-invalid")).toBe("true");
+    fireEvent.click(screen.getByText("保存合同"));
+    expect(mocks.setUserContract).not.toHaveBeenCalled();
+  });
+
+  it("下限大于上限时标红并挡住保存", async () => {
+    await renderScreen();
+    fireEvent.change(row("petro").getByLabelText("≥"), { target: { value: "1.5" } });
+    expect(row("petro").getByText("下限不能大于上限")).toBeTruthy();
+    fireEvent.click(screen.getByText("保存合同"));
+    expect(mocks.setUserContract).not.toHaveBeenCalled();
+  });
+
+  it("认不出的数字给出例子并挡住保存, 不悄悄当成空", async () => {
+    await renderScreen();
+    fireEvent.change(row("A").getByLabelText("≤"), { target: { value: "1o" } });
+    expect(row("A").getByText("请输入数字, 例如 65.3")).toBeTruthy();
+    expect(screen.getByText(/灰 上限/)).toBeTruthy();
+    fireEvent.click(screen.getByText("保存合同"));
+    expect(mocks.setUserContract).not.toHaveBeenCalled();
+  });
+
+  it("全角数字和逗号小数点照常保存", async () => {
+    await renderScreen();
+    fireEvent.change(row("A").getByLabelText("≤"), { target: { value: "１０,５" } });
+    fireEvent.click(screen.getByText("保存合同"));
+    expect(savedSpecs()[0].max).toBe(10.5);
+  });
+
+  it("敲到一半 (末尾逗号) 不闪红、底部不计数, 失焦才报", async () => {
+    await renderScreen();
+    const max = row("A").getByLabelText("≤");
+    fireEvent.change(max, { target: { value: "10," } });
+    expect(row("A").queryByText("请输入数字, 例如 65.3")).toBeNull();
+    expect(screen.queryByText(/处没填对/)).toBeNull();
+
+    fireEvent.blur(max);
+    expect(row("A").getByText("请输入数字, 例如 65.3")).toBeTruthy();
+    expect(screen.getByText(/灰 上限/)).toBeTruthy();
+  });
+
+  it("输到一半直接点保存: 拦住并把错亮出来", async () => {
+    await renderScreen();
+    fireEvent.change(row("A").getByLabelText("≤"), { target: { value: "10," } });
+    fireEvent.click(screen.getByText("保存合同"));
+    expect(mocks.setUserContract).not.toHaveBeenCalled();
+    expect(row("A").getByText("请输入数字, 例如 65.3")).toBeTruthy();
+  });
+
+  it("只有上限的项把残留的下限丢掉 (下限型同理), 不发给核心", async () => {
+    mocks.getUserContract.mockReturnValue([
+      { indicator: "A", direction: "Upper", min: 3, max: 10, enabled: true },
+      { indicator: "G", direction: "Lower", min: 75, max: 99, enabled: true },
+      { indicator: "petro", direction: "Range", min: 1.2, max: 1.4, enabled: true },
+    ]);
+    await renderScreen();
+    fireEvent.click(screen.getByText("保存合同"));
+    const saved = savedSpecs();
+    expect(saved[0]).toMatchObject({ indicator: "A", direction: "Upper", min: null, max: 10 });
+    expect(saved[1]).toMatchObject({ indicator: "G", direction: "Lower", min: 75, max: null });
+    expect(saved[2]).toMatchObject({ indicator: "petro", direction: "Range", min: 1.2, max: 1.4 });
+  });
+
+  it("停用的项留空不挡保存 —— 核心不看停用项", async () => {
+    await renderScreen();
+    fireEvent.change(row("A").getByLabelText("≤"), { target: { value: "" } });
+    fireEvent.click(screen.getByLabelText("启用灰约束"));
+    fireEvent.click(screen.getByText("保存合同"));
+    expect(mocks.setUserContract).toHaveBeenCalledTimes(1);
+  });
+
+  it("数字输入框是文本框 + 数字键盘, 不用 type=number 吞掉认不出的字", async () => {
+    await renderScreen();
+    const max = row("A").getByLabelText("≤") as HTMLInputElement;
+    expect(max.type).toBe("text");
+    expect(max.inputMode).toBe("decimal");
+  });
+});
+
+describe("合同屏加载失败", () => {
+  it("煤库加载失败时说明原因并可重试", async () => {
+    mocks.loadMaster.mockReset()
+      .mockRejectedValueOnce(new Error("网络断了"))
+      .mockResolvedValue(master);
+    render(<ContractScreen />);
+    expect(await screen.findByText(/合同加载失败: 网络断了/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText(/按扣款计价/)).toHaveLength(specs.length),
+    );
+  });
+});

@@ -1,0 +1,169 @@
+{
+ "coals": [
+  {
+   "name": "样煤01",
+   "props": {
+    "S": 2.71,
+    "A": 8.6,
+    "V": 22.1,
+    "G": 60.0,
+    "Y": 23.0,
+    "petro": 0.13,
+    "CSR": 46.0,
+    "M": 10.0
+   },
+   "fob": 2158,
+   "frt": 0
+  },
+  {
+   "name": "样煤02",
+   "props": {
+    "S": 2.31,
+    "A": 9.9,
+    "V": 27.8,
+    "G": 71.0,
+    "Y": 12.0,
+    "petro": 0.1,
+    "CSR": 61.0,
+    "M": 9.0
+   },
+   "fob": 2079,
+   "frt": 0
+  },
+  {
+   "name": "样煤03",
+   "props": {
+    "S": 1.66,
+    "A": 8.8,
+    "V": 15.7,
+    "G": 65.0,
+    "Y": 27.0,
+    "petro": 0.13,
+    "CSR": 68.0,
+    "M": 12.0
+   },
+   "fob": 1348,
+   "frt": 85
+  },
+  {
+   "name": "样煤04",
+   "props": {
+    "S": 1.99,
+    "A": 9.5,
+    "V": 21.4,
+    "G": 82.0,
+    "Y": 26.0,
+    "petro": 0.15,
+    "CSR": 49.0,
+    "M": 8.0
+   },
+   "fob": 2264,
+   "frt": 60
+  },
+  {
+   "name": "样煤05",
+   "props": {
+    "S": 1.22,
+    "A": 11.0,
+    "V": 31.0,
+    "G": 88.0,
+    "Y": 10.0,
+    "petro": 0.1,
+    "CSR": 54.0,
+    "M": 8.0
+   },
+   "fob": 2367,
+   "frt": 60
+  },
+  {
+   "name": "样煤06",
+   "props": {
+    "S": 2.61,
+    "A": 8.1,
+    "V": 28.3,
+    "G": 96.0,
+    "Y": 13.0,
+    "petro": 0.13,
+    "CSR": 66.0,
+    "M": 11.0
+   },
+   "fob": 2251,
+   "frt": 120
+  },
+  {
+   "name": "样煤07",
+   "props": {
+    "S": 3.43,
+    "A": 10.0,
+    "V": 31.1,
+    "G": 78.0,
+    "Y": 29.0,
+    "petro": 0.15,
+    "CSR": 55.0,
+    "M": 12.0
+   },
+   "fob": 2078,
+   "frt": 120
+  },
+  {
+   "name": "样煤08",
+   "props": {
+    "S": 0.45,
+    "A": 10.9,
+    "V": 32.4,
+    "G": 62.0,
+    "Y": 10.0,
+    "petro": 0.13,
+    "CSR": 62.0,
+    "M": 7.0
+   },
+   "fob": 1714,
+   "frt": 85
+  }
+ ],
+ "specs": [
+  {
+   "indicator": "S",
+   "direction": "Upper",
+   "max": 2.54
+  },
+  {
+   "indicator": "A",
+   "direction": "Upper",
+   "max": 10.7
+  },
+  {
+   "indicator": "V",
+   "direction": "Upper",
+   "max": 29.8
+  },
+  {
+   "indicator": "G",
+   "direction": "Lower",
+   "min": 80.3
+  },
+  {
+   "indicator": "Y",
+   "direction": "Lower",
+   "min": 21.0
+  },
+  {
+   "indicator": "CSR",
+   "direction": "Lower",
+   "min": 58.6
+  },
+  {
+   "indicator": "M",
+   "direction": "Upper",
+   "max": 11.0
+  },
+  {
+   "indicator": "petro",
+   "direction": "Upper",
+   "max": 0.13
+  }
+ ],
+ "total_quantity": 10000,
+ "truncate_decimal": true,
+ "shovel_tons": 7
+}

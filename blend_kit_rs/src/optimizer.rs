@@ -57,8 +57,37 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 /// 事, 各写一个数就会重演"LP 认、复核不认"那个缺陷.
 pub(crate) const FEASIBILITY_TOLERANCE: f64 = 1e-7;
 const OUTPUT_RATIO_TOLERANCE: f64 = 1e-5;
+/// 验算配比与配比下限比较时容许的浮点误差 (占比).
+pub(crate) const MIN_RATIO_TOLERANCE: f64 = 1e-9;
+/// 解后复核没过时逐级收紧重解的幅度: 每行界往里收 `本值 × (1 + 行量级)`, 行量级取
+/// 行系数与界的最大绝对值. 最大一级 1e-5 在灰分行上约 1e-4 指标单位, 仍比化验 0.01 的
+/// 分辨率细两个数量级.
+const POSTCHECK_TIGHTEN_STEPS: [f64; 2] = [1e-6, 1e-5];
+/// 合同与煤池确实冲突时的 reason. 前端与历史记录都按原文展示, 不要改字.
+const CONFLICT_REASON: &str = "约束冲突, LP 不可行";
 /// 验算模式不做岩相精确复核时的提示. 按整铲验算 ([`crate::shovel`]) 沿用凑整前的复核, 会把它摘掉.
 pub(crate) const FIXED_PETRO_NOTE: &str = "验算模式未做岩相精确复核, 岩相按线性代理估算";
+
+/// LP 没解出可用配方的原因. 两种必须分开报: 说成"约束冲突"会让用户去放宽一份
+/// 也许本来可行的合同.
+#[derive(Debug, Clone, PartialEq)]
+enum LpFailure {
+    /// 求解器证实不可行, 或 LP 的解在复算里越了 Hard 界.
+    Infeasible,
+    /// 求解器没算出结论 (迭代用尽 / 数值错误 / 解过不了复核), 带上原因.
+    Numerical(String),
+}
+
+impl LpFailure {
+    fn reason(&self) -> String {
+        match self {
+            LpFailure::Infeasible => CONFLICT_REASON.into(),
+            LpFailure::Numerical(detail) => {
+                format!("求解器没有算出可靠结论 ({detail}), 无法判定合同是否可行")
+            }
+        }
+    }
+}
 
 /// 基础求解入口，不读取训练样本，也不在求解期间拟合模型.
 pub fn solve(request: &BlendRequest) -> BlendResult {
@@ -301,7 +330,7 @@ fn solve_core(
     let mut fallback: Option<BlendResult> = None;
 
     loop {
-        let Some((mut result, ratios)) = solve_once(
+        let solved = solve_once(
             &kept,
             &active_specs,
             request,
@@ -311,49 +340,64 @@ fn solve_core(
             petro_proxy_upper,
             warnings.clone(),
             &extras,
-        ) else {
-            return if let Some(previous) = fallback {
-                if petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard) {
-                    let mut failure_warnings = previous.warnings;
-                    failure_warnings
-                        .push("岩相精确校验修复后 LP 不可行；请调整煤池或合同级别".into());
-                    // 这里不带诊断: fallback 有值就说明按合同界建的 LP 本来有解 (previous
-                    // 就是那个解), 无解的是岩相修复把上限收紧之后的 LP. 诊断的前提是
-                    // "按合同界建的 LP 无解", 在这条路上不成立 —— 硬跑会拿收紧后的代理界
-                    // 判越界、却按合同界展示, 报出"岩相 ≤0.1 达不到, 最好只能到 0.05"
-                    // 这种自相矛盾的行. 真凶已由 reason 与 warnings 指名为岩相.
-                    BlendResult::infeasible("岩相精确 Hard 复核未找到可行配方", failure_warnings)
+        );
+        let (mut result, ratios) = match solved {
+            Ok(solved) => solved,
+            Err(failure) => {
+                return if let Some(previous) = fallback {
+                    if petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard) {
+                        let mut failure_warnings = previous.warnings;
+                        failure_warnings
+                            .push("岩相精确校验修复后 LP 不可行；请调整煤池或合同级别".into());
+                        // 这里不带诊断: fallback 有值就说明按合同界建的 LP 本来有解 (previous
+                        // 就是那个解), 无解的是岩相修复把上限收紧之后的 LP. 诊断的前提是
+                        // "按合同界建的 LP 无解", 在这条路上不成立 —— 硬跑会拿收紧后的代理界
+                        // 判越界、却按合同界展示, 报出"岩相 ≤0.1 达不到, 最好只能到 0.05"
+                        // 这种自相矛盾的行. 真凶已由 reason 与 warnings 指名为岩相.
+                        BlendResult::infeasible(
+                            "岩相精确 Hard 复核未找到可行配方",
+                            failure_warnings,
+                        )
+                    } else {
+                        let mut previous = previous;
+                        previous
+                            .warnings
+                            .push("岩相修复后 LP 不可行，已保留候选方案".into());
+                        finalize_quality_status(&mut previous, &active_specs);
+                        previous
+                    }
                 } else {
-                    let mut previous = previous;
-                    previous
-                        .warnings
-                        .push("岩相修复后 LP 不可行，已保留候选方案".into());
-                    finalize_quality_status(&mut previous, &active_specs);
-                    previous
-                }
-            } else {
-                // 只有这条路满足诊断的前提: fallback 为 None ⇒ 一次成功迭代都没有过
-                // ⇒ petro_proxy_* 必然还是 None (它们与 fallback 在同一处赋值),
-                // 失败的就是按合同界建的那个 LP 本身.
-                debug_assert!(
-                    petro_proxy_lower.is_none() && petro_proxy_upper.is_none(),
-                    "未经岩相修复就走到这里, 代理界不该已被收紧"
-                );
-                let bounds = if diagnose {
-                    diagnose_infeasible(&kept, &active_specs, request, &formulas, evaluators)
-                } else {
-                    Vec::new()
+                    // 只有这条路满足诊断的前提: fallback 为 None ⇒ 一次成功迭代都没有过
+                    // ⇒ petro_proxy_* 必然还是 None (它们与 fallback 在同一处赋值),
+                    // 失败的就是按合同界建的那个 LP 本身.
+                    debug_assert!(
+                        petro_proxy_lower.is_none() && petro_proxy_upper.is_none(),
+                        "未经岩相修复就走到这里, 代理界不该已被收紧"
+                    );
+                    // 求解器没收敛时"LP 无解"未经证实, 但诊断只收"子问题最优值确实越过 LP 界"
+                    // 的项, 可行时自然落空; 真不可行时它正好指出卡在哪.
+                    let bounds = if diagnose {
+                        diagnose_infeasible(&kept, &active_specs, request, &formulas, evaluators)
+                    } else {
+                        Vec::new()
+                    };
+                    // 求解器没算出结论、诊断也落空: 合同可行与否未经证实, 单独标出来.
+                    let undetermined =
+                        bounds.is_empty() && matches!(failure, LpFailure::Numerical(_));
+                    let mut failed =
+                        BlendResult::infeasible(&failure_reason(&failure, &bounds), warnings)
+                            .with_infeasible_bounds(bounds);
+                    failed.undetermined = undetermined;
+                    failed
                 };
-                BlendResult::infeasible("约束冲突, LP 不可行", warnings)
-                    .with_infeasible_bounds(bounds)
-            };
+            }
         };
         result.evaluation_iterations = iteration;
 
         let participating: Vec<(&Coal, f64)> = kept
             .iter()
             .zip(&ratios)
-            .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+            .filter(|(coal, _)| result.recipe.contains_key(&coal.name))
             .map(|(coal, ratio)| (*coal, *ratio))
             .collect();
         let Some((sigma, petro_outcome)) = review_petrography(
@@ -955,7 +999,7 @@ fn build_lp(
 /// 那个解同时满足"其余全部约束"和"这条界", 整体问题就可行了 —— 与前提矛盾. 所以
 /// 每条子问题可解的约束都是带确定数字的真凶: 单独把它放宽到最优值就能求出配方.
 ///
-/// 但 `solve_once` 返回 None 不止"LP 无解"一种原因 (还有解后 Hard 复核判 Fail),
+/// 但 `solve_once` 返回 Err 不止"LP 无解"一种原因 (还有解后 Hard 复核判 Fail),
 /// 那时上面的前提不成立, 推理会凭空指认无辜约束. 所以最后仍显式复核"最优值确实越过
 /// LP 界"才计入 —— LP 可行时这一复核必然全部落空, 诊断自动退化成空表.
 ///
@@ -1034,7 +1078,7 @@ fn solve_once(
     petro_proxy_upper: Option<f64>,
     warnings: Vec<String>,
     extras: &[&Coal],
-) -> Option<(BlendResult, Vec<f64>)> {
+) -> Result<(BlendResult, Vec<f64>), LpFailure> {
     let count = coals.len();
     let (problem, blocks) = build_lp(
         coals,
@@ -1045,9 +1089,19 @@ fn solve_once(
         petro_proxy_lower,
         petro_proxy_upper,
         None,
-    )?;
-    let (solution, objective) = problem.solve()?;
+    )
+    .ok_or(LpFailure::Infeasible)?;
+    let (solution, objective, tightened) = problem.solve()?;
     let ratios = solution[..count].to_vec();
+    // 输出配方的占比门槛: 截掉零头会让配方判不达标时, 把达标所需的零头煤留在配方里.
+    // 收紧重解挤出来的解连完整的都判不达标, 就不算解出; 首次求解的照旧走下面的 Hard 复核.
+    let grain = match output_grain(specs, request, formulas, &ratios) {
+        Some(grain) => grain,
+        None if tightened => {
+            return Err(LpFailure::Numerical("解按输出配方复核不达标".into()));
+        }
+        None => OUTPUT_RATIO_TOLERANCE,
+    };
     let penalty_by_indicator = read_back_penalties(&blocks, &solution);
     let mut result = assemble_result(
         coals,
@@ -1056,6 +1110,7 @@ fn solve_once(
         formulas,
         models,
         &ratios,
+        grain,
         &penalty_by_indicator,
         warnings,
     );
@@ -1070,7 +1125,7 @@ fn solve_once(
             })
         });
     if hard_failed {
-        return None;
+        return Err(LpFailure::Infeasible);
     }
     // 配煤价值给煤价对比卡与价格稳健性 (挑离入选最近的煤) 用; 两者都不要时不多解一次 LP,
     // 结果与以前逐字节一致.
@@ -1089,7 +1144,88 @@ fn solve_once(
             objective,
         );
     }
-    Some((result, ratios))
+    Ok((result, ratios))
+}
+
+/// 输出配方里留哪些煤的占比门槛 (占比 > 门槛的才进 `recipe` 与订单).
+///
+/// 默认 `OUTPUT_RATIO_TOLERANCE`: 再小的份额是求解残差. 但合同卡在判定边缘时, 解可能靠一种
+/// 占比不到十万分之一的煤才达标; 把它截掉, 输出的配方照着验算就不达标了. 这时从大到小把零头
+/// 煤一种种放回, 取刚好让输出配方达标的门槛 —— 输出的配方必须自己经得起验算. 留下来的零头煤
+/// 在按整铲配时会被分支定界看见: 要么去掉, 要么给足一铲.
+///
+/// 连完整的解都判不达标时返回 None.
+fn output_grain(
+    specs: &[&Spec],
+    request: &BlendRequest,
+    formulas: &HashMap<String, MetricFormula>,
+    ratios: &[f64],
+) -> Option<f64> {
+    let fails = |grain: f64| output_recipe_fails(specs, request, formulas, ratios, grain);
+    if !fails(OUTPUT_RATIO_TOLERANCE) {
+        return Some(OUTPUT_RATIO_TOLERANCE);
+    }
+    let mut dust: Vec<f64> = ratios
+        .iter()
+        .copied()
+        .filter(|ratio| *ratio > 0.0 && *ratio <= OUTPUT_RATIO_TOLERANCE)
+        .collect();
+    dust.sort_by(|left, right| right.total_cmp(left));
+    // 门槛取"刚好小于这份零头", 它和比它大的都留下.
+    dust.into_iter()
+        .map(f64::next_down)
+        .find(|grain| !fails(*grain))
+}
+
+/// 按门槛取出输出配方 (去掉零头后重新归一化), 看 Hard 约束与计价拒收线有没有判不达标的.
+/// 用的是合同判定 (与验算路径同一个 `check_value`), 不是 LP 的执行界: 回答的是"照着输出的
+/// 配方配, 验算过不过".
+fn output_recipe_fails(
+    specs: &[&Spec],
+    request: &BlendRequest,
+    formulas: &HashMap<String, MetricFormula>,
+    ratios: &[f64],
+    grain: f64,
+) -> bool {
+    let mut recipe: Vec<f64> = ratios
+        .iter()
+        .map(|ratio| if *ratio > grain { *ratio } else { 0.0 })
+        .collect();
+    let total: f64 = recipe.iter().sum();
+    if !total.is_finite() || total <= 0.0 {
+        return true;
+    }
+    for ratio in &mut recipe {
+        *ratio /= total;
+    }
+    specs
+        .iter()
+        .filter(|spec| matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced))
+        .any(|spec| {
+            let Some(value) = formulas
+                .get(&spec.indicator)
+                .and_then(|formula| formula.evaluate(&recipe))
+            else {
+                return false;
+            };
+            let outcome = check_value(value, Some(spec), request.truncate_decimal, true);
+            if outcome.status != EvaluationStatus::Fail {
+                return false;
+            }
+            // 计价项超合同界是预期行为 (已折算成扣款), 越过拒收线才算不达标; 与体检同一个口径.
+            if spec.enforcement == Enforcement::Priced {
+                let within_reject = spec.penalty.as_ref().is_some_and(|penalty| {
+                    let slack = FEASIBILITY_TOLERANCE * (1.0 + penalty.reject.abs());
+                    match spec.direction {
+                        Direction::Upper => value <= penalty.reject + slack,
+                        Direction::Lower => value + slack >= penalty.reject,
+                        Direction::Range => false,
+                    }
+                });
+                return !within_reject;
+            }
+            true
+        })
 }
 
 /// 建 LP 需要的、与煤池无关的那几样输入.
@@ -1148,7 +1284,7 @@ fn blend_values(
         problem.a_ub.push(row);
         problem.b_ub.push(0.0);
     }
-    let Some((_, union_objective, duals)) = problem.solve_with_duals(&problem.c) else {
+    let Ok((_, union_objective, duals, _)) = problem.solve_with_duals(&problem.c) else {
         return HashMap::new();
     };
     if (union_objective - objective).abs() > FEASIBILITY_TOLERANCE * 10.0 * (1.0 + objective.abs())
@@ -1179,6 +1315,8 @@ fn assemble_result(
     formulas: &HashMap<String, MetricFormula>,
     models: &EvaluatorSet,
     ratios: &[f64],
+    // 占比大于它的煤才进配方与订单; 见 output_grain.
+    grain: f64,
     penalty_by_indicator: &HashMap<String, f64>,
     mut warnings: Vec<String>,
 ) -> BlendResult {
@@ -1187,7 +1325,7 @@ fn assemble_result(
     let recipe = coals
         .iter()
         .zip(ratios)
-        .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+        .filter(|(_, ratio)| **ratio > grain)
         .map(|(coal, ratio)| (coal.name.clone(), *ratio))
         .collect();
     let fob_per_ton: f64 = coals
@@ -1238,7 +1376,7 @@ fn assemble_result(
     let mut orders: Vec<OrderItem> = coals
         .iter()
         .zip(ratios)
-        .filter(|(_, ratio)| **ratio > OUTPUT_RATIO_TOLERANCE)
+        .filter(|(_, ratio)| **ratio > grain)
         .map(|(coal, ratio)| {
             let tons = request.total_quantity.map(|quantity| quantity * ratio);
             let effective = cif_eff_or_quoted(coal);
@@ -1257,13 +1395,43 @@ fn assemble_result(
         .collect();
     orders.sort_by(|left, right| right.ratio.total_cmp(&left.ratio));
 
+    // 煤池公式要求全池每种煤都有该指标 (LP 行要逐列系数); 合同里不进 LP 的软/提示指标
+    // 缺在没入选的煤上时, 改按实际入选的煤重建公式 —— 混合值只取决于配方里用到的煤.
+    // 合同没提的指标照旧: 全池算不出就不展示.
+    let used: Vec<(&Coal, f64)> = coals
+        .iter()
+        .zip(ratios)
+        .filter(|(_, ratio)| **ratio > grain)
+        .map(|(coal, ratio)| (*coal, *ratio))
+        .collect();
+    let used_coals: Vec<&Coal> = used.iter().map(|(coal, _)| *coal).collect();
+    let used_sum: f64 = used.iter().map(|(_, ratio)| ratio).sum();
+    let used_ratios: Vec<f64> = used.iter().map(|(_, ratio)| ratio / used_sum).collect();
+    let used_formulas = if specs
+        .iter()
+        .any(|spec| !formulas.contains_key(&spec.indicator))
+    {
+        build_formulas(&used_coals, models)
+    } else {
+        HashMap::new()
+    };
+
     let mut indicator_check = Vec::new();
     for indicator in INDICATORS {
         let spec = specs
             .iter()
             .find(|spec| spec.indicator == indicator)
             .copied();
-        let Some(formula) = formulas.get(indicator) else {
+        let (formula, coals, ratios) = match (formulas.get(indicator), spec) {
+            (Some(formula), _) => (Some(formula), coals, ratios),
+            (None, Some(_)) => (
+                used_formulas.get(indicator),
+                used_coals.as_slice(),
+                used_ratios.as_slice(),
+            ),
+            (None, None) => continue,
+        };
+        let Some(formula) = formula else {
             if let Some(spec) = spec {
                 let proxy_coefficients = coals
                     .iter()
@@ -1369,6 +1537,7 @@ fn assemble_result(
         ok: true,
         reason: None,
         infeasible_bounds: Vec::new(),
+        undetermined: false,
         recipe,
         cost: Some(cost),
         orders,
@@ -1380,26 +1549,28 @@ fn assemble_result(
         csr_stamp_estimate: None,
         rank_variance: None,
         csr_interaction_penalty: None,
+        shovel_extra_cost: None,
         coal_values: Vec::new(),
         market_price: None,
         market_price_from_group: false,
         price_robustness: None,
         blend_values: HashMap::new(),
     };
+    // 只认算得出来的混合值: 算不出的体检行 value 填的是占位 0.0.
     let blend_value = |indicator: &str| {
         result
             .indicator_check
             .iter()
             .find(|check| check.indicator == indicator)
-            .map(|check| check.value)
+            .and_then(|check| check.evaluated_value)
     };
-    result.csr_stamp_estimate = match (blend_value("V"), blend_value("G"), blend_value("Y")) {
+    if let (Some(vdaf), Some(g), Some(y)) = (blend_value("V"), blend_value("G"), blend_value("Y")) {
         // 没有灰成分数据, MCI 不修正 (按柳林基准); 见 csr_stamp_charging 的说明.
-        (Some(vdaf), Some(g), Some(y)) => {
-            Some(crate::predict::csr_stamp_charging(vdaf, g, y, None))
+        match crate::predict::csr_stamp_in_domain(vdaf, g, y, None) {
+            Ok(estimate) => result.csr_stamp_estimate = Some(estimate),
+            Err(warning) => result.warnings.push(warning),
         }
-        _ => None,
-    };
+    }
     finalize_quality_status(&mut result, specs);
     result
 }
@@ -1441,7 +1612,35 @@ fn evaluate_fixed(
     if total <= 0.0 {
         return BlendResult::infeasible("验算配比的份数合计须大于 0", warnings);
     }
+    // 每份有限、合计却溢出成 inf 时, 归一化会把配比全变成 0, 结果是空配方、成本 0.
+    if !total.is_finite() {
+        return BlendResult::infeasible(
+            "验算配比的份数合计过大 (溢出), 请按比例缩小份数",
+            warnings,
+        );
+    }
     let ratios: Vec<f64> = kept.iter().map(|coal| share_of(coal) / total).collect();
+    // 验算不求最优, 不会去满足配比下限; 给定配比够不到时如实告警, 配比照算.
+    let mut floors: Vec<(&String, &f64)> = request
+        .min_ratios
+        .iter()
+        .filter(|(_, floor)| **floor > 0.0)
+        .collect();
+    floors.sort_by(|left, right| left.0.cmp(right.0));
+    for (name, floor) in floors {
+        let ratio = kept
+            .iter()
+            .zip(&ratios)
+            .find(|(coal, _)| &coal.name == name)
+            .map_or(0.0, |(_, ratio)| *ratio);
+        if ratio + MIN_RATIO_TOLERANCE < *floor {
+            warnings.push(format!(
+                "验算配比里 {name} 占 {:.2}%, 低于配比下限 {:.2}%",
+                ratio * 100.0,
+                floor * 100.0
+            ));
+        }
+    }
 
     let mut penalty_by_indicator = HashMap::new();
     for spec in specs
@@ -1483,6 +1682,7 @@ fn evaluate_fixed(
         formulas,
         evaluators,
         &ratios,
+        OUTPUT_RATIO_TOLERANCE,
         &penalty_by_indicator,
         warnings,
     )
@@ -1702,8 +1902,11 @@ struct LpProblem {
 }
 
 impl LpProblem {
-    fn solve(&self) -> Option<(Vec<f64>, f64)> {
-        self.solve_with(&self.c)
+    /// 返回的布尔标记解是否来自收紧重解 —— 那条路的解要按输出配方再过一道
+    /// ([`recipe_meets_hard_bounds`]), 正常路径不加.
+    fn solve(&self) -> Result<(Vec<f64>, f64, bool), LpFailure> {
+        self.solve_with_duals(&self.c)
+            .map(|(solution, objective, _, tightened)| (solution, objective, tightened))
     }
 
     /// 把某个指标推到极值 (Upper 求最小, Lower 求最大), 返回该指标的评估值.
@@ -1721,19 +1924,28 @@ impl LpProblem {
         for (column, coefficient) in formula.numerators.iter().take(self.ratio_count).enumerate() {
             objective[column] = sign * coefficient;
         }
-        let (solution, _) = self.solve_with(&objective)?;
+        let (solution, _) = self.solve_with(&objective).ok()?;
         formula.evaluate(&solution[..self.ratio_count])
     }
 
     /// 同一组约束换一个目标向量求解. 行不复制, 诊断的每次探测都走这里.
-    fn solve_with(&self, c: &[f64]) -> Option<(Vec<f64>, f64)> {
+    fn solve_with(&self, c: &[f64]) -> Result<(Vec<f64>, f64), LpFailure> {
         self.solve_with_duals(c)
-            .map(|(solution, objective, _)| (solution, objective))
+            .map(|(solution, objective, _, _)| (solution, objective))
     }
 
     /// 同 [`Self::solve_with`], 另带回 Clarabel 对偶变量 z (行序: Σx=1, a_ub 各行, x≥0 各行).
     /// Clarabel 的 KKT 为 c + Aᵀz = 0, 故列 j 的检验数 = c_j + z₀ + Σ a_rj·z_r.
-    fn solve_with_duals(&self, c: &[f64]) -> Option<(Vec<f64>, f64, Vec<f64>)> {
+    /// 返回的布尔标记解是否来自收紧重解.
+    ///
+    /// 求解器报"解出来了"而解过不了 [`Self::accept`] 时, 按 [`POSTCHECK_TIGHTEN_STEPS`]
+    /// 把复核没过的行的界往里收一丝重解, 复核仍按原始界做. 夹 0 + 归一化会把顶格行的
+    /// 残差放大几倍 (实测 2.9e-8 → 1.27e-7, 越过放行量 1.19e-7), 直接丢解会把严格可行的
+    /// 合同报成"约束冲突". 只收复核没过的行: 每种煤系数都正好等于界的行恒成立
+    /// (等价于 `Σ0·x ≤ 0`), 收一丝就变恒不成立, 整份可行的合同会被拖死 —— 全池岩相取
+    /// 同一个占位值是生产数据的常态. 收紧只在这条失败路上发生, 一次就过复核的正常求解
+    /// 结果不变.
+    fn solve_with_duals(&self, c: &[f64]) -> Result<(Vec<f64>, f64, Vec<f64>, bool), LpFailure> {
         debug_assert!(
             self.ratio_count <= self.n
                 && c.len() == self.n
@@ -1744,6 +1956,52 @@ impl LpProblem {
             self.n,
             c.len()
         );
+        let (solution, duals) = self.run_clarabel(c, &self.b_ub)?;
+        let mut failed_rows = match self.accept(c, solution, duals) {
+            Ok((solution, objective, duals)) => return Ok((solution, objective, duals, false)),
+            Err(failed) => failed,
+        };
+        for step in POSTCHECK_TIGHTEN_STEPS {
+            // 空 = 结构性失败 (解非有限/为负/配比和不对), 收紧同一组界不会有变化.
+            if failed_rows.is_empty() {
+                break;
+            }
+            let tightened: Vec<f64> = self
+                .a_ub
+                .iter()
+                .zip(&self.b_ub)
+                .enumerate()
+                .map(|(index, (row, bound))| {
+                    if !failed_rows.contains(&index) {
+                        return *bound;
+                    }
+                    let scale = row
+                        .iter()
+                        .fold(bound.abs(), |largest, value| largest.max(value.abs()));
+                    bound - step * (1.0 + scale)
+                })
+                .collect();
+            // 收紧后不可行/不收敛: 可行域比这一丝还薄, 再收只会更糟.
+            let Ok((solution, duals)) = self.run_clarabel(c, &tightened) else {
+                break;
+            };
+            match self.accept(c, solution, duals) {
+                Ok((solution, objective, duals)) => return Ok((solution, objective, duals, true)),
+                Err(now_failed) => {
+                    // 下一级把新没过复核的行一并收上.
+                    for index in now_failed {
+                        if !failed_rows.contains(&index) {
+                            failed_rows.push(index);
+                        }
+                    }
+                }
+            }
+        }
+        Err(LpFailure::Numerical("解未通过约束复核".into()))
+    }
+
+    /// 以给定右端项跑一次 Clarabel, 只按求解器状态分类, 不做解后复核.
+    fn run_clarabel(&self, c: &[f64], b_ub: &[f64]) -> Result<(Vec<f64>, Vec<f64>), LpFailure> {
         let n = self.n;
         let inequality_count = self.a_ub.len();
         let total_rows = 1 + inequality_count + n;
@@ -1763,7 +2021,7 @@ impl LpProblem {
 
         let constraint_matrix = build_csc(total_rows, n, &triplets);
         let mut right_hand_side = vec![1.0];
-        right_hand_side.extend_from_slice(&self.b_ub);
+        right_hand_side.extend_from_slice(b_ub);
         right_hand_side.extend(std::iter::repeat_n(0.0, n));
         let quadratic = CscMatrix::<f64>::zeros((n, n));
         let cones = [ZeroConeT(1), NonnegativeConeT(inequality_count + n)];
@@ -1771,7 +2029,7 @@ impl LpProblem {
             .verbose(false)
             .max_iter(200)
             .build()
-            .ok()?;
+            .map_err(|_| LpFailure::Numerical("求解器参数无效".into()))?;
         let mut solver = DefaultSolver::new(
             &quadratic,
             c,
@@ -1781,14 +2039,19 @@ impl LpProblem {
             settings,
         );
         solver.solve();
-        if !matches!(
-            solver.solution.status,
-            SolverStatus::Solved | SolverStatus::AlmostSolved
-        ) {
-            return None;
-        }
-        let mut solution = solver.solution.x.clone();
-        let duals = solver.solution.z.clone();
+        classify_status(solver.solution.status)?;
+        Ok((solver.solution.x.clone(), solver.solution.z.clone()))
+    }
+
+    /// 解后复核: 夹 0、归一化配比列, 再逐行按原始界验.
+    /// Ok = 通过; Err = 没过复核的行号 (空 = 结构性失败: 解非有限/为负/配比和不对,
+    /// 不是某一行差一丝, 收紧重解帮不上忙).
+    fn accept(
+        &self,
+        c: &[f64],
+        mut solution: Vec<f64>,
+        duals: Vec<f64>,
+    ) -> Result<(Vec<f64>, f64, Vec<f64>), Vec<usize>> {
         let raw_sum: f64 = solution[..self.ratio_count].iter().sum();
         // 非负性同样受档位列不归一化之累: 最优解 d=0 时内点法从下方逼近, 会落在
         // -1e-8 量级. 下面立刻 max(0.0) 夹回, 故放宽到 FEASIBILITY_TOLERANCE 是安全的;
@@ -1798,41 +2061,84 @@ impl LpProblem {
             .all(|value| value.is_finite() && *value >= -FEASIBILITY_TOLERANCE)
             && (raw_sum - 1.0).abs() <= SOLUTION_TOLERANCE;
         if !raw_valid {
-            return None;
+            return Err(Vec::new());
         }
         for value in &mut solution {
             *value = value.max(0.0);
         }
         let normalized_sum: f64 = solution[..self.ratio_count].iter().sum();
         if !normalized_sum.is_finite() || normalized_sum <= 0.0 {
-            return None;
+            return Err(Vec::new());
         }
         for value in &mut solution[..self.ratio_count] {
             *value /= normalized_sum;
         }
-        let valid = self.a_ub.iter().zip(&self.b_ub).all(|(row, bound)| {
-            let activity: f64 = row
-                .iter()
-                .zip(&solution)
-                .map(|(coefficient, value)| coefficient * value)
-                .sum();
-            // 相对判据: 配比列经归一化重投影后残差塌到 ~1e-13, 但档位列不归一化,
-            // 残差保持在 Clarabel 的原始收敛量级; 而吸收行在每个计价最优解处按构造都是紧的.
-            // 绝对容限会因此否掉正确解 —— 容限必须随行与解的量级缩放.
-            let magnitude: f64 = row
-                .iter()
-                .zip(&solution)
-                .map(|(coefficient, value)| (coefficient * value).abs())
-                .sum::<f64>()
-                .max(bound.abs());
-            activity <= bound + FEASIBILITY_TOLERANCE * (1.0 + magnitude)
-        });
+        let failed: Vec<usize> = self
+            .a_ub
+            .iter()
+            .zip(&self.b_ub)
+            .enumerate()
+            .filter_map(|(index, (row, bound))| {
+                let activity: f64 = row
+                    .iter()
+                    .zip(&solution)
+                    .map(|(coefficient, value)| coefficient * value)
+                    .sum();
+                // 相对判据: 配比列经归一化重投影后残差塌到 ~1e-13, 但档位列不归一化,
+                // 残差保持在 Clarabel 的原始收敛量级; 而吸收行在每个计价最优解处按构造都是紧的.
+                // 绝对容限会因此否掉正确解 —— 容限必须随行与解的量级缩放.
+                let magnitude: f64 = row
+                    .iter()
+                    .zip(&solution)
+                    .map(|(coefficient, value)| (coefficient * value).abs())
+                    .sum::<f64>()
+                    .max(bound.abs());
+                (activity > bound + FEASIBILITY_TOLERANCE * (1.0 + magnitude)).then_some(index)
+            })
+            .collect();
         let objective = c
             .iter()
             .zip(&solution)
             .map(|(coefficient, value)| coefficient * value)
             .sum();
-        valid.then_some((solution, objective, duals))
+        if failed.is_empty() {
+            Ok((solution, objective, duals))
+        } else {
+            Err(failed)
+        }
+    }
+}
+
+/// Clarabel 状态 → 能用 / 证实不可行 / 数值上没算出结论.
+fn classify_status(status: SolverStatus) -> Result<(), LpFailure> {
+    match status {
+        SolverStatus::Solved | SolverStatus::AlmostSolved => Ok(()),
+        SolverStatus::PrimalInfeasible | SolverStatus::AlmostPrimalInfeasible => {
+            Err(LpFailure::Infeasible)
+        }
+        other => Err(LpFailure::Numerical(status_zh(other).into())),
+    }
+}
+
+/// 求解器状态的中文说法. reason 是面向用户的文字, 不拼英文枚举名.
+fn status_zh(status: SolverStatus) -> &'static str {
+    match status {
+        SolverStatus::MaxIterations => "迭代次数用尽",
+        SolverStatus::MaxTime => "求解超时",
+        SolverStatus::NumericalError => "数值错误",
+        SolverStatus::InsufficientProgress => "迭代停滞",
+        _ => "求解器状态异常",
+    }
+}
+
+/// 求解失败时的 reason: 逐项诊断给出真凶 (子问题最优值确实越过执行界) ⇒ 原问题必无
+/// 可行解, 合同与煤池确实冲突 —— 与求解器这次是没收敛还是别的原因无关, 报"约束冲突".
+/// 诊断也落空时才按求解器的状态如实说"没算出可靠结论".
+fn failure_reason(failure: &LpFailure, diagnosis: &[InfeasibleBound]) -> String {
+    if diagnosis.is_empty() {
+        failure.reason()
+    } else {
+        CONFLICT_REASON.into()
     }
 }
 
@@ -1917,6 +2223,59 @@ mod tests {
         check("已训练评估器", &formulas);
     }
 
+    /// 求解器状态分三类: 只有证实不可行才是"约束冲突", 迭代用尽/数值错误要如实说没算出结论.
+    #[test]
+    fn test_solver_status_classification() {
+        assert_eq!(classify_status(SolverStatus::Solved), Ok(()));
+        assert_eq!(classify_status(SolverStatus::AlmostSolved), Ok(()));
+        for status in [
+            SolverStatus::PrimalInfeasible,
+            SolverStatus::AlmostPrimalInfeasible,
+        ] {
+            assert_eq!(classify_status(status), Err(LpFailure::Infeasible));
+            assert_eq!(LpFailure::Infeasible.reason(), "约束冲突, LP 不可行");
+        }
+        for status in [
+            SolverStatus::MaxIterations,
+            SolverStatus::InsufficientProgress,
+            SolverStatus::NumericalError,
+            SolverStatus::MaxTime,
+        ] {
+            let failure = classify_status(status).expect_err("不该当作解出");
+            assert!(matches!(failure, LpFailure::Numerical(_)), "{failure:?}");
+            let reason = failure.reason();
+            assert!(!reason.contains("约束冲突"), "{reason}");
+            assert!(reason.contains("无法判定"), "{reason}");
+            // 面向用户的文字用中文, 不拼英文枚举名.
+            assert!(!reason.contains(&format!("{status:?}")), "{reason}");
+        }
+    }
+
+    /// reason 的选择: 逐项诊断给出真凶 ⇒ 合同确实不可行已被证明, 无论求解器是没收敛
+    /// 还是别的原因都报"约束冲突"; 诊断落空时才按求解器状态说"无法判定".
+    #[test]
+    fn test_failure_reason_prefers_proven_conflict() {
+        let culprit = InfeasibleBound {
+            indicator: "V".into(),
+            label_zh: "挥发".into(),
+            direction: Direction::Upper,
+            required: 21.92,
+            enforced: 21.99999,
+            margin: 0.0,
+            achievable: 22.0,
+            relax_to: Some(22.0),
+        };
+        let numerical = LpFailure::Numerical("迭代停滞".into());
+        assert_eq!(
+            failure_reason(&numerical, std::slice::from_ref(&culprit)),
+            CONFLICT_REASON
+        );
+        let undetermined = failure_reason(&numerical, &[]);
+        assert!(undetermined.contains("无法判定"), "{undetermined}");
+        assert!(undetermined.contains("迭代停滞"), "{undetermined}");
+        assert_eq!(failure_reason(&LpFailure::Infeasible, &[]), CONFLICT_REASON);
+    }
+
     /// 直接构造两个已门控模型, 用于把 `build_formulas` 的手写 MetricFormula 分支走到.
     /// 不用 `EvaluatorSet::train`: 那会把测试耦合到样本量门槛等训练策略上.
     fn trained_evaluators() -> EvaluatorSet {
@@ -1971,7 +2330,7 @@ mod tests {
             a_ub: Vec::new(),
             b_ub: Vec::new(),
         };
-        let (solution, objective) = problem.solve().expect("应可解");
+        let (solution, objective, _) = problem.solve().expect("应可解");
         assert_eq!(solution.len(), 3, "解应含全部列");
         assert!(
             (solution[0] + solution[1] - 1.0).abs() < 1e-6,
@@ -1990,7 +2349,7 @@ mod tests {
     /// 本测试是"归一化只对配比列生效"这一断言唯一能证伪的用例.
     ///
     /// 约束 x0 + x1 − d ≤ 0.5 (d 即附加列 solution[2]), 因 Σx = 1 故等价于强制 d ≥ 0.5.
-    /// 若 raw_sum 仍对全部列求和: 1 + 0.5 = 1.5 ≠ 1 ⇒ 可行性校验失败 ⇒ solve 返回 None ⇒ 本测试 panic.
+    /// 若 raw_sum 仍对全部列求和: 1 + 0.5 = 1.5 ≠ 1 ⇒ 可行性校验失败 ⇒ solve 返回 Err ⇒ 本测试 panic.
     /// 若归一化仍对全部列做: 配比被 1.5 除 ⇒ 前两列之和变成 0.667 ⇒ 断言失败.
     #[test]
     fn test_lp_problem_handles_nonzero_extra_column() {
@@ -2001,7 +2360,7 @@ mod tests {
             a_ub: vec![vec![1.0, 1.0, -1.0]],
             b_ub: vec![0.5],
         };
-        let (solution, objective) = problem.solve().expect("应可解");
+        let (solution, objective, _) = problem.solve().expect("应可解");
         assert!(
             (solution[0] + solution[1] - 1.0).abs() < 1e-6,
             "配比列之和应为 1, 实得 {}",
@@ -2039,6 +2398,9 @@ mod tests {
             coal_type: None,
             form: None,
             region: None,
+            province: None,
+            city: None,
+            county: None,
         }
     }
 

@@ -1,5 +1,10 @@
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
 import type { BlendResult, EvaluationMethod, EvaluationStatus, IndicatorCheck, QualityStatus } from "../types";
+import {
+  shovelExtraCostNotice,
+  shovelRoundingMissed,
+  shovelRoundingNotice,
+} from "../domain/resultNotes";
 
 const RECIPE_COLORS = ["#0a5fff", "#7c3aed", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#8b5cf6"];
 
@@ -11,7 +16,7 @@ export const QUALITY_STATUS_LABEL: Record<QualityStatus, string> = {
 
 const EVALUATION_STATUS_LABEL: Record<EvaluationStatus, string> = {
   Pass: "通过",
-  TolerancePass: "容差通过",
+  TolerancePass: "按规则达标",
   Unverified: "未验证",
   Fail: "未通过",
 };
@@ -49,16 +54,41 @@ function formatIndicatorValue(value: number): string {
     .replace(/\.?0+$/, "");
 }
 
+/**
+ * 真实值与判定值只差求解残差或原值判定的放行量 (1e-7 量级): 当作同一个数.
+ * 顶在下限上的解常比下限低一丝 (20.7999999968), 照实显示成 20.7999 反而像没达标.
+ */
+function sameValue(raw: number, judged: number): boolean {
+  return Math.abs(raw - judged) <= 1e-6 * (1 + Math.abs(raw));
+}
+
+/**
+ * 混合指标的真实值: 多出来的小数往判定值那一侧取, 而不是四舍五入. 合同按判定值算达标
+ * (如保留 1 位小数、截断: 1.09999 记 1.0), 真实值若四舍五入成 1.1, 旁边又写着「记 1」,
+ * 看着就自相矛盾. 加减的一点零头是为了抹掉二进制误差 (0.57 × 10000 = 5699.999…).
+ */
+function formatTrueValue(raw: number, judged: number): string {
+  if (sameValue(raw, judged)) return formatIndicatorValue(judged);
+  const scaled = raw * 1e4;
+  const toward = raw > judged ? Math.floor(scaled + 1e-6) : Math.ceil(scaled - 1e-6);
+  return formatIndicatorValue(toward / 1e4);
+}
+
 export function RecipeCard({
   result,
   coalTypes,
   title = "今日配方",
+  shovelTons = null,
 }: {
   result: BlendResult;
   coalTypes: Map<string, string>;
   title?: string;
+  /** 本次请求的一铲吨数; 带了却没凑成整铲时在卡里说破. */
+  shovelTons?: number | null;
 }) {
   const sortedRecipe = [...result.orders].sort((a, b) => b.ratio - a.ratio);
+  const roundingMissed =
+    shovelTons != null && shovelRoundingMissed({ shovel_tons: shovelTons }, result);
   return (
     <div className="card today-recipe">
       <div
@@ -110,6 +140,16 @@ export function RecipeCard({
           </div>
         ))}
       </div>
+      {roundingMissed && shovelTons != null && (
+        <p className="result-notice" role="status">
+          {shovelRoundingNotice(shovelTons)}
+        </p>
+      )}
+      {result.shovel_extra_cost != null && result.shovel_extra_cost >= 0.005 && (
+        <p className="result-notice" role="status">
+          {shovelExtraCostNotice(result.shovel_extra_cost)}
+        </p>
+      )}
     </div>
   );
 }
@@ -177,7 +217,7 @@ export function IndicatorCard({ result }: { result: BlendResult }) {
               <div className="indicator-label">{label}</div>
               <div className="indicator-value-row">
                 <div className="indicator-value">
-                  {unavailable ? "—" : formatIndicatorValue(judgedValue)}
+                  {unavailable ? "—" : formatTrueValue(rawValue, judgedValue)}
                 </div>
                 {ic.penalty_per_ton != null && ic.penalty_per_ton > 1e-6 ? (
                   <span className="indicator-penalty">
@@ -191,11 +231,17 @@ export function IndicatorCard({ result }: { result: BlendResult }) {
                   </span>
                 )}
               </div>
-              <div className="indicator-meta">
-                {unavailable
-                  ? "缺少可用指标或评估输入"
-                  : `原始 ${formatIndicatorValue(rawValue)} · 判定 ${formatIndicatorValue(judgedValue)}`}
-              </div>
+              {/* 大字是真实值; 合同按判定规则取舍后的值不同时, 另起一行说明按多少算. */}
+              {unavailable ? (
+                <div className="indicator-meta">缺少可用指标或评估输入</div>
+              ) : (
+                !sameValue(rawValue, judgedValue) &&
+                formatTrueValue(rawValue, judgedValue) !== formatIndicatorValue(judgedValue) && (
+                  <div className="indicator-meta">
+                    按合同规则记 {formatIndicatorValue(judgedValue)}
+                  </div>
+                )
+              )}
               <div className="indicator-meta">
                 {rangeStr}
                 {ic.binding && !violated ? " · ★ 顶格" : ""}
@@ -216,7 +262,10 @@ export function IndicatorCard({ result }: { result: BlendResult }) {
                   公式精度在个位数, 只给一位小数. */}
               {key === "CSR" && result.csr_stamp_estimate != null && (
                 <div className="indicator-meta">
-                  捣固公式估算 {result.csr_stamp_estimate.toFixed(1)}
+                  捣固公式估算 {result.csr_stamp_estimate.toFixed(1)} · 仅供参考, 不参与达标判定
+                  {ic.min != null && result.csr_stamp_estimate < ic.min
+                    ? ` · 低于合同下限 ${ic.min}`
+                    : ""}
                 </div>
               )}
             </div>

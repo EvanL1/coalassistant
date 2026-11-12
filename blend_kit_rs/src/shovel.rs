@@ -10,14 +10,22 @@
 //!    或煤阶交互时重解带启发式迭代, 子节点成本不保证单调, 剪枝可能错过更便宜的组合.
 //!    节点数有上限, 到了就用已找到的最好解.
 //! 2. **整铲**: 各煤铲数按最大余数法凑成合计 N (入选的煤至少 1 铲), 再按铲数验算, 岩相
-//!    按真实配比做精确复核. 凑整让某项超标时, 试着在两种煤之间挪一铲, 取不超标里最便宜的;
-//!    都不行就退回未凑整的配方并提示.
+//!    按真实配比做精确复核. 凑整让某项超标或低于配比下限 (`min_ratios`) 时, 试着在两种煤
+//!    之间挪一铲, 取不超标里最便宜的.
+//! 3. **留余量重配**: 还是凑不成, 多半是配方顶在合同界上、一点余地都没有, 挪一铲就破.
+//!    给被凑整顶破的那几项留一点安全余量 (`Spec::margin`) 重新走 1、2 两步, 逐级加大,
+//!    新顶破的项也加进来; 凑整后的验算仍按原合同. 成功就如实说为此贵了多少;
+//!    都不行才退回未凑整的配方并提示.
 //!
 //! 配煤价值 (盈亏平衡价) 取原问题的 LP 解: 分支定界的节点去掉了煤、加了下限, 对偶价已变了味.
-//! LP 解里占比 ≤ 1e-5 的煤不进 recipe, 凑整时按 0 处理.
+//! 不进 recipe 的零头煤 (占比 ≤ 1e-5、且去掉它配方照样达标) 凑整时按 0 处理; 达标离不开的零头煤
+//! 会留在 recipe 里 (见 `optimizer::output_grain`), 在第 1 步被当成不到一铲的煤: 去掉或提到一铲.
 
 use crate::model::*;
-use crate::optimizer::{finalize_quality_status, review_petrography, FIXED_PETRO_NOTE};
+use crate::optimizer::{
+    finalize_quality_status, review_petrography, FIXED_PETRO_NOTE, MIN_RATIO_TOLERANCE,
+};
+use crate::quality::acceptance_rule;
 use std::collections::{HashMap, HashSet};
 
 /// 已有可行解后, 分支定界最多重解几次.
@@ -31,6 +39,17 @@ const MAX_SHOVELS: f64 = 1_000_000.0;
 const RATIO_EPS: f64 = 1e-6;
 /// 成本比较的容差 (元/吨).
 const COST_EPS: f64 = 1e-9;
+/// 分支定界到了节点上限时的提示.
+const TRUNCATED_NOTE: &str = "一铲最小量: 搜索到上限, 配方可能不是最便宜的";
+/// 多花不到这么多 (元/吨) 就不单独说 —— 显示出来是 0.00.
+const EXTRA_COST_WORTH_SAYING: f64 = 0.005;
+/// 留余量重配时逐级试的余量, 以该项的判定步长为单位 (保留 1 位小数判定时步长是 0.1).
+/// 一铲是 1/N, 凑整带来的指标偏移多在步长的百分之几到十分之几; 最大一级留满一格.
+const HEADROOM_STEPS: [f64; 3] = [0.1, 0.3, 1.0];
+/// 按原值判定的项没有步长, 取合同数的这个比例当步长.
+const RAW_STEP_FRACTION: f64 = 0.01;
+/// 留余量重配最多几轮 (每轮至少有一项的余量加大一级).
+const MAX_HEADROOM_ROUNDS: usize = 6;
 
 /// 重解入口: `(请求, 是否做不可行诊断)`.
 pub(crate) type Resolve<'a> = dyn Fn(&BlendRequest, bool) -> BlendResult + 'a;
@@ -91,12 +110,27 @@ pub(crate) fn solve(request: &BlendRequest, resolve: &Resolve) -> BlendResult {
         };
         return BlendResult::infeasible(&reason, root.warnings);
     };
-    let mut result = whole_shovels(&node, lp, total, tons, resolve);
+    let min_share = search.min_share;
+    let mut result = match whole_shovels(&node, lp, total, resolve) {
+        Rounding::Whole(result) => result,
+        Rounding::Unrounded { lp, broken } => round_with_headroom(
+            request, &lp, broken, total, min_share, resolve,
+        )
+        .unwrap_or_else(|| {
+            let mut lp = lp;
+            lp.warnings
+                .push(format!("凑不成整铲 (一铲 {tons} 吨): 显示的是未凑整的配方"));
+            lp
+        }),
+    };
     result.blend_values = root.blend_values;
-    if search.truncated {
+    if result.orders.iter().any(|order| order.shovels.is_some()) {
         result
             .warnings
-            .push("一铲最小量: 搜索到上限, 配方可能不是最便宜的".into());
+            .extend(quantity_mismatch(quantity, tons, total));
+    }
+    if search.truncated && !result.warnings.iter().any(|note| note == TRUNCATED_NOTE) {
+        result.warnings.push(TRUNCATED_NOTE.into());
     }
     result
 }
@@ -164,6 +198,26 @@ impl Search<'_> {
             .min_by(|left, right| left.1.total_cmp(right.1).then(left.0.cmp(right.0)))
             .map(|(name, _)| name.clone())
     }
+}
+
+/// 总铲数 N = round(采购量 / 一铲), 订单吨数与成本仍按采购量算; 两者对不上时如实说差多少.
+/// 差额按 0.0001 吨取整后为 0 的只是浮点零头, 不提示.
+fn quantity_mismatch(quantity: f64, tons: f64, total: u32) -> Option<String> {
+    let rounded = |value: f64| (value * 1e4).round() / 1e4;
+    let actual = f64::from(total) * tons;
+    let gap = rounded((actual - quantity).abs());
+    if gap == 0.0 {
+        return None;
+    }
+    let side = if actual < quantity { "少" } else { "多" };
+    Some(format!(
+        "采购总量 {} 吨不是一铲 {} 吨的整数倍: {total} 铲实际是 {} 吨, 比采购总量{side} {gap} 吨; \
+         订单吨数与成本仍按 {} 吨计",
+        rounded(quantity),
+        rounded(tons),
+        rounded(actual),
+        rounded(quantity)
+    ))
 }
 
 fn net_cost(result: &BlendResult) -> Option<f64> {
@@ -240,6 +294,23 @@ fn evaluate(
         .zip(counts)
         .map(|(name, count)| ((*name).clone(), f64::from(*count)))
         .collect();
+    let total = f64::from(counts.iter().sum::<u32>());
+    // 验算路径不看 min_ratios, 凑整只认满足配比下限的铲数; 不满足就当这组铲数不可用,
+    // 交给挪铲修复, 再不行退回未凑整的配方.
+    // 下限只针对实际在配方里的煤, 与 LP 侧一致: 被剔出煤池的煤下限不生效, LP 解成
+    // 零头的煤不进配方, 凑整按 0 处理.
+    let mut floors: Vec<(&String, &f64)> = node.min_ratios.iter().collect();
+    floors.sort_by(|left, right| left.0.cmp(right.0));
+    if let Some((name, floor)) = floors.into_iter().find(|(name, floor)| {
+        shares
+            .get(*name)
+            .is_some_and(|count| count / total + MIN_RATIO_TOLERANCE < **floor)
+    }) {
+        return BlendResult::infeasible(
+            &format!("整铲配比低于 {name} 的配比下限 {floor}"),
+            Vec::new(),
+        );
+    }
     let mut trial = node.clone();
     trial.shovel_tons = None;
     trial.min_ratios.clear();
@@ -251,7 +322,6 @@ fn evaluate(
     result
         .warnings
         .retain(|warning| warning != FIXED_PETRO_NOTE);
-    let total = f64::from(counts.iter().sum::<u32>());
     let participating: Vec<(&Coal, f64)> = node
         .coals
         .iter()
@@ -276,13 +346,19 @@ fn evaluate(
     result
 }
 
-fn whole_shovels(
-    node: &BlendRequest,
-    lp: BlendResult,
-    total: u32,
-    tons: f64,
-    resolve: &Resolve,
-) -> BlendResult {
+/// 凑整的结果.
+enum Rounding {
+    /// 凑成了整铲.
+    Whole(BlendResult),
+    /// 没凑成: 带回未凑整的配方, 以及按最大余数法凑整时被顶破的指标 (凑整后的配方连验算
+    /// 都没过时为空 —— 那不是余量能解决的).
+    Unrounded {
+        lp: BlendResult,
+        broken: Vec<String>,
+    },
+}
+
+fn whole_shovels(node: &BlendRequest, lp: BlendResult, total: u32, resolve: &Resolve) -> Rounding {
     let mut names: Vec<&String> = lp.recipe.keys().collect();
     names.sort();
     let ratios: Vec<f64> = names.iter().map(|name| lp.recipe[*name]).collect();
@@ -292,6 +368,15 @@ fn whole_shovels(
 
     let rounded = apportion(&ratios, total);
     let first = run(&rounded);
+    let mut broken: Vec<String> = if first.ok {
+        failed(&first)
+            .difference(&allowed)
+            .map(|indicator| (*indicator).to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    broken.sort();
     let mut chosen = acceptable(&first).then_some(first);
     if chosen.is_none() {
         // 在两种煤之间挪一铲 (挪出的煤至少留 1 铲), 取不超标里最便宜的.
@@ -312,12 +397,131 @@ fn whole_shovels(
             }
         }
     }
-    chosen.unwrap_or_else(|| {
-        let mut lp = lp;
-        lp.warnings
-            .push(format!("凑不成整铲 (一铲 {tons} 吨): 显示的是未凑整的配方"));
-        lp
-    })
+    match chosen {
+        Some(result) => Rounding::Whole(result),
+        None => Rounding::Unrounded { lp, broken },
+    }
+}
+
+/// 留余量重配: 给被凑整顶破的那几项加安全余量重新解、再凑整; 每轮把仍被顶破的项加大一级,
+/// 新顶破的项加进来. 凑整后的验算按原合同 (余量只为给凑整留地方). 凑不成返回 None.
+fn round_with_headroom(
+    request: &BlendRequest,
+    unrounded: &BlendResult,
+    mut broken: Vec<String>,
+    total: u32,
+    min_share: f64,
+    resolve: &Resolve,
+) -> Option<BlendResult> {
+    let base_cost = net_cost(unrounded)?;
+    // 余量只对进了 LP 的约束 (硬约束、计价拒收线) 起作用; 凑整顶破的若是软约束, 留余量帮不上.
+    let enforceable: HashSet<&str> = request
+        .specs
+        .iter()
+        .filter(|spec| {
+            spec.enabled && matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced)
+        })
+        .map(|spec| spec.indicator.as_str())
+        .collect();
+    // 指标 → 当前用到 HEADROOM_STEPS 的第几级.
+    let mut levels: HashMap<String, usize> = HashMap::new();
+    for _ in 0..MAX_HEADROOM_ROUNDS {
+        broken.retain(|indicator| enforceable.contains(indicator.as_str()));
+        let mut raised = false;
+        for indicator in &broken {
+            match levels.get_mut(indicator) {
+                None => {
+                    levels.insert(indicator.clone(), 0);
+                    raised = true;
+                }
+                Some(level) if *level + 1 < HEADROOM_STEPS.len() => {
+                    *level += 1;
+                    raised = true;
+                }
+                Some(_) => {}
+            }
+        }
+        // 没有哪一项还能再加余量 (或凑整不是被指标顶破的): 余量帮不上.
+        if !raised {
+            return None;
+        }
+        let tightened = with_headroom(request, &levels);
+        let root = resolve(&tightened, false);
+        // 留了余量合同就配不出: 再大的余量只会更配不出.
+        if !root.ok {
+            return None;
+        }
+        let mut search = Search {
+            min_share,
+            resolve,
+            nodes: 0,
+            truncated: false,
+            best: None,
+        };
+        search.explore(tightened, root);
+        let truncated = search.truncated;
+        let (node, lp) = search.best?;
+        let mut review = node;
+        review.specs.clone_from(&request.specs);
+        match whole_shovels(&review, lp, total, resolve) {
+            Rounding::Whole(mut result) => {
+                let mut labels: Vec<&str> = levels.keys().map(|key| label_zh(key)).collect();
+                labels.sort_unstable();
+                // 基准是不按整铲取整的配方 (每种煤至少一铲, 但铲数不是整数), 本身没法照着装.
+                let extra = net_cost(&result).map_or(0.0, |cost| (cost - base_cost).max(0.0));
+                result.shovel_extra_cost = Some(extra);
+                let cost_note = if extra >= EXTRA_COST_WORTH_SAYING {
+                    format!("; 比不按整铲配贵 {extra:.2} 元/吨")
+                } else {
+                    String::new()
+                };
+                result.warnings.push(format!(
+                    "为凑成整铲, 给{}留了余量重新配{cost_note}",
+                    labels.join("、")
+                ));
+                if truncated {
+                    result.warnings.push(TRUNCATED_NOTE.into());
+                }
+                return Some(result);
+            }
+            Rounding::Unrounded { broken: next, .. } => broken = next,
+        }
+    }
+    None
+}
+
+/// 给指定的几项加安全余量 (在原有 margin 之上), 量 = 该项判定步长 × 当前级别的比例.
+fn with_headroom(request: &BlendRequest, levels: &HashMap<String, usize>) -> BlendRequest {
+    let mut tightened = request.clone();
+    for spec in &mut tightened.specs {
+        let Some(level) = levels.get(&spec.indicator) else {
+            continue;
+        };
+        if !spec.enabled || !matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced) {
+            continue;
+        }
+        let headroom = HEADROOM_STEPS[*level] * judging_step(spec, request.truncate_decimal);
+        spec.margin = Some(spec.margin.unwrap_or(0.0) + headroom);
+    }
+    tightened
+}
+
+/// 这一项的判定步长: 保留 n 位小数判定时是 10^-n; 按原值判定时取合同数的一个小比例.
+fn judging_step(spec: &Spec, legacy_truncate: bool) -> f64 {
+    let rule = acceptance_rule(spec, legacy_truncate);
+    match rule.mode {
+        AcceptanceMode::Raw => {
+            let bound = spec
+                .max
+                .into_iter()
+                .chain(spec.min)
+                .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+            RAW_STEP_FRACTION * bound.max(1e-6)
+        }
+        AcceptanceMode::Truncate | AcceptanceMode::Round => {
+            10_f64.powi(-i32::from(rule.decimals.unwrap_or(0).min(6)))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -54,6 +54,12 @@ pub struct CoalMasterEntry {
     #[serde(default)]
     pub region: Option<String>,
     #[serde(default)]
+    pub province: Option<String>,
+    #[serde(default)]
+    pub city: Option<String>,
+    #[serde(default)]
+    pub county: Option<String>,
+    #[serde(default)]
     pub coal_type: Option<String>,
     /// 产品形态 (原煤/精煤/浮选精煤/中煤/煤泥). 与 coal_type 正交:
     /// 同一煤层洗出的精煤与煤泥煤种相同, 差的是灰分/粒度/价格.
@@ -168,6 +174,9 @@ impl CoalMasterEntry {
             coal_type: self.coal_type.clone(),
             form: self.form.clone(),
             region: self.region.clone(),
+            province: self.province.clone(),
+            city: self.city.clone(),
+            county: self.county.clone(),
         })
     }
 

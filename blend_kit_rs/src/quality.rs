@@ -420,6 +420,15 @@ pub(crate) fn validate_request(request: &BlendRequest) -> Result<(), String> {
     let mut names = std::collections::HashSet::new();
     for coal in &request.coals {
         validate_coal(coal)?;
+        // 煤池里的煤按自身报价直接进 LP, 不走估价 (估价只给 price_factor.extra_coals);
+        // 出厂价 ≤ 0 按约定就是"没报价" (pricing / price_factor 同一约定), 这种煤进 LP
+        // 会被当成近乎免费的煤把配方整个拽过去, 哪怕运费不是 0.
+        if coal.fob <= 0.0 {
+            return Err(format!(
+                "{} 的出厂价为 0 (没报价), 不能当免费煤求解: 没报价的煤请按估价求解",
+                coal.name
+            ));
+        }
         if !names.insert(coal.name.as_str()) {
             return Err(format!("煤名重复: {}", coal.name));
         }
@@ -864,6 +873,9 @@ mod tests {
                 coal_type: None,
                 form: None,
                 region: None,
+                province: None,
+                city: None,
+                county: None,
             }],
             specs: vec![spec],
             total_quantity: None,
@@ -1101,6 +1113,9 @@ mod tests {
             coal_type: None,
             form: None,
             region: None,
+            province: None,
+            city: None,
+            county: None,
         }
     }
 

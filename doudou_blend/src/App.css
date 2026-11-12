@@ -65,7 +65,8 @@ button {
   margin: 0 auto;
   min-height: 100vh;
   position: relative;
-  padding-bottom: var(--tab-height);
+  /* 底部导航是 fixed 的: 列表底部留出导航 + 安全区 + 一点余量, 最后一张卡片不被盖住 */
+  padding-bottom: calc(var(--tab-height) + env(safe-area-inset-bottom) + 16px);
   background: var(--c-bg);
 }
 
@@ -82,6 +83,47 @@ button {
 .tab-bar-label,
 .tab-bar-footer {
   display: none;
+}
+
+/* 同步横幅与行情条共用的吸顶容器: 两者在里面上下排开, 一起吸顶. */
+.sticky-top {
+  position: sticky;
+  top: 0;
+  z-index: 12;
+  background: var(--c-bg);
+}
+/* 没有横幅也没有行情条时不占位 (合同、历史、我的页). */
+.sticky-top:empty {
+  display: none;
+}
+
+/* 云端写回失败/冲突的常驻提示. */
+.sync-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 12px;
+  box-shadow: var(--shadow-sm);
+}
+.sync-banner-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sync-banner-text strong {
+  font-size: 13px;
+}
+.sync-banner .btn {
+  flex: none;
+  height: 34px;
+  padding: 0 14px;
 }
 
 /* ========== Card ========== */
@@ -221,6 +263,33 @@ button {
 .cost-orphan-warning-list {
   margin: 4px 0 0;
   padding-left: 18px;
+}
+.cost-stale-note {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.edit-input-error {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--c-danger);
+  padding: 0 0 8px;
+  text-align: right;
+}
+
+/* 结果卡里的提醒 (没凑成整铲、未填运费、报价偏低): 不拦操作, 但要看得见 */
+.result-notice {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* ========== Recipe ========== */
@@ -394,12 +463,15 @@ button {
 }
 
 /* ========== Bottom Tab Bar ========== */
+/* z-index 必须有: 半透明 (opacity<1) 的煤卡会自成层叠上下文, 没有 z-index 时排在导航之上,
+   文字盖住图标、点导航点到卡片. 层级: 行情条 10 < 同步提示 12 < 导航 100 < 弹层 1000. */
 .tab-bar {
   position: fixed;
+  z-index: 100;
   bottom: 0;
   left: 0;
   right: 0;
-  height: var(--tab-height);
+  height: calc(var(--tab-height) + env(safe-area-inset-bottom));
   background: var(--c-card);
   border-top: 1px solid var(--c-border);
   display: grid;
@@ -758,10 +830,6 @@ button {
 /* 行情窄条 (炼焦煤价格指数), 页面顶部常驻. 手机压成一行、左右滑动、不画走势 —— 常驻时排成
    四行会一直占掉约 120px 屏幕; 宽屏自动排、带走势, 七个品种一眼看全. */
 .index-ticker {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  background: var(--c-bg);
   display: flex;
   gap: 16px;
   overflow-x: auto;
@@ -979,6 +1047,7 @@ button {
     gap: 14px;
   }
 
+  .screen-me > .sticky-top,
   .screen-me > .page-header,
   .screen-me > p {
     grid-column: 1 / -1;
@@ -1135,7 +1204,8 @@ button {
 
   .today-dashboard {
     display: grid;
-    grid-template-columns: minmax(320px, 0.85fr) minmax(480px, 1.35fr);
+    /* 两列的最小宽度加间距要放得进 960px 断点下最窄的内容区 (侧栏之外约 720px). */
+    grid-template-columns: minmax(280px, 0.85fr) minmax(400px, 1.35fr);
     grid-template-rows: auto 1fr;
     gap: 16px;
     align-items: stretch;
@@ -1335,7 +1405,7 @@ button {
 /* 贴底操作条: 手机上停在底部标签栏之上, 宽屏 (侧栏布局) 停在窗口底部. */
 .quote-actionbar {
   position: sticky;
-  bottom: calc(var(--tab-height) + 8px);
+  bottom: calc(var(--tab-height) + env(safe-area-inset-bottom) + 8px);
   z-index: 5;
   display: flex;
   align-items: center;
@@ -1412,4 +1482,17 @@ button {
   .quote-actionbar {
     bottom: 16px;
   }
+}
+
+/* 产地: 省 / 市 / 县三个下拉并排, 窄屏折行. */
+.edit-place {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 8px;
+  flex: 2;
+}
+.edit-place .edit-input {
+  width: auto;
+  max-width: 9em;
 }

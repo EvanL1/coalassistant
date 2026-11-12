@@ -14,11 +14,46 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MASTER_PATH = "blend_kit_rs/data/coal_master.json";
+// 行政区划名录 (省 → 市 → 县): 与前端产地下拉读的是同一份, 词表只有一份真源.
+const DIVISIONS_PATH = "doudou_blend/src/data/divisions.json";
 
 const failures = [];
 const fail = (message) => failures.push(message);
 
 const master = JSON.parse(readFileSync(join(repositoryRoot, MASTER_PATH), "utf8"));
+const divisions = JSON.parse(readFileSync(join(repositoryRoot, DIVISIONS_PATH), "utf8"));
+
+/**
+ * 产地: 省 / 市 / 县三个字段, 取行政区划全称, 逐级填 (填了市要有省, 填了县要有市),
+ * 且下一级确实属于上一级. 自由文本的 region 已停用 —— 省市县混着写, 对标时认不出本地基准.
+ */
+function checkPlace(label, entry) {
+  if (entry.region != null) {
+    fail(`${label}: 产地不再用 region (${JSON.stringify(entry.region)}), 改填 province / city / county`);
+  }
+  const { province, city, county } = entry;
+  for (const [key, value] of Object.entries({ province, city, county })) {
+    if (value != null && (typeof value !== "string" || value === "")) {
+      fail(`${label}: ${key} ${JSON.stringify(value)} 须为非空字符串, 不知道就不写这个键`);
+      return;
+    }
+  }
+  if (province == null) {
+    if (city != null || county != null) fail(`${label}: 填了市或县, 也要填省`);
+    return;
+  }
+  const cities = divisions[province];
+  if (!cities) return fail(`${label}: 省 ${province} 不在行政区划名录里 (要写全称, 如 山西省)`);
+  if (city == null) {
+    if (county != null) fail(`${label}: 填了县 ${county}, 也要填市`);
+    return;
+  }
+  const counties = cities[city];
+  if (!counties) return fail(`${label}: ${province} 没有 ${city} (要写全称, 如 晋中市)`);
+  if (county != null && !counties.includes(county)) {
+    fail(`${label}: ${province}${city} 没有 ${county} (要写全称, 如 灵石县)`);
+  }
+}
 
 /** 8 项化验指标及其物理量程 (超出即录入错误, 与具体煤源无关). */
 const INDICATOR_RANGE = {
@@ -115,6 +150,7 @@ for (const coal of master.coals) {
 
   // coal_type / form 必须落在 schema 声明的词表里 —— 这两列曾混入
   // 「主焦煤」(贸易口语) 与「煤泥」(产品形态), 没有校验就会再漂回去.
+  checkPlace(label, coal);
   if (coal.coal_type != null && !COAL_TYPES.includes(coal.coal_type)) {
     fail(`${label}: coal_type ${JSON.stringify(coal.coal_type)} 不在 schema.coal_type 词表内`);
   }
@@ -258,6 +294,7 @@ if (priceFactor != null) {
     if (!benchmark.name) fail(`${label}: 缺 name`);
     if (benchmarkNames.has(benchmark.name)) fail(`${label}: 重名`);
     benchmarkNames.add(benchmark.name);
+    checkPlace(label, benchmark);
     if (benchmark.coal_type != null && !COAL_TYPES.includes(benchmark.coal_type)) {
       fail(`${label}: 煤种 ${benchmark.coal_type} 不在 schema.coal_type 词表内`);
     }
@@ -290,6 +327,7 @@ if (priceFactor != null) {
     // 指数名会显示在界面上 (对标、推算出处), 不写数据来源.
     if (/钢铁网|mysteel/i.test(series.name ?? "")) fail(`${label}: name 不写数据来源 (界面会显示)`);
     benchmarkNames.add(series.name);
+    checkPlace(label, series);
     if (!COAL_TYPES.includes(series.coal_type)) fail(`${label}: 煤种 ${series.coal_type} 不在 schema.coal_type 词表内`);
     if (series.form != null && !FORMS.includes(series.form)) fail(`${label}: 形态 ${series.form} 不在 schema.form 词表内`);
     if (series.price != null || series.date != null) fail(`${label}: 价格与日期由服务端每天拉取, master 里不要写`);
@@ -318,6 +356,14 @@ if (priceFactor != null) {
   const regionPenalty = priceFactor.region_penalty;
   if (regionPenalty != null && !(typeof regionPenalty === "number" && Number.isFinite(regionPenalty) && regionPenalty >= 0)) {
     fail(`price_factor.region_penalty=${regionPenalty} 须为 ≥0 的有限数`);
+  }
+  const cityPenalty = priceFactor.city_penalty;
+  if (cityPenalty != null) {
+    if (!(typeof cityPenalty === "number" && Number.isFinite(cityPenalty) && cityPenalty >= 0)) {
+      fail(`price_factor.city_penalty=${cityPenalty} 须为 ≥0 的有限数`);
+    } else if (cityPenalty > (regionPenalty ?? 0)) {
+      fail(`price_factor.city_penalty=${cityPenalty} 不能大于 region_penalty=${regionPenalty ?? 0} (同省外市不该比外省更远)`);
+    }
   }
   const matching = priceFactor.matching;
   if (matching != null) {
@@ -366,27 +412,16 @@ if (notices.length) {
   for (const message of notices) console.log(`  - ${message}`);
 }
 
-// 估价按 煤种 → 形态 → 地区 对标, 地区要与基准写法一致才对得上 (只提示).
-const benchmarkRegions = new Set(
-  [...(master.price_factor?.benchmarks ?? []), ...(master.price_factor?.index_series ?? [])]
-    .map((b) => b.region)
-    .filter(Boolean),
-);
-if (benchmarkRegions.size) {
-  const unmatched = {};
-  for (const coal of master.coals.filter((c) => c.status === "active" || c.status === "verified")) {
-    const region = coal.region ?? "(无)";
-    if (!benchmarkRegions.has(region)) unmatched[region] = (unmatched[region] ?? 0) + 1;
-  }
-  const total = Object.values(unmatched).reduce((a, b) => a + b, 0);
-  if (total) {
-    console.log(
-      `地区对不上任何基准 (${total} 种在用煤, 仅提示, 地区只是软偏好, 对不上只是不享受本地优先; 基准地区: ${[...benchmarkRegions].join("/")}): ` +
-        Object.entries(unmatched)
-          .map(([region, count]) => `${region} ${count}`)
-          .join(", "),
-    );
-  }
+// 产地写到哪一级 (只提示): 只写到省的煤享受不到同市基准优先, 补上市才有用.
+{
+  const inUse = master.coals.filter((c) => c.status === "active" || c.status === "verified");
+  const level = (c) => (c.county ? "到县" : c.city ? "到市" : c.province ? "只到省" : "没写");
+  const counts = {};
+  for (const coal of inUse) counts[level(coal)] = (counts[level(coal)] ?? 0) + 1;
+  console.log(
+    `在用煤的产地 (仅提示, 对标按 省 → 市 比, 只到省的煤分不出本市基准): ` +
+      ["到县", "到市", "只到省", "没写"].map((key) => `${key} ${counts[key] ?? 0}`).join(", "),
+  );
 }
 
 const byStatus = {};

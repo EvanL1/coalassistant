@@ -8,6 +8,7 @@ import {
   type ResolvedCoal,
 } from "../domain/resolvedCoal";
 import { loadMaster } from "../master_loader";
+import { errorMessage } from "../http";
 import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalPriceSnapshot, CoalStatus, CoalValue, MasterCoalEntry } from "../types";
 import { cardPrice, coalsToEstimate, estimateLive, fetchCoalPrices, hasPriceHistory, isModified, type CardPrice } from "../coalPrices";
@@ -16,6 +17,7 @@ import { CoalPriceLine } from "../CoalPriceLine";
 import { CoalEditor } from "../CoalEditor";
 import { NewCoalDialog } from "../NewCoalDialog";
 import { coalTag } from "../domain/coalTypes";
+import { placeLabel } from "../domain/place";
 import { PenaltyTemplateEditor } from "../PenaltyTemplateEditor";
 import { getPenaltyTemplate, PENALTY_TEMPLATE_EVENT } from "../penaltyStorage";
 import {
@@ -44,6 +46,8 @@ const STATUS_ORDER: CoalStatus[] = [
 
 export function CoalPoolScreen() {
   const [master, setMaster] = useState<CoalMaster | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [prefs, setPrefs] = useState<CoalPrefs>({});
   const [userCoals, setUserCoals] = useState<MasterCoalEntry[]>([]);
   const [snapshot, setSnapshot] = useState<CoalPriceSnapshot | null>(null);
@@ -63,7 +67,15 @@ export function CoalPoolScreen() {
 
   useEffect(() => {
     let active = true;
-    loadMaster().then((value) => { if (active) setMaster(value); }).catch(console.error);
+    setLoadError(null);
+    loadMaster()
+      .then((value) => { if (active) setMaster(value); })
+      .catch((error: unknown) => { if (active) setLoadError(errorMessage(error)); });
+    return () => { active = false; };
+  }, [loadAttempt]);
+
+  useEffect(() => {
+    let active = true;
     fetchCoalPrices().then((value) => {
       if (!active) return;
       setSnapshot(value);
@@ -120,6 +132,16 @@ export function CoalPoolScreen() {
   );
 
   if (!master) {
+    if (loadError) {
+      return (
+        <div className="empty">
+          <p style={{ marginBottom: 16 }}>煤池加载失败: {loadError}</p>
+          <button className="btn btn-primary" onClick={() => setLoadAttempt((n) => n + 1)}>
+            重试
+          </button>
+        </div>
+      );
+    }
     return <div className="loading">加载中...</div>;
   }
 
@@ -152,7 +174,7 @@ export function CoalPoolScreen() {
   const q = normalizeCoalName(query);
   const filtered = q
     ? byStatus.filter((c) => {
-        const hay = `${c.name} ${c.region ?? ""} ${c.coal_type ?? ""} ${c.form ?? ""}`;
+        const hay = `${c.name} ${placeLabel(c)} ${c.coal_type ?? ""} ${c.form ?? ""}`;
         return normalizeCoalName(hay).includes(q);
       })
     : byStatus;
@@ -393,7 +415,7 @@ function CoalCard({
   const enabled = coal.effectiveEnabled;
   const readinessText: Record<ResolvedCoal["readiness"], string> = {
     ready: "● 启用中",
-    disabled: "○ 停用 · 点击编辑",
+    disabled: coal.status === "archived" ? "○ 煤库已停用" : "○ 停用 · 点击编辑",
     hidden: "○ 已隐藏 · 点击恢复",
     duplicate_name: "名称冲突 · 未参与求解",
     invalid_override: "● 已启用 · 修改数据无效",
@@ -419,7 +441,7 @@ function CoalCard({
             )}
           </div>
           <div className="coal-region">
-            {coal.region || "未知产地"}
+            {placeLabel(coal) || "未知产地"}
             {coalTag(coal) ? ` · ${coalTag(coal)}` : ""}
           </div>
         </div>

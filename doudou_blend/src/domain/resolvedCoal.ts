@@ -7,6 +7,7 @@ import type {
 } from "../types";
 import { INDICATOR_ORDER } from "../types";
 import { normalizeCoalName } from "./coalName";
+import { placeFields } from "./place";
 
 export type CoalOrigin = "master" | "user";
 
@@ -35,7 +36,11 @@ export interface ResolvedCoal {
   origin: CoalOrigin;
   base: MasterCoalEntry;
   name: string;
+  /** 产地的旧写法 (自由文本); 新数据用下面三项. */
   region: string | null;
+  province: string | null;
+  city: string | null;
+  county: string | null;
   coal_type: string | null;
   /** 产品形态; master 未写为 null (schema 约定默认精煤). */
   form: string | null;
@@ -152,6 +157,9 @@ export function resolveCoal(
     base,
     name: base.name,
     region: base.region ?? null,
+    province: base.province ?? null,
+    city: base.city ?? null,
+    county: base.county ?? null,
     coal_type: base.coal_type ?? null,
     form: base.form ?? null,
     status: base.status,
@@ -217,5 +225,6 @@ export function toEstimateCoal(
     coal_type: coal.coal_type ?? undefined,
     form: coal.form ?? undefined,
     region: coal.region ?? undefined,
+    ...placeFields(coal),
   };
 }
