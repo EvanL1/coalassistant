@@ -152,6 +152,9 @@ mod tests {
             coal_type: None,
             form: None,
             region: None,
+            province: None,
+            city: None,
+            county: None,
         }
     }
 

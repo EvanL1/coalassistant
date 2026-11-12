@@ -873,6 +873,9 @@ mod tests {
                 coal_type: None,
                 form: None,
                 region: None,
+                province: None,
+                city: None,
+                county: None,
             }],
             specs: vec![spec],
             total_quantity: None,
@@ -1110,6 +1113,9 @@ mod tests {
             coal_type: None,
             form: None,
             region: None,
+            province: None,
+            city: None,
+            county: None,
         }
     }
 

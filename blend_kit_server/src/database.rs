@@ -733,7 +733,7 @@ mod tests {
     }
 
     /// 按部署文档"回滚到这一版之前的镜像"的步骤走一遍: 旧二进制 (没有 0014、默认不容忍未知迁移)
-    /// 先起不来; 执行文档里的 SQL 后能起来, 临时快照清零; 之后再发布本版, 0014 能重新执行.
+    /// 先起不来; 执行文档里的 SQL 后能起来, 临时快照清零; 之后再发布本版, 0014 及之后的迁移能重新执行.
     /// 每次"启动"用一个新连接池并在用完后关掉, 同进程退出: 迁移失败时 sqlx 不释放咨询锁.
     #[tokio::test]
     #[ignore = "需要独立 PostgreSQL, 设置 DATABASE_URL 后用 --ignored 执行"]
@@ -793,7 +793,7 @@ mod tests {
             sqlx::query("UPDATE coal_price_daily SET source = 'live' WHERE source = 'partial'")
                 .execute(&console)
                 .await?;
-            sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 14")
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 14")
                 .execute(&console)
                 .await?;
             console.close().await;

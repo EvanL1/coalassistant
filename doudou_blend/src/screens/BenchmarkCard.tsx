@@ -14,6 +14,9 @@ import {
 } from "../benchmarks";
 import { coalTag } from "../domain/coalTypes";
 import { parseNumberInput } from "../domain/numberInput";
+import { placeFields, placeLabel } from "../domain/place";
+import type { Place } from "../domain/place";
+import { PlaceSelect } from "../PlaceSelect";
 import type { Benchmark, BenchmarkEntry } from "../types";
 
 const SPEC_KEYS = ["S", "A", "V", "G", "Y"] as const;
@@ -43,7 +46,7 @@ interface Draft {
   name: string;
   coal_type: string;
   form: string;
-  region: string;
+  place: Place;
   price: string;
   date: string;
   source: string;
@@ -55,7 +58,7 @@ function emptyDraft(): Draft {
     name: "",
     coal_type: "焦煤",
     form: "精煤",
-    region: "",
+    place: {},
     price: "",
     date: today(),
     source: "",
@@ -83,7 +86,7 @@ export function draftToBenchmark(draft: Draft): Benchmark | string {
     name,
     coal_type: draft.coal_type,
     form: draft.form,
-    region: draft.region.trim() || undefined,
+    ...placeFields(draft.place),
     props,
     price,
     date: draft.date,
@@ -159,8 +162,9 @@ export function BenchmarkCard() {
     <div className="card">
       <div className="card-title">基准报价</div>
       <p style={{ ...small, margin: "0 0 12px" }}>
-        估价按 煤种 → 形态 → 地区 逐层找同类基准, 再取指标最接近的一条, 按质量指数之比换算.
-        基准越新、品类越全, 估价越准. 地区写到市 (如"山西临汾"), 与煤库写法一致才对得上.
+        估价按指标最接近的几条基准加权, 按质量指数之比换算; 外地的基准份额小一些.
+        基准越新、品类越全, 估价越准. 产地请选到市: 只选省表示这是全省报价 (如按省发布的指数),
+        省内的煤都会把它当本地.
         拿到某个品种的最新出厂含税价就补录一条 (同名取最新报价日); 报价日早于焦煤现货指数最新一期的,
         按指数涨跌推算到今天.
       </p>
@@ -185,7 +189,7 @@ export function BenchmarkCard() {
               <tr key={row.name}>
                 <td style={cell}>
                   <span style={small}>
-                    {[coalTag(row) || "未分煤种", row.region].filter(Boolean).join(" · ")}
+                    {[coalTag(row) || "未分煤种", placeLabel(row)].filter(Boolean).join(" · ")}
                   </span>{" "}
                   {row.name}
                   {row.source && <div style={small}>{row.source}</div>}
@@ -251,7 +255,13 @@ export function BenchmarkCard() {
           ))}
         </select>
         {input(draft.name, (name) => setDraft({ ...draft, name }), "品名", 120)}
-        {input(draft.region, (region) => setDraft({ ...draft, region }), "地区", 80)}
+        <PlaceSelect
+          value={draft.place}
+          onChange={(place) => setDraft({ ...draft, place })}
+          className="input"
+          style={{ height: 30, fontSize: 12 }}
+          label="基准产地"
+        />
         {SPEC_KEYS.map((key) =>
           input(
             draft.props[key],

@@ -26,6 +26,7 @@ import {
 } from "../domain/purchaseTerms";
 import { LatestRequestTracker, type SolveSnapshot } from "../domain/solveSession";
 import { coalTypeMap } from "../domain/coalTypes";
+import { placeFields } from "../domain/place";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
 import type { BlendResult, CoalMaster, CoalValue, IndicatorKey, LatestQuote } from "../types";
 import { CostCard } from "./CostCard";
@@ -305,6 +306,7 @@ export function QuoteScreen({
       coal_type: item.coal.coal_type ?? undefined,
       form: item.coal.form ?? undefined,
       region: item.coal.region ?? undefined,
+      ...placeFields(item.coal),
       props: { ...item.coal.props, ...item.props },
       changed: Object.keys(item.props) as IndicatorKey[],
     }));

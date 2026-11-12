@@ -67,10 +67,26 @@ pub struct Coal {
     /// 产品形态 (精煤 / 筛选精煤 / 浮选精煤 / 煤泥 …), 与煤种并列. 不进 LP; 估价对标用.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub form: Option<String>,
-    /// 产地 (如 "山西临汾"), 与煤种并列. 不进 LP; 估价对标用.
+    /// 产地的旧写法 (自由文本, 如 "山西临汾"): 只在没填 `province` 时用, 按整串是否相同对标 ——
+    /// 为的是自带基准的旧请求结果不变. 现在的基准都只填省市县、不带 `region`, 旧写法的煤对它们
+    /// 一律算外地, 等于不看地区.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// 产地所在省 (行政区划全称, 如 "山西省"). 不进 LP; 估价对标时按 省 → 市 逐级比,
+    /// 见 [`crate::pricing`]. None = 不知道, 退回 `region`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub province: Option<String>,
+    /// 产地所在市 (如 "晋中市"). None = 只知道省.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    /// 产地所在县 / 区 / 县级市 (如 "灵石县"). 只记录与展示: 基准报价最细到市, 对标不比到县.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub county: Option<String>,
 }
+
+/// 煤与基准共有的标签字段 (不进 LP, 估价对标用) 的 JSON 键. 服务端按键转抄煤的标签时用这张表,
+/// 免得各处各写一份漏掉新字段; 结构体字段、SQL 列、types.ts 仍要各自加.
+pub const COAL_TAG_KEYS: [&str; 6] = ["coal_type", "form", "region", "province", "city", "county"];
 
 impl Coal {
     /// 到厂价 = 出厂价 + 运费. 派生函数, 不存字段.
@@ -418,10 +434,15 @@ pub struct PriceFactor {
     /// 基准报价 (带日期的市场价). 有就按指标最接近的基准估价 (见 matching), 优先于 market_price.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub benchmarks: Vec<Benchmark>,
-    /// 对标时外地基准的距离加罚 (点): 本地基准指标差得不超过这么多点才优先用本地的.
+    /// 对标时外地 (外省; 旧写法下是产地写得不一样) 基准的距离加罚 (点): 本地基准指标差得不超过
+    /// 这么多点才优先用本地的.
     /// 地区只是软偏好 —— 基准稀疏时, 指标接近比同地区要紧. None = 不看地区.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region_penalty: Option<f64>,
+    /// 同省不同市的基准的距离加罚 (点), 不大于 `region_penalty`. 煤只知道省时, 写到市的基准
+    /// 也按这个罚 (说不准是不是本市的). None = 同省就算本地.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city_penalty: Option<f64>,
     /// 按指标数据对标 (不先分煤种). None = 按煤种 → 形态分层后取最近的一条.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matching: Option<MatchConfig>,
@@ -455,9 +476,18 @@ pub struct Benchmark {
     /// 产品形态, 与 [`Coal::form`] 同一词表.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub form: Option<String>,
-    /// 产地, 与 [`Coal::region`] 同一写法.
+    /// 产地的旧写法, 与 [`Coal::region`] 同一写法; 只在煤没填 `province` 时用.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// 报价所在省, 与 [`Coal::province`] 同一词表.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub province: Option<String>,
+    /// 报价所在市. None = 这条报价代表全省 (如按省发布的指数), 省内的煤都不加罚.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    /// 报价所在县 / 区; 只记录与展示.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub county: Option<String>,
     /// 基准品的指标 (报价单上的那组数).
     pub props: HashMap<String, f64>,
     /// 报价 (元/吨, 出厂含税).

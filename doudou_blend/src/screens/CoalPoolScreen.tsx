@@ -17,6 +17,7 @@ import { CoalPriceLine } from "../CoalPriceLine";
 import { CoalEditor } from "../CoalEditor";
 import { NewCoalDialog } from "../NewCoalDialog";
 import { coalTag } from "../domain/coalTypes";
+import { placeLabel } from "../domain/place";
 import { PenaltyTemplateEditor } from "../PenaltyTemplateEditor";
 import { getPenaltyTemplate, PENALTY_TEMPLATE_EVENT } from "../penaltyStorage";
 import {
@@ -173,7 +174,7 @@ export function CoalPoolScreen() {
   const q = normalizeCoalName(query);
   const filtered = q
     ? byStatus.filter((c) => {
-        const hay = `${c.name} ${c.region ?? ""} ${c.coal_type ?? ""} ${c.form ?? ""}`;
+        const hay = `${c.name} ${placeLabel(c)} ${c.coal_type ?? ""} ${c.form ?? ""}`;
         return normalizeCoalName(hay).includes(q);
       })
     : byStatus;
@@ -440,7 +441,7 @@ function CoalCard({
             )}
           </div>
           <div className="coal-region">
-            {coal.region || "未知产地"}
+            {placeLabel(coal) || "未知产地"}
             {coalTag(coal) ? ` · ${coalTag(coal)}` : ""}
           </div>
         </div>

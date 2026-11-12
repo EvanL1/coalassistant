@@ -869,7 +869,7 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
                 })
             })
             .collect();
-        let tags: Vec<&str> = ["coal_type", "form", "region"]
+        let tags: Vec<&str> = blend_kit::COAL_TAG_KEYS
             .iter()
             .filter_map(|key| entry[*key].as_str())
             .collect();
@@ -877,11 +877,12 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
         line.push_str(&format!("\n  煤池: {}", pool_state(coal)));
         line.push_str(&format!("\n  指标: {}", props.join(", ")));
         if let Some(factor) = &factor {
-            // 带上煤种、形态、地区: 估价按它们逐层对标基准, 与 today_blend 同一口径.
-            let as_coal: Result<blend_kit::Coal, _> = serde_json::from_value(json!({
-                "name": name, "props": coal.props, "fob": 0.0, "frt": 0.0,
-                "coal_type": entry["coal_type"], "form": entry["form"], "region": entry["region"]
-            }));
+            // 带上煤种、形态、产地: 估价按它们对标基准, 与 today_blend 同一口径.
+            let mut tagged = json!({ "name": name, "props": coal.props, "fob": 0.0, "frt": 0.0 });
+            for key in blend_kit::COAL_TAG_KEYS {
+                tagged[key] = entry[key].clone();
+            }
+            let as_coal: Result<blend_kit::Coal, _> = serde_json::from_value(tagged);
             if let Ok(estimate) = as_coal
                 .map_err(|_| ())
                 .and_then(|c| blend_kit::price_factor::evaluate(&[c], factor).map_err(|_| ()))
@@ -1183,7 +1184,8 @@ mod tests {
         let mut context = context();
         context.market_price = None;
         context.master["coals"][1]["form"] = json!("筛选精煤");
-        context.master["coals"][1]["region"] = json!("山西临汾");
+        context.master["coals"][1]["province"] = json!("山西省");
+        context.master["coals"][1]["city"] = json!("临汾市");
         // 前两条与"高硫"硫分相同, 但一条是焦煤、一条是浮精; 它是瘦煤筛精, 只能对标瘦煤筛精.
         context.benchmarks = vec![
             json!({"name": "高硫焦", "coal_type": "焦煤", "form": "筛选精煤", "props": {"S": 2.4},
@@ -1195,7 +1197,7 @@ mod tests {
         ];
         let (text, _) = call_with(&context, "find_coal", json!({"name": "高硫"}));
         assert!(
-            text.contains("高硫 [在用] 瘦煤 筛选精煤 山西临汾"),
+            text.contains("高硫 [在用] 瘦煤 筛选精煤 山西省 临汾市"),
             "{text}"
         );
         assert!(text.contains("对标中硫瘦筛精"), "{text}");

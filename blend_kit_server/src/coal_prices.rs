@@ -76,10 +76,11 @@ fn snapshot_coal(coal: &Value) -> Result<Value, String> {
         .filter(|(_, value)| !value.is_null())
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    Ok(json!({
-        "name": coal["name"], "props": props, "fob": 0, "frt": 0,
-        "coal_type": coal["coal_type"], "form": coal["form"], "region": coal["region"]
-    }))
+    let mut out = json!({ "name": coal["name"], "props": props, "fob": 0, "frt": 0 });
+    for key in blend_kit::COAL_TAG_KEYS {
+        out[key] = coal[key].clone();
+    }
+    Ok(out)
 }
 
 fn snapshot_rows(master: &Value, benchmarks: &[Value]) -> Result<Vec<PriceRow>, String> {

@@ -48,6 +48,12 @@ pub(crate) struct QuoteItem {
     pub form: Option<String>,
     #[serde(default)]
     pub region: Option<String>,
+    #[serde(default)]
+    pub province: Option<String>,
+    #[serde(default)]
+    pub city: Option<String>,
+    #[serde(default)]
+    pub county: Option<String>,
     /// 这批实际用的指标 (煤池值 ∪ 当场改动).
     pub props: Map<String, Value>,
     /// 当场改过的指标名.
@@ -89,6 +95,7 @@ fn validate(batch: &QuoteBatch) -> Result<(), String> {
         for (key, value) in &item.props {
             validate_prop(name, key, value)?;
         }
+        benchmarks::validate_place(name, [&item.province, &item.city, &item.county])?;
     }
     Ok(())
 }
@@ -194,6 +201,9 @@ fn price_coal(item: &QuoteItem) -> Value {
         ("coal_type", &item.coal_type),
         ("form", &item.form),
         ("region", &item.region),
+        ("province", &item.province),
+        ("city", &item.city),
+        ("county", &item.county),
     ] {
         if let Some(value) = value {
             coal[key] = json!(value);
@@ -249,8 +259,9 @@ async fn replace_batch(
             r#"
             INSERT INTO coal_quotes
                 (id, username, batch_id, quoted_on, name, coal_type, form, region,
+                 province, city, county,
                  fob, frt, props, changed, estimate, points, benchmark)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             "#,
         )
         .bind(Uuid::new_v4().to_string())
@@ -261,6 +272,9 @@ async fn replace_batch(
         .bind(&item.coal_type)
         .bind(&item.form)
         .bind(&item.region)
+        .bind(&item.province)
+        .bind(&item.city)
+        .bind(&item.county)
         .bind(item.fob)
         .bind(item.frt)
         .bind(Value::Object(item.props.clone()))
@@ -361,6 +375,9 @@ pub struct QuoteRecord {
     pub coal_type: Option<String>,
     pub form: Option<String>,
     pub region: Option<String>,
+    pub province: Option<String>,
+    pub city: Option<String>,
+    pub county: Option<String>,
     pub fob: f64,
     pub frt: f64,
     #[sqlx(json)]
@@ -546,6 +563,9 @@ mod tests {
             coal_type: Some("主焦煤".into()),
             form: None,
             region: None,
+            province: None,
+            city: None,
+            county: None,
             props: serde_json::from_value(json!({ "S": 0.6, "A": 9.8 })).unwrap(),
             changed: vec![],
         }
@@ -563,6 +583,28 @@ mod tests {
         assert_eq!(
             validate(&batch(vec![item("临北", 2150.0), item("沙曲", 1980.0)])),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn test_place_is_validated_and_goes_into_the_estimate() {
+        let mut placed = item("灵石的煤", 2150.0);
+        placed.province = Some("山西省".into());
+        placed.city = Some("晋中市".into());
+        placed.county = Some("灵石县".into());
+        assert_eq!(validate(&batch(vec![placed.clone()])), Ok(()));
+        // 估价按产地对标: 三个字段都要带给核心.
+        let coal = price_coal(&placed);
+        assert_eq!(coal["province"], "山西省");
+        assert_eq!(coal["city"], "晋中市");
+        assert_eq!(coal["county"], "灵石县");
+        assert!(coal.get("region").is_none());
+        // 跳级的产地拦下, 点名是哪种煤.
+        placed.city = None;
+        let error = validate(&batch(vec![placed])).unwrap_err();
+        assert!(
+            error.contains("灵石的煤") && error.contains("也要填市"),
+            "{error}"
         );
     }
 
@@ -750,6 +792,9 @@ mod tests {
             coal_type: coal_type.map(str::to_string),
             form: None,
             region: None,
+            province: None,
+            city: None,
+            county: None,
             fob,
             frt: 0.0,
             props: Map::new(),

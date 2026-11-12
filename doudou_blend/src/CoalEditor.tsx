@@ -14,6 +14,7 @@ import { guaranteeIssue } from "./penalty";
 import { getPenaltyTemplate } from "./penaltyStorage";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "./types";
 import { isPartialNumberInput, numberInputError, numberOrNull } from "./domain/numberInput";
+import { placeLabel } from "./domain/place";
 import type { MasterCoalEntry } from "./types";
 import {
   getCoalPref,
@@ -202,7 +203,7 @@ export function CoalEditor({
           <div>
             <div className="modal-title">{coal.name}</div>
             <div className="modal-subtitle">
-              {coal.region || "未知"}
+              {placeLabel(coal) || "未知"}
               {coal.coal_type ? ` · ${coal.coal_type}` : ""}
               {hasOverrides && (
                 <span style={{ color: "var(--c-primary)", marginLeft: 6 }}>
