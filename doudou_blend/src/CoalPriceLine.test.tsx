@@ -28,6 +28,13 @@ describe("煤池估价行", () => {
     const { container } = render(<CoalPriceLine price={price} />);
     expect(container.textContent).toBe(expected);
   });
+  it("有一周后的预测价时接在涨跌后面", () => {
+    const { container } = render(<CoalPriceLine price={{
+      kind: "snapshot", price: 2202.4, change: 12.3, missing: ["Y"], forecast: 2231.6,
+    }} />);
+    expect(container.textContent).toBe("估价 2,202 元/吨  ▲12 · 一周后约 2,232 · 缺 Y");
+  });
+
   it("给了 onOpen 时是按钮, 点击只触发 onOpen 不冒泡; 文案不变", () => {
     const onOpen = vi.fn();
     const onCard = vi.fn();

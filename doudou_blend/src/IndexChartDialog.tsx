@@ -1,8 +1,10 @@
 /** 行情条点开的指数走势, 默认显示一年. */
 import { useState } from "react";
 import { ChartDialog, DEFAULT_RANGE, RangeButtons, rangeDays } from "./ChartDialog";
+import { ForecastNote } from "./ForecastNote";
 import { changeOver, lastDays, seriesSpec } from "./mcci";
 import { PriceChart } from "./PriceChart";
+import { isAhead } from "./priceForecast";
 import { ChangeText } from "./screens/McciCard";
 import type { McciSeries } from "./types";
 
@@ -10,6 +12,8 @@ export function IndexChartDialog({ series, onClose }: { series: McciSeries; onCl
   const [range, setRange] = useState(DEFAULT_RANGE);
   const points = lastDays(series.points, rangeDays(range));
   const latest = series.points[series.points.length - 1];
+  const forecast = latest && series.forecast && isAhead(series.forecast.date)
+    ? { ...series.forecast, base: latest.price } : null;
 
   return (
     <ChartDialog titleId="index-chart-title" title={series.type_name}
@@ -26,6 +30,7 @@ export function IndexChartDialog({ series, onClose }: { series: McciSeries; onCl
           </span>
         </div>
       )}
+      {forecast && <ForecastNote forecast={forecast} />}
       <RangeButtons range={range} onChange={setRange} />
       {points.length >= 2 ? (
         <PriceChart key={range} label={series.type_name} points={points} />

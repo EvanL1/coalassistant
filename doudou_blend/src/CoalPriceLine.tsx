@@ -1,11 +1,5 @@
 import type { CardPrice } from "./coalPrices";
-
-function priceChange(change: number | null): string {
-  if (change == null) return "";
-  const rounded = Math.round(Math.abs(change));
-  if (rounded === 0) return "持平";
-  return `${change > 0 ? "▲" : "▼"}${rounded}`;
-}
+import { changeMark, yuan } from "./priceForecast";
 
 export function CoalPriceLine({ price, name, onOpen }: {
   price: CardPrice;
@@ -17,11 +11,13 @@ export function CoalPriceLine({ price, name, onOpen }: {
   if (price.kind === "unavailable") {
     return <div style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 8 }}>估价暂不可用</div>;
   }
-  const trend = price.kind === "snapshot" ? priceChange(price.change) : "";
+  const trend = price.kind === "snapshot" && price.change != null ? changeMark(price.change) : "";
+  const forecast = price.kind === "snapshot" ? price.forecast : undefined;
   const text = (
     <>
-      估价 {Math.round(price.price).toLocaleString("zh-CN")} 元/吨
+      估价 {yuan(price.price)} 元/吨
       {trend && `  ${trend}`}
+      {forecast != null && ` · 一周后约 ${yuan(forecast)}`}
       {price.kind === "live" && price.modified && " · 按修改值估"}
       {price.missing.length > 0 && ` · 缺 ${price.missing.join("、")}`}
     </>

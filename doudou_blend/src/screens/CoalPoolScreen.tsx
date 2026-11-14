@@ -11,7 +11,7 @@ import { loadMaster } from "../master_loader";
 import { errorMessage } from "../http";
 import { INDICATOR_LABEL } from "../types";
 import type { CoalMaster, CoalPriceSnapshot, CoalStatus, CoalValue, MasterCoalEntry } from "../types";
-import { cardPrice, coalsToEstimate, estimateLive, fetchCoalPrices, hasPriceHistory, isModified, type CardPrice } from "../coalPrices";
+import { cardPrice, coalForecast, coalsToEstimate, estimateLive, fetchCoalPrices, hasPriceHistory, isModified, type CardPrice } from "../coalPrices";
 import { CoalPriceDialog } from "../CoalPriceDialog";
 import { CoalPriceLine } from "../CoalPriceLine";
 import { CoalEditor } from "../CoalEditor";
@@ -345,6 +345,7 @@ export function CoalPoolScreen() {
         <CoalPriceDialog
           name={chartCoal.name}
           modified={isModified(chartCoal)}
+          forecast={coalForecast(snapshot, chartCoal.name)}
           onClose={() => setChartCoal(null)}
         />
       )}

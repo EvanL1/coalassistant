@@ -291,6 +291,8 @@ export interface McciSeries extends DisplaySeries {
   props?: Record<string, number>;
   display_only?: boolean;
   points: McciPoint[];
+  /** 一周后的预测 (预测的那天与值); 历史不够长或停更时没有. */
+  forecast?: McciPoint;
 }
 
 /** 估价模块入口 (/api/price) 的输入. */
@@ -307,11 +309,13 @@ export interface PriceResult {
   market_price?: number | null;
 }
 
-/** /api/coal-prices 的共享煤库日快照; 没有历史时省略 prev_price. */
+/** /api/coal-prices 的共享煤库日快照; 没有历史时省略 prev_price, 没有预测时省略 forecast_price. */
 export interface CoalPriceEntry {
   name: string;
   price: number;
   prev_price?: number;
+  /** 一周后 (快照的 forecast_day) 的预测价. */
+  forecast_price?: number;
   points: number;
   benchmark: string | null;
   missing: string[];
@@ -322,6 +326,8 @@ export interface CoalPriceSnapshot {
   ok: boolean;
   day: string | null;
   prev_day?: string | null;
+  /** 各煤 forecast_price 说的是哪天. */
+  forecast_day?: string;
   computed_at?: string;
   prices: CoalPriceEntry[];
 }

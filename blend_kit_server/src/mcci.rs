@@ -11,8 +11,9 @@
 //! 钢铁网改了 JS 或换了密钥, 接口会回 `code: 401` —— 这时只记错误日志, 库里的旧值照用,
 //! 界面按基准的日期看出指数停更了.
 //!
-//! 节奏: 库表空就回填一年; 之后北京时间 17:30 (当天样本截止 17:00) 以后拉最近 15 天
-//! upsert, 当天成功一次就不再拉, 失败下个小时再试. 设 `MCCI_FETCH=off` 关掉.
+//! 节奏: 库表空就从指数最早一期 (2018-04) 回填全部历史 —— 估价只用近一年, 一周后的预测
+//! (`forecast.rs`) 要全部历史才拟合得稳; 之后北京时间 17:30 (当天样本截止 17:00) 以后拉最近
+//! 15 天 upsert, 当天成功一次就不再拉, 失败下个小时再试. 设 `MCCI_FETCH=off` 关掉.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -30,6 +31,7 @@ use sqlx::{PgPool, Row};
 
 use super::{database_error, is_authenticated, unauthorized, AppState};
 use crate::coal_index::IndexPoint;
+use crate::forecast::{self, Forecast};
 
 const BASE_URL: &str = "https://index.mysteel.com";
 const REPORT_PATH: &str = "/zs/newxpic/getReport.ms";
@@ -53,11 +55,15 @@ const GIVE_UP_AFTER: NaiveTime = match NaiveTime::from_hms_opt(22, 30, 0) {
 };
 /// 平时只补最近这么多天 (覆盖周末、节假日和服务停机).
 const RECENT_DAYS: u64 = 15;
-/// 库表空时回填的天数 (够算一年的波动).
-const BACKFILL_DAYS: u64 = 366;
-/// 历史最早一天晚于"回填起点 + 这么多天"就算没回填完 (年初几天本来就是节假日).
+/// 回填的起点: 钢铁网这套指数最早一期 (各序列都从这天起). 一次请求能拿回全部历史.
+const BACKFILL_FROM: NaiveDate = match NaiveDate::from_ymd_opt(2018, 4, 5) {
+    Some(date) => date,
+    None => panic!("2018-04-05 是合法日期"),
+};
+/// 历史最早一天晚于"回填起点 + 这么多天"就算没回填完, 一天补一次. 日后新加的序列如果本来
+/// 就晚于这个日子才有数据, 会每天多拉一次全量, 无害.
 const BACKFILL_SLACK_DAYS: u64 = 30;
-/// 推算旧报价只用得着这么久的历史.
+/// 估价 (当基准、推算旧报价) 与界面走势只用得着这么久的历史.
 pub(crate) const HISTORY_DAYS: u64 = 400;
 
 /// 要拉的一条序列: 钢铁网的品种代码与品种名 (接口两个都要).
@@ -149,13 +155,13 @@ pub(crate) fn fetch_window(
     stored: Option<Stored>,
 ) -> Option<(NaiveDate, NaiveDate)> {
     let today = now.date_naive();
-    let backfill = Some((today - Days::new(BACKFILL_DAYS), today));
+    let backfill = Some((BACKFILL_FROM, today));
     let Some(stored) = stored else {
         return backfill;
     };
     let fetched_on = stored.fetched_at.date_naive();
-    // 历史不满一年 (回填只成功了一部分、或新加的序列): 一天补一次.
-    if stored.first > today - Days::new(BACKFILL_DAYS - BACKFILL_SLACK_DAYS) && fetched_on < today {
+    // 历史没回填全 (回填只成功了一部分、新加的序列、或上线预测前只存了一年): 一天补一次.
+    if stored.first > BACKFILL_FROM + Days::new(BACKFILL_SLACK_DAYS) && fetched_on < today {
         return backfill;
     }
     if stored.latest >= today || now.time() < PUBLISH_AFTER {
@@ -229,15 +235,23 @@ async fn fetch_series(
     parse_report(&body)
 }
 
-/// 界面用的指数总览: master 配置的每条序列 (标准品指标) + 近一年的值 (升序). 库里没数据的
-/// 序列也列出来 (points 为空), 界面据此提示"还没拉到".
-pub(crate) fn overview(config: &[Value], history: &HashMap<String, Vec<IndexPoint>>) -> Vec<Value> {
+/// 界面用的指数总览: master 配置的每条序列 (标准品指标) + 近一年的值 (升序) + 一周后的预测
+/// (`forecast`: 预测的那天与值; 没有就不带). 库里没数据的序列也列出来 (points 为空), 界面据此
+/// 提示"还没拉到".
+pub(crate) fn overview(
+    config: &[Value],
+    history: &HashMap<String, Vec<IndexPoint>>,
+    forecasts: &HashMap<String, Forecast>,
+) -> Vec<Value> {
     config
         .iter()
         .filter_map(|series| {
             let code = series["code"].as_str()?;
             let mut row = series.clone();
             row["points"] = json!(history.get(code).cloned().unwrap_or_default());
+            if let Some(forecast) = forecasts.get(code) {
+                row["forecast"] = json!({"date": forecast.date, "price": forecast.price});
+            }
             Some(row)
         })
         .collect()
@@ -251,14 +265,24 @@ pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> R
     // 指数序列不在煤库覆盖层里, 读内置 master 即可 (与 spawn_daily 同一份), 不用合并覆盖层.
     let master: Value = serde_json::from_str(blend_kit::master_json()).unwrap_or_default();
     let config = series_config(&master);
-    let history = match &state.database {
-        Some(pool) => match history(pool).await {
-            Ok(history) => history,
-            Err(error) => return database_error(error),
-        },
-        None => HashMap::new(),
+    let (history, forecasts) = match &state.database {
+        Some(pool) => {
+            let history = match history(pool).await {
+                Ok(history) => history,
+                Err(error) => return database_error(error),
+            };
+            // 预测只是参考: 读不到就不带, 行情照常显示.
+            let today = Utc::now().with_timezone(&beijing()).date_naive();
+            let forecasts = forecast::latest(pool, today).await.unwrap_or_else(|error| {
+                tracing::warn!(%error, "读取指数预测失败, 行情条不带预测");
+                HashMap::new()
+            });
+            (history, forecasts)
+        }
+        None => (HashMap::new(), HashMap::new()),
     };
-    Json(json!({ "ok": true, "series": overview(&config, &history) })).into_response()
+    let series = overview(&config, &history, &forecasts);
+    Json(json!({ "ok": true, "series": series })).into_response()
 }
 
 /// 一条序列一条语句写完 (回填一年也只一次往返).
@@ -315,6 +339,20 @@ pub(crate) async fn history(
     pool: &PgPool,
 ) -> Result<HashMap<String, Vec<IndexPoint>>, sqlx::Error> {
     let since = Utc::now().with_timezone(&beijing()).date_naive() - Days::new(HISTORY_DAYS);
+    history_since(pool, since).await
+}
+
+/// 每条序列库里的全部历史 (升序), 给一周后的预测拟合用.
+pub(crate) async fn full_history(
+    pool: &PgPool,
+) -> Result<HashMap<String, Vec<IndexPoint>>, sqlx::Error> {
+    history_since(pool, BACKFILL_FROM).await
+}
+
+async fn history_since(
+    pool: &PgPool,
+    since: NaiveDate,
+) -> Result<HashMap<String, Vec<IndexPoint>>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
         SELECT series_code, trade_date, value FROM mcci_daily
@@ -502,10 +540,10 @@ mod tests {
         assert!(parse_report("<html>").is_err());
     }
 
-    /// 库里一条序列: 一年历史齐全, 最新到 `latest`, 上次拉取在 `fetched`.
+    /// 库里一条序列: 全部历史齐全, 最新到 `latest`, 上次拉取在 `fetched`.
     fn stored(latest: &str, fetched: (&str, &str)) -> Option<Stored> {
         Some(Stored {
-            first: day("2025-10-27"),
+            first: day("2018-04-05"),
             latest: day(latest),
             fetched_at: at(fetched.0, fetched.1),
         })
@@ -517,23 +555,24 @@ mod tests {
     fn test_fetch_window_backfills_new_series_any_time() {
         assert_eq!(
             fetch_window(at("2026-10-27", "09:00"), None),
-            Some((day("2025-10-26"), day("2026-10-27")))
+            Some((day("2018-04-05"), day("2026-10-27")))
         );
     }
 
     #[test]
     fn test_fetch_window_backfills_incomplete_history_once_a_day() {
-        // 回填只成功了一半: 只有近两周. 今天还没拉过 → 补一年; 今天拉过 → 按平时的规则.
+        // 只有近一年 (上线预测前的库, 或回填只成功了一半). 今天还没拉过 → 补全部历史;
+        // 今天拉过 → 按平时的规则.
         let partial = |fetched: (&str, &str)| {
             Some(Stored {
-                first: day("2026-10-12"),
+                first: day("2025-10-27"),
                 latest: day("2026-10-26"),
                 fetched_at: at(fetched.0, fetched.1),
             })
         };
         assert_eq!(
             fetch_window(at("2026-10-27", "09:00"), partial(("2026-10-26", "18:00"))),
-            Some((day("2025-10-26"), day("2026-10-27")))
+            Some((day("2018-04-05"), day("2026-10-27")))
         );
         assert_eq!(
             fetch_window(at("2026-10-27", "09:00"), partial(("2026-10-27", "08:00"))),
@@ -622,8 +661,23 @@ mod tests {
                 },
             ],
         )]);
-        let rows = overview(&config, &history);
+        let forecasts = HashMap::from([(
+            "LJM_FM".to_string(),
+            Forecast {
+                made_on: "2026-10-26".into(),
+                base_price: 2190.0,
+                date: "2026-11-02".into(),
+                price: 2201.5,
+            },
+        )]);
+        let rows = overview(&config, &history, &forecasts);
         assert_eq!(rows.len(), 2);
+        // 有预测的带上预测的那天与值; 没有的不带这个键.
+        assert_eq!(
+            rows[0]["forecast"],
+            json!({"date": "2026-11-02", "price": 2201.5})
+        );
+        assert!(rows[1].get("forecast").is_none());
         assert_eq!(rows[0]["code"], "LJM_FM");
         assert_eq!(rows[0]["name"], "肥煤指数");
         assert_eq!(rows[0]["type_name"], "肥煤");
@@ -698,7 +752,7 @@ mod tests {
             .collect();
         assert_eq!(codes, ["LJM_ZH", "LJM_QM"]);
 
-        let rows = overview(&series_config(&master), &HashMap::new());
+        let rows = overview(&series_config(&master), &HashMap::new(), &HashMap::new());
         assert_eq!(rows[0]["code"], "LJM_ZH");
         assert_eq!(rows[0]["display_only"], true);
         assert!(rows[0].get("props").is_none());
