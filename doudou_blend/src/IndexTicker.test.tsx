@@ -95,6 +95,26 @@ describe("指数走势弹层", () => {
     return { opener, points };
   }
 
+  it("序列带一周后的预测时弹层里写出来; 预测的那天已到或没有预测时不写", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T20:00:00+08:00"), toFake: ["Date"] });
+    const points: [string, number][] = [["2026-10-30", 1951.3], ["2026-11-02", 1924.5]];
+    mocks.fetchMcci.mockResolvedValue([
+      { ...series("瘦煤", points), forecast: { date: "2026-11-09", price: 1901.2 } },
+      { ...series("肥煤", points), forecast: { date: "2026-11-02", price: 1901.2 } },
+      series("气煤", points),
+    ]);
+    render(<IndexTicker />);
+    fireEvent.click(await screen.findByRole("button", { name: /瘦煤 最新 1925, 查看走势/ }));
+    expect(screen.getByRole("dialog", { name: "瘦煤" }).querySelector(".price-forecast")?.textContent)
+      .toBe("预测一周后 (11-09) 约 1,901 元/吨, 较当前 ▼23 · 按指数近期走势推算, 仅供参考");
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    for (const name of ["肥煤", "气煤"]) {
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(`${name} 最新 1925, 查看走势`) }));
+      expect(screen.getByRole("dialog", { name }).querySelector(".price-forecast")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    }
+  });
+
   it("综合指数没有固定规格: 行情条写'综合', 点开写各品种加权, 不写标准品", async () => {
     vi.useFakeTimers({ now: new Date("2026-11-02T20:00:00+08:00"), toFake: ["Date"] });
     mocks.fetchMcci.mockResolvedValue([

@@ -33,11 +33,31 @@ describe("煤价走势弹层", () => {
     expect(container.textContent).not.toContain("不含你的修改");
   });
 
+  it("给了预测就写一周后大约多少、比现在涨跌多少; 没给不写", async () => {
+    serve(history);
+    const forecast = { date: "2026-11-05", price: 2240.4, base: 2214 };
+    const { container, rerender } = render(
+      <CoalPriceDialog name="临北" modified={false} forecast={forecast} onClose={() => {}} />);
+    await screen.findByText("2,214");
+    expect(container.querySelector(".price-forecast")?.textContent)
+      .toBe("预测一周后 (11-05) 约 2,240 元/吨, 较当前 ▲26 · 按指数近期走势推算, 仅供参考");
+    rerender(<CoalPriceDialog name="临北" modified={false} forecast={null} onClose={() => {}} />);
+    expect(container.querySelector(".price-forecast")).toBeNull();
+  });
+
   it("改过化验值的煤注明历史口径", async () => {
     serve(history);
     const { container } = render(<CoalPriceDialog name="临北" modified onClose={() => {}} />);
     await screen.findByText("2,214");
     expect(container.textContent).toContain("历史为共享煤库口径, 不含你的修改");
+  });
+
+  it("改过化验值的煤带预测时, 注明预测也是共享煤库口径", async () => {
+    serve(history);
+    const forecast = { date: "2026-11-05", price: 2240.4, base: 2214 };
+    const { container } = render(<CoalPriceDialog name="临北" modified forecast={forecast} onClose={() => {}} />);
+    await screen.findByText("2,214");
+    expect(container.textContent).toContain("历史与预测为共享煤库口径, 不含你的修改");
   });
 
   it.each<[string, () => void, string]>([

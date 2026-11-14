@@ -83,6 +83,13 @@ reaching the core (`MASTER_ONLY_KEYS`, mirrored in `doudou_blend/src/benchmarks.
 按"当天能拿到的指数与报价" (`benchmarks::as_of`) 补算今天以前缺的 (日期, 煤) —— 存下就不改, 只补空 (`source` 区分
 live / backfill); `GET /api/coal-prices` 返回最新日与前一日价格, `GET /api/coal-prices/history?name=` 返回单煤全部历史;
 煤池卡片据此显示估价与涨跌, 点估价行看走势; 用户修改或新增的煤按当前值现算.
+`blend_kit_server/src/forecast.rs` 是**一周后的价格预测** (只作参考展示, 不进求解): 每条指数序列未来 5 个交易日的
+涨幅, 对自己过去 1/5/20 日涨幅与综合指数过去 1/5 日涨幅做线性回归, 用全部历史现拟合 —— 所以 `mcci_daily` 从指数
+最早一期 (2018-04) 回填, 估价仍只读近 400 天; 历史不足约两年、或指数停更一周以上就不给预测. 每小时随估价快照算一次:
+指数的预测存 `mcci_forecast` (留作日后对照实际值), `GET /api/mcci` 每条序列带 `forecast`; 煤的预测价是把预测值当作
+"一周后那一期指数" 重新定基准、把共享煤库重估一遍 (`coal_prices::forecast_prices`), 存 `coal_price_daily.forecast_price`
+/ `forecast_day`, 补算的历史不带. 界面在煤池卡片、煤价走势与指数走势弹层里显示 (`priceForecast.ts`). 模型取舍与回测见
+`research/price_forecast/` (20 个交易日以上没有可预测性, 不要加更长的期限).
 `blend_kit_server/src/quotes.rs` 接收现场询价, 按这批指标与当天基准重算出厂估价, 在一个事务里按批覆盖存档,
 并提供最近询价占位提示、后台明细/按煤种汇总/删除.
 `robustness.rs` is the opt-in price-robustness analysis (`BlendRequest.price_robustness`): prices are mostly

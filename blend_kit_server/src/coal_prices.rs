@@ -1,4 +1,5 @@
 //! 共享煤库的每日估价快照与历史补算; 用户修改的化验值只由 /api/price 现算.
+//! 实时快照同时带每种煤一周后的预测价 (指数的预测见 `forecast.rs`), 补算的历史不带.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
@@ -18,6 +19,8 @@ use super::{
     bad_request, benchmarks, database_error, is_authenticated, mcci, merged_master_json_from_pool,
     require_database, unauthorized, AppState,
 };
+use crate::coal_index::IndexPoint;
+use crate::forecast::{self, Forecast};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct PriceRow {
@@ -28,12 +31,16 @@ struct PriceRow {
     benchmark_price: Option<f64>,
     #[sqlx(json)]
     missing: Vec<String>,
+    /// 一周后的预测价; 没有预测 (补算的行、指数历史不够长或停更) 为 None.
+    #[sqlx(default)]
+    forecast_price: Option<f64>,
 }
 
 #[derive(sqlx::FromRow)]
 struct StoredRow {
     day: NaiveDate,
     computed_at: DateTime<Utc>,
+    forecast_day: Option<NaiveDate>,
     #[sqlx(flatten)]
     price: PriceRow,
 }
@@ -41,6 +48,8 @@ struct StoredRow {
 struct DaySnapshot {
     day: NaiveDate,
     computed_at: DateTime<Utc>,
+    /// 预测价说的是哪天.
+    forecast_day: Option<NaiveDate>,
     rows: Vec<PriceRow>,
 }
 
@@ -51,6 +60,9 @@ pub struct CoalPriceEntry {
     pub price: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_price: Option<f64>,
+    /// 一周后 (快照的 forecast_day) 的预测价; 没有预测时省略.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forecast_price: Option<f64>,
     pub points: f64,
     pub benchmark: Option<String>,
     pub missing: Vec<String>,
@@ -61,6 +73,8 @@ pub struct CoalPriceSnapshot {
     pub ok: bool,
     pub day: Option<NaiveDate>,
     pub prev_day: Option<NaiveDate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forecast_day: Option<NaiveDate>,
     pub computed_at: DateTime<Utc>,
     pub prices: Vec<CoalPriceEntry>,
 }
@@ -129,7 +143,106 @@ fn price_row(value: blend_kit::CoalValue, benchmarks: &[Value]) -> PriceRow {
         benchmark: value.benchmark,
         benchmark_price,
         missing: value.missing,
+        forecast_price: None,
     }
+}
+
+/// 把各序列的预测当作 "一周后的那一期" 接到指数历史末尾.
+fn project(
+    inputs: &benchmarks::BenchmarkInputs,
+    forecasts: &HashMap<String, Forecast>,
+) -> benchmarks::BenchmarkInputs {
+    let history = inputs
+        .history
+        .iter()
+        .map(|(code, points)| {
+            let mut points = points.clone();
+            if let Some(forecast) = forecasts.get(code) {
+                points.push(IndexPoint {
+                    date: forecast.date.clone(),
+                    price: forecast.price,
+                });
+            }
+            (code.clone(), points)
+        })
+        .collect();
+    benchmarks::BenchmarkInputs {
+        stored: inputs.stored.clone(),
+        history,
+        ccp: inputs.ccp.clone(),
+    }
+}
+
+/// 每种煤一周后的估价 (预测的那天, 煤名 → 价): 指数各序列换成预测值, 按那天重新定基准 (旧报价
+/// 也随对应的指数推算过去), 再把全部煤重估一遍 —— 与今天的估价同一套口径, 只是指数往前走了一周.
+/// 当基准的序列只要有一条没有预测 (历史不够长、停更) 就整体不给: 不能一半基准在今天、一半在下周.
+/// 只能按 CCP 推算的旧报价 (指标没写全、又没有同煤种的序列) 没有预测可跟, 留在今天的水平.
+fn forecast_prices(
+    master: &Value,
+    inputs: &benchmarks::BenchmarkInputs,
+    forecasts: &HashMap<String, Forecast>,
+) -> Option<(NaiveDate, HashMap<String, f64>)> {
+    let targets = benchmark_series(master)
+        .into_iter()
+        .map(|code| forecasts.get(code)?.date.parse::<NaiveDate>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let target = targets.into_iter().max()?;
+    let benchmarks = benchmarks::as_of(master, &project(inputs, forecasts), target);
+    let rows = snapshot_rows(master, &benchmarks)
+        .inspect_err(|reason| tracing::warn!(%reason, "按预测的指数重估失败, 这一轮不带预测价"))
+        .ok()?;
+    Some((
+        target,
+        rows.into_iter().map(|row| (row.name, row.price)).collect(),
+    ))
+}
+
+/// 预测最多等这么久; 超时就不带预测价, 先把今天的估价写下去.
+const FORECAST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 这一轮快照要带的预测价. 预测只是参考: 放在单独的任务里算并限时 —— 读不到指数历史、
+/// 历史还没回填够、算的时候 panic 或超时, 都只是这一轮不带预测价, 不耽误今天的估价.
+async fn snapshot_forecast(
+    pool: PgPool,
+    master: Value,
+    inputs: benchmarks::BenchmarkInputs,
+    day: NaiveDate,
+) -> Option<(NaiveDate, HashMap<String, f64>)> {
+    let mut task = tokio::spawn(async move {
+        let forecasts = forecast::refresh(&pool, &master, day)
+            .await
+            .inspect_err(|error| tracing::warn!(%error, "读取指数历史失败, 这一轮不带预测价"))
+            .ok()?;
+        let prices = forecast_prices(&master, &inputs, &forecasts);
+        if prices.is_none() {
+            tracing::info!(
+                series = forecasts.len(),
+                "当基准的指数序列没有全部预测出来 (历史没回填够或停更), 这一轮不带预测价"
+            );
+        }
+        prices
+    });
+    match tokio::time::timeout(FORECAST_TIMEOUT, &mut task).await {
+        Ok(Ok(prices)) => prices,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "算预测价的任务异常退出, 这一轮不带预测价");
+            None
+        }
+        Err(_) => {
+            task.abort();
+            tracing::warn!("算预测价超时, 这一轮不带预测价");
+            None
+        }
+    }
+}
+
+fn with_forecast(rows: Vec<PriceRow>, prices: &HashMap<String, f64>) -> Vec<PriceRow> {
+    rows.into_iter()
+        .map(|row| PriceRow {
+            forecast_price: prices.get(&row.name).copied(),
+            ..row
+        })
+        .collect()
 }
 
 fn compose(latest: Option<DaySnapshot>, prev: Option<DaySnapshot>) -> Value {
@@ -147,6 +260,7 @@ fn compose(latest: Option<DaySnapshot>, prev: Option<DaySnapshot>) -> Value {
         .into_iter()
         .map(|row| CoalPriceEntry {
             prev_price: previous.get(&row.name).copied(),
+            forecast_price: row.forecast_price,
             name: row.name,
             price: row.price,
             points: row.points,
@@ -158,6 +272,7 @@ fn compose(latest: Option<DaySnapshot>, prev: Option<DaySnapshot>) -> Value {
         ok: true,
         day: Some(latest.day),
         prev_day,
+        forecast_day: latest.forecast_day,
         computed_at: latest.computed_at,
         prices,
     })
@@ -272,12 +387,13 @@ fn snapshot_source(gap: Option<&str>) -> &'static str {
 }
 
 /// 删写在同一个事务内, 插入失败则原快照完整保留. 临时快照遇到当天已有完整快照时不写,
-/// 返回 false.
+/// 返回 false. `forecast_day` 是各行预测价说的那天 (没有预测为 None).
 async fn write_snapshot(
     pool: &PgPool,
     day: NaiveDate,
     rows: &[PriceRow],
     source: &str,
+    forecast_day: Option<NaiveDate>,
 ) -> Result<bool, sqlx::Error> {
     let names: Vec<_> = rows.iter().map(|row| row.name.as_str()).collect();
     let prices: Vec<_> = rows.iter().map(|row| row.price).collect();
@@ -285,6 +401,7 @@ async fn write_snapshot(
     let benchmarks: Vec<_> = rows.iter().map(|row| row.benchmark.as_deref()).collect();
     let benchmark_prices: Vec<_> = rows.iter().map(|row| row.benchmark_price).collect();
     let missing: Vec<_> = rows.iter().map(|row| json!(row.missing)).collect();
+    let forecasts: Vec<_> = rows.iter().map(|row| row.forecast_price).collect();
     let mut transaction = pool.begin().await?;
     if source == PARTIAL {
         // 锁住当天已有的行, 判断与删写之间不会被并发写入插队.
@@ -305,10 +422,13 @@ async fn write_snapshot(
     sqlx::query(
         r#"
         INSERT INTO coal_price_daily
-            (day, name, price, points, benchmark, benchmark_price, missing, source)
-        SELECT $1, name, price, points, benchmark, benchmark_price, missing, $8
-        FROM UNNEST($2::text[], $3::float8[], $4::float8[], $5::text[], $6::float8[], $7::jsonb[])
-            AS t(name, price, points, benchmark, benchmark_price, missing)
+            (day, name, price, points, benchmark, benchmark_price, missing, source,
+             forecast_price, forecast_day)
+        SELECT $1, name, price, points, benchmark, benchmark_price, missing, $8,
+               forecast_price, CASE WHEN forecast_price IS NULL THEN NULL ELSE $10::date END
+        FROM UNNEST($2::text[], $3::float8[], $4::float8[], $5::text[], $6::float8[], $7::jsonb[],
+                    $9::float8[])
+            AS t(name, price, points, benchmark, benchmark_price, missing, forecast_price)
         "#,
     )
     .bind(day)
@@ -319,6 +439,8 @@ async fn write_snapshot(
     .bind(&benchmark_prices)
     .bind(&missing)
     .bind(source)
+    .bind(&forecasts)
+    .bind(forecast_day)
     .execute(&mut *transaction)
     .await?;
     // 读库或锁等待跨过零点时回滚, 不能再改昨天.
@@ -346,7 +468,12 @@ async fn refresh(pool: &PgPool) -> Result<RefreshReport, String> {
     let gap = input_gap(&master, &inputs);
     let benchmarks = benchmarks::as_of(&master, &inputs, day);
     let rows = snapshot_rows(&master, &benchmarks)?;
-    let written = write_snapshot(pool, day, &rows, snapshot_source(gap.as_deref()))
+    let (forecast_day, rows) = match snapshot_forecast(pool.clone(), master, inputs, day).await {
+        Some((target, prices)) => (Some(target), with_forecast(rows, &prices)),
+        None => (None, rows),
+    };
+    let source = snapshot_source(gap.as_deref());
+    let written = write_snapshot(pool, day, &rows, source, forecast_day)
         .await
         .map_err(|error| error.to_string())?;
     Ok(RefreshReport { gap, written })
@@ -449,6 +576,8 @@ async fn insert_backfill(
                 benchmark_price = EXCLUDED.benchmark_price,
                 missing = EXCLUDED.missing,
                 source = EXCLUDED.source,
+                forecast_price = NULL,
+                forecast_day = NULL,
                 computed_at = NOW()
             WHERE coal_price_daily.source = 'partial'
             "#,
@@ -564,6 +693,7 @@ pub(crate) fn spawn_hourly(pool: PgPool) {
 async fn read_snapshots(pool: &PgPool) -> Result<Value, sqlx::Error> {
     let rows = sqlx::query_as::<_, StoredRow>(
         r#"SELECT day, name, price, points, benchmark, benchmark_price, missing,
+                  forecast_price, forecast_day,
                   MAX(computed_at) OVER (PARTITION BY day) AS computed_at
            FROM coal_price_daily
            WHERE day IN (SELECT DISTINCT day FROM coal_price_daily ORDER BY day DESC LIMIT 2)
@@ -573,14 +703,14 @@ async fn read_snapshots(pool: &PgPool) -> Result<Value, sqlx::Error> {
     .await?;
     let mut days = BTreeMap::new();
     for row in rows {
-        days.entry(row.day)
-            .or_insert_with(|| DaySnapshot {
-                day: row.day,
-                computed_at: row.computed_at,
-                rows: Vec::new(),
-            })
-            .rows
-            .push(row.price);
+        let snapshot = days.entry(row.day).or_insert_with(|| DaySnapshot {
+            day: row.day,
+            computed_at: row.computed_at,
+            forecast_day: None,
+            rows: Vec::new(),
+        });
+        snapshot.forecast_day = snapshot.forecast_day.max(row.forecast_day);
+        snapshot.rows.push(row.price);
     }
     let mut snapshots = days.into_values().rev();
     Ok(compose(snapshots.next(), snapshots.next()))
@@ -776,6 +906,7 @@ mod tests {
         DaySnapshot {
             day: day.parse().unwrap(),
             computed_at: at(&format!("{day}T09:00:03Z")),
+            forecast_day: None,
             rows: names
                 .iter()
                 .map(|name| PriceRow {
@@ -785,6 +916,7 @@ mod tests {
                     benchmark: Some("当前基准".into()),
                     benchmark_price: Some(price),
                     missing: vec![],
+                    forecast_price: None,
                 })
                 .collect(),
         }
@@ -1155,5 +1287,114 @@ mod tests {
         inputs.history.remove("LJM_FM");
         let gap = input_gap(&master, &inputs).unwrap();
         assert!(gap.contains("LJM_FM"), "{gap}");
+    }
+
+    /// 一条当基准的指数 (规格与 "主力" 相同) + 一条只展示的综合指数, 最新一期 10-27.
+    fn forecast_fixture() -> (Value, benchmarks::BenchmarkInputs) {
+        let (mut master, _) = fixture();
+        master["price_factor"]["benchmarks"] = json!([]);
+        master["price_factor"]["index_series"] = json!([
+            {"code": "IDX", "name": "主焦指数", "coal_type": "主焦煤", "form": "精煤",
+             "region": "山西", "props": {"S": 1.0, "Y": 20.0}}
+        ]);
+        let point = |date: &str, price: f64| IndexPoint {
+            date: date.into(),
+            price,
+        };
+        let inputs = benchmarks::BenchmarkInputs {
+            stored: vec![],
+            history: HashMap::from([
+                (
+                    "IDX".to_string(),
+                    vec![point("2026-10-20", 2000.0), point("2026-10-27", 2100.0)],
+                ),
+                ("ZH".to_string(), vec![point("2026-10-27", 1500.0)]),
+            ]),
+            ccp: None,
+        };
+        (master, inputs)
+    }
+
+    fn forecast_of(code: &str, price: f64) -> (String, Forecast) {
+        (
+            code.to_string(),
+            Forecast {
+                made_on: "2026-10-27".into(),
+                base_price: 2100.0,
+                date: "2026-11-03".into(),
+                price,
+            },
+        )
+    }
+
+    #[test]
+    fn test_forecast_prices_reprice_every_coal_at_the_forecast_index() {
+        let (master, inputs) = forecast_fixture();
+        let today = snapshot_rows(
+            &master,
+            &benchmarks::as_of(&master, &inputs, d("2026-10-27")),
+        )
+        .unwrap();
+        let forecasts = HashMap::from([forecast_of("IDX", 2310.0), forecast_of("ZH", 1600.0)]);
+        let (target, prices) = forecast_prices(&master, &inputs, &forecasts).unwrap();
+        assert_eq!(target, d("2026-11-03"));
+        // 指数预测涨 10%, 每种煤的估价也跟着涨 10% (质量升贴水的比例不变).
+        assert_eq!(prices.len(), today.len());
+        for row in &today {
+            assert!(
+                (prices[&row.name] - row.price * 1.1).abs() < 1e-6,
+                "{}",
+                row.name
+            );
+        }
+        let rows = with_forecast(today, &prices);
+        assert!(rows
+            .iter()
+            .all(|row| row.forecast_price == Some(prices[&row.name])));
+    }
+
+    #[test]
+    fn test_forecast_moves_old_quotes_along_with_their_index() {
+        let (master, mut inputs) = forecast_fixture();
+        inputs.stored = vec![json!({
+            "name": "旧报价", "coal_type": "主焦煤", "props": {"S": 1.0, "Y": 20.0},
+            "price": 1000.0, "date": "2026-10-20", "origin": "stored"
+        })];
+        let forecasts = HashMap::from([forecast_of("IDX", 2310.0)]);
+        let projected = benchmarks::as_of(&master, &project(&inputs, &forecasts), d("2026-11-03"));
+        let quote = projected
+            .iter()
+            .find(|benchmark| benchmark["name"] == "旧报价")
+            .unwrap();
+        // 报价日指数 2000, 一周后预测 2310: 旧报价按同一比例推算到一周后.
+        assert_eq!(quote["current_price"], 1155.0);
+        // 原来的输入没被改动.
+        assert_eq!(inputs.history["IDX"].len(), 2);
+    }
+
+    #[test]
+    fn test_forecast_prices_need_every_benchmark_series() {
+        let (mut master, inputs) = forecast_fixture();
+        // 只有综合指数有预测: 当基准的那条没有, 整体不给.
+        let only_composite = HashMap::from([forecast_of("ZH", 1600.0)]);
+        assert!(forecast_prices(&master, &inputs, &only_composite).is_none());
+        assert!(forecast_prices(&master, &inputs, &HashMap::new()).is_none());
+        // 没有配置指数序列 (没有可预测的基准): 也不给.
+        master["price_factor"]["index_series"] = json!([]);
+        let forecasts = HashMap::from([forecast_of("IDX", 2310.0)]);
+        assert!(forecast_prices(&master, &inputs, &forecasts).is_none());
+    }
+
+    #[test]
+    fn test_compose_carries_forecast_only_when_present() {
+        let mut latest = snapshot("2026-10-28", &["甲", "乙"], 2100.0);
+        latest.forecast_day = Some(d("2026-11-03"));
+        latest.rows[0].forecast_price = Some(2150.0);
+        let result = compose(Some(latest), None);
+        assert_eq!(result["forecast_day"], "2026-11-03");
+        assert_eq!(result["prices"][0]["forecast_price"], 2150.0);
+        assert!(result["prices"][1].get("forecast_price").is_none());
+        let plain = compose(Some(snapshot("2026-10-28", &["甲"], 2100.0)), None);
+        assert!(plain.get("forecast_day").is_none());
     }
 }

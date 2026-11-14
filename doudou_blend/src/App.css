@@ -991,6 +991,21 @@ button {
   color: var(--c-text-3);
 }
 
+.price-forecast {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--c-text-2);
+}
+
+.price-forecast strong {
+  color: var(--c-text);
+}
+
+.price-forecast span {
+  font-size: 12px;
+  color: var(--c-text-3);
+}
+
 .index-ticker-spark {
   display: none;
 }

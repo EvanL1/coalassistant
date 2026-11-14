@@ -2,9 +2,11 @@ import type { ResolvedCoal } from "./domain/resolvedCoal";
 import type { Coal, CoalPriceHistory, CoalPriceSnapshot, CoalValue, PriceResult } from "./types";
 import { apiFetch } from "./http";
 import { placeFields } from "./domain/place";
+import { isAhead, type PriceForecast } from "./priceForecast";
 
 export type CardPrice =
-  | { kind: "snapshot"; price: number; change: number | null; missing: string[] }
+  /** forecast: 一周后的预测价, 没有就不带. */
+  | { kind: "snapshot"; price: number; change: number | null; missing: string[]; forecast?: number }
   /** modified: 用户改过化验值或自己新增; 否则只是快照里没有这种煤 (如还没生成快照). */
   | { kind: "live"; price: number; missing: string[]; modified: boolean }
   | { kind: "unavailable" };
@@ -84,10 +86,24 @@ export function coalsToEstimate(coals: ResolvedCoal[], snapshot: CoalPriceSnapsh
     }));
 }
 
+/** 这种煤一周后的预测价 (共享煤库口径). 没有预测、或预测的那天已经到了 (快照停更) 返回 null. */
+export function coalForecast(
+  snapshot: CoalPriceSnapshot | null,
+  name: string,
+  now: Date = new Date(),
+): PriceForecast | null {
+  const entry = snapshot?.prices.find((entry) => entry.name === name);
+  const date = snapshot?.forecast_day;
+  if (!entry || typeof entry.forecast_price !== "number" || !Number.isFinite(entry.forecast_price)) return null;
+  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !isAhead(date, now)) return null;
+  return { date, price: entry.forecast_price, base: entry.price };
+}
+
 export function cardPrice(
   coal: ResolvedCoal,
   snapshot: CoalPriceSnapshot | null,
   live: Map<string, CoalValue> | null,
+  now: Date = new Date(),
 ): CardPrice {
   if (!canEstimate(coal)) return { kind: "unavailable" };
   if (needsLive(coal, snapshot)) {
@@ -97,8 +113,10 @@ export function cardPrice(
       : { kind: "unavailable" };
   }
   const entry = snapshot!.prices.find((entry) => entry.name === coal.name)!;
+  const forecast = coalForecast(snapshot, coal.name, now);
   return {
     kind: "snapshot", price: entry.price, missing: entry.missing,
     change: entry.prev_price == null ? null : entry.price - entry.prev_price,
+    ...(forecast && { forecast: forecast.price }),
   };
 }

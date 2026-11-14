@@ -5,8 +5,10 @@
 import { useEffect, useState } from "react";
 import { ChartDialog, DEFAULT_RANGE, RangeButtons, rangeDays } from "./ChartDialog";
 import { fetchCoalPriceHistory } from "./coalPrices";
+import { ForecastNote } from "./ForecastNote";
 import { lastDays } from "./mcci";
 import { PriceChart, type ChartPoint } from "./PriceChart";
+import { yuan, type PriceForecast } from "./priceForecast";
 import type { CoalPriceHistory, CoalPricePoint } from "./types";
 
 type Row = ChartPoint & { benchmark: string | null };
@@ -22,12 +24,12 @@ function toRow(point: CoalPricePoint): Row {
   };
 }
 
-const yuan = (price: number) => Math.round(price).toLocaleString("zh-CN");
-
-export function CoalPriceDialog({ name, modified, onClose }: {
+export function CoalPriceDialog({ name, modified, forecast, onClose }: {
   name: string;
   /** 用户改过这种煤的化验值: 卡片价按修改值现算, 历史仍是共享煤库口径. */
   modified: boolean;
+  /** 一周后的预测价 (共享煤库口径), 没有就不显示. */
+  forecast?: PriceForecast | null;
   onClose: () => void;
 }) {
   const [loaded, setLoaded] = useState<{ name: string; history: CoalPriceHistory | null } | null>(null);
@@ -59,6 +61,7 @@ export function CoalPriceDialog({ name, modified, onClose }: {
           <span>元/吨 · {latest.date}</span>
           <span>最高 {yuan(Math.max(...prices))} · 最低 {yuan(Math.min(...prices))}</span>
         </div>}
+        {forecast && <ForecastNote forecast={forecast} />}
         <RangeButtons range={range} onChange={setRange} />
         {rows.length < 2 ? (
           <p className="index-chart-empty">数据不足两天, 画不出走势</p>
@@ -68,7 +71,9 @@ export function CoalPriceDialog({ name, modified, onClose }: {
         {rows.length >= 2 && rows.some((row) => row.dashed) && (
           <p className="price-chart-note">虚线为回算: 按当天能拿到的指数和报价补算</p>
         )}
-        {modified && <p className="price-chart-note">历史为共享煤库口径, 不含你的修改</p>}
+        {modified && (
+          <p className="price-chart-note">历史{forecast ? "与预测" : ""}为共享煤库口径, 不含你的修改</p>
+        )}
       </>
     );
 

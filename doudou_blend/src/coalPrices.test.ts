@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cardPrice, coalsToEstimate, estimateLive, fetchCoalPrices, fetchCoalPriceHistory, hasPriceHistory } from "./coalPrices";
+import { cardPrice, coalForecast, coalsToEstimate, estimateLive, fetchCoalPrices, fetchCoalPriceHistory, hasPriceHistory } from "./coalPrices";
 import { resolveCoal, resolveCoalPool } from "./domain/resolvedCoal";
 import type { CoalPriceSnapshot, CoalValue, MasterCoalEntry } from "./types";
 
@@ -29,6 +29,26 @@ describe("卡片估价", () => {
     expect(price.price).toBe(2202.4);
     expect(price.change).toBeCloseTo(12.3);
     expect(price.missing).toEqual(["M"]);
+  });
+
+  it("快照带一周后的预测价时卡片带上; 预测的那天到了、没有预测、改过化验值的都不带", () => {
+    const forecasted: CoalPriceSnapshot = { ...snapshot, forecast_day: "2026-11-04",
+      prices: [{ ...snapshot.prices[0], forecast_price: 2231.6 }] };
+    const now = new Date("2026-10-28T10:00:00+08:00");
+    expect(coalForecast(forecasted, base.name, now)).toEqual({ date: "2026-11-04", price: 2231.6, base: 2202.4 });
+    expect(cardPrice(coal, forecasted, live, now)).toMatchObject({ kind: "snapshot", forecast: 2231.6 });
+    // 快照停更到预测的那天: 旧预测不再显示.
+    const later = new Date("2026-11-04T08:00:00+08:00");
+    expect(coalForecast(forecasted, base.name, later)).toBeNull();
+    expect(cardPrice(coal, forecasted, live, later)).not.toHaveProperty("forecast");
+    // 没有预测 (服务端历史不够长): 不带.
+    expect(coalForecast(snapshot, base.name, now)).toBeNull();
+    expect(coalForecast({ ...forecasted, forecast_day: undefined }, base.name, now)).toBeNull();
+    expect(coalForecast(forecasted, "别的煤", now)).toBeNull();
+    expect(coalForecast(null, base.name, now)).toBeNull();
+    // 改过化验值的煤按修改值现算, 预测是共享煤库口径, 卡片上不带.
+    const modified = resolveCoal(base, { props_override: { S: 1.2 } }, "master");
+    expect(cardPrice(modified, forecasted, live, now)).not.toHaveProperty("forecast");
   });
 
   it("没有前一日价时不显示涨跌", () => {

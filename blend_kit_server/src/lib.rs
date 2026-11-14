@@ -28,6 +28,7 @@ mod benchmarks;
 mod coal_index;
 mod coal_prices;
 mod database;
+mod forecast;
 mod limits;
 mod master_data;
 mod mcci;
