@@ -71,7 +71,9 @@ export function CoalPriceDialog({ name, modified, forecast, onClose }: {
         {rows.length >= 2 && rows.some((row) => row.dashed) && (
           <p className="price-chart-note">虚线为回算: 按当天能拿到的指数和报价补算</p>
         )}
-        {modified && <p className="price-chart-note">历史为共享煤库口径, 不含你的修改</p>}
+        {modified && (
+          <p className="price-chart-note">历史{forecast ? "与预测" : ""}为共享煤库口径, 不含你的修改</p>
+        )}
       </>
     );
 

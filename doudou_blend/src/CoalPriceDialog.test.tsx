@@ -52,6 +52,14 @@ describe("煤价走势弹层", () => {
     expect(container.textContent).toContain("历史为共享煤库口径, 不含你的修改");
   });
 
+  it("改过化验值的煤带预测时, 注明预测也是共享煤库口径", async () => {
+    serve(history);
+    const forecast = { date: "2026-11-05", price: 2240.4, base: 2214 };
+    const { container } = render(<CoalPriceDialog name="临北" modified forecast={forecast} onClose={() => {}} />);
+    await screen.findByText("2,214");
+    expect(container.textContent).toContain("历史与预测为共享煤库口径, 不含你的修改");
+  });
+
   it.each<[string, () => void, string]>([
     ["取不到", () => serve({}, 503), "走势暂时取不到"],
     ["不足两天", () => serve({ ...history, points: history.points.slice(-1) }), "数据不足两天, 画不出走势"],

@@ -176,6 +176,7 @@ fn project(
 /// 每种煤一周后的估价 (预测的那天, 煤名 → 价): 指数各序列换成预测值, 按那天重新定基准 (旧报价
 /// 也随对应的指数推算过去), 再把全部煤重估一遍 —— 与今天的估价同一套口径, 只是指数往前走了一周.
 /// 当基准的序列只要有一条没有预测 (历史不够长、停更) 就整体不给: 不能一半基准在今天、一半在下周.
+/// 只能按 CCP 推算的旧报价 (指标没写全、又没有同煤种的序列) 没有预测可跟, 留在今天的水平.
 fn forecast_prices(
     master: &Value,
     inputs: &benchmarks::BenchmarkInputs,
@@ -194,6 +195,45 @@ fn forecast_prices(
         target,
         rows.into_iter().map(|row| (row.name, row.price)).collect(),
     ))
+}
+
+/// 预测最多等这么久; 超时就不带预测价, 先把今天的估价写下去.
+const FORECAST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 这一轮快照要带的预测价. 预测只是参考: 放在单独的任务里算并限时 —— 读不到指数历史、
+/// 历史还没回填够、算的时候 panic 或超时, 都只是这一轮不带预测价, 不耽误今天的估价.
+async fn snapshot_forecast(
+    pool: PgPool,
+    master: Value,
+    inputs: benchmarks::BenchmarkInputs,
+    day: NaiveDate,
+) -> Option<(NaiveDate, HashMap<String, f64>)> {
+    let mut task = tokio::spawn(async move {
+        let forecasts = forecast::refresh(&pool, &master, day)
+            .await
+            .inspect_err(|error| tracing::warn!(%error, "读取指数历史失败, 这一轮不带预测价"))
+            .ok()?;
+        let prices = forecast_prices(&master, &inputs, &forecasts);
+        if prices.is_none() {
+            tracing::info!(
+                series = forecasts.len(),
+                "当基准的指数序列没有全部预测出来 (历史没回填够或停更), 这一轮不带预测价"
+            );
+        }
+        prices
+    });
+    match tokio::time::timeout(FORECAST_TIMEOUT, &mut task).await {
+        Ok(Ok(prices)) => prices,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "算预测价的任务异常退出, 这一轮不带预测价");
+            None
+        }
+        Err(_) => {
+            task.abort();
+            tracing::warn!("算预测价超时, 这一轮不带预测价");
+            None
+        }
+    }
 }
 
 fn with_forecast(rows: Vec<PriceRow>, prices: &HashMap<String, f64>) -> Vec<PriceRow> {
@@ -428,14 +468,7 @@ async fn refresh(pool: &PgPool) -> Result<RefreshReport, String> {
     let gap = input_gap(&master, &inputs);
     let benchmarks = benchmarks::as_of(&master, &inputs, day);
     let rows = snapshot_rows(&master, &benchmarks)?;
-    // 预测只是参考: 算不出来 (指数历史读不到、还没回填够) 不耽误今天的估价.
-    let forecasts = forecast::refresh(pool, &master, day)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "读取指数历史失败, 这一轮不带预测价");
-            HashMap::new()
-        });
-    let (forecast_day, rows) = match forecast_prices(&master, &inputs, &forecasts) {
+    let (forecast_day, rows) = match snapshot_forecast(pool.clone(), master, inputs, day).await {
         Some((target, prices)) => (Some(target), with_forecast(rows, &prices)),
         None => (None, rows),
     };

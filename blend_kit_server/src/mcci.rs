@@ -149,10 +149,12 @@ pub(crate) struct Stored {
     pub fetched_at: DateTime<FixedOffset>,
 }
 
-/// 这一刻这条序列要拉哪段日期 (北京时间); None = 不用拉.
+/// 这一刻这条序列要拉哪段日期 (北京时间); None = 不用拉. `try_backfill` 为假 (今天回填全部
+/// 历史已经失败过) 时, 库里有数据的序列只按平时的规则走: 回填失败不能挡住每天的更新.
 pub(crate) fn fetch_window(
     now: DateTime<FixedOffset>,
     stored: Option<Stored>,
+    try_backfill: bool,
 ) -> Option<(NaiveDate, NaiveDate)> {
     let today = now.date_naive();
     let backfill = Some((BACKFILL_FROM, today));
@@ -161,7 +163,8 @@ pub(crate) fn fetch_window(
     };
     let fetched_on = stored.fetched_at.date_naive();
     // 历史没回填全 (回填只成功了一部分、新加的序列、或上线预测前只存了一年): 一天补一次.
-    if stored.first > BACKFILL_FROM + Days::new(BACKFILL_SLACK_DAYS) && fetched_on < today {
+    let incomplete = stored.first > BACKFILL_FROM + Days::new(BACKFILL_SLACK_DAYS);
+    if try_backfill && incomplete && fetched_on < today {
         return backfill;
     }
     if stored.latest >= today || now.time() < PUBLISH_AFTER {
@@ -236,7 +239,7 @@ async fn fetch_series(
 }
 
 /// 界面用的指数总览: master 配置的每条序列 (标准品指标) + 近一年的值 (升序) + 一周后的预测
-/// (`forecast`: 预测的那天与值; 没有就不带). 库里没数据的序列也列出来 (points 为空), 界面据此
+/// (`forecast`: 预测的那天与值; 没有、或不是按最新一期做的就不带). 库里没数据的序列也列出来 (points 为空), 界面据此
 /// 提示"还没拉到".
 pub(crate) fn overview(
     config: &[Value],
@@ -248,8 +251,16 @@ pub(crate) fn overview(
         .filter_map(|series| {
             let code = series["code"].as_str()?;
             let mut row = series.clone();
-            row["points"] = json!(history.get(code).cloned().unwrap_or_default());
-            if let Some(forecast) = forecasts.get(code) {
+            let points = history.get(code).map_or(&[][..], Vec::as_slice);
+            row["points"] = json!(points);
+            // 预测每小时才重算: 新一期指数刚入库时, 库里的预测还是按上一期做的, 先不带
+            // (否则界面会拿它和新一期的值比涨跌).
+            let current = |forecast: &&Forecast| {
+                points
+                    .last()
+                    .is_some_and(|latest| latest.date == forecast.made_on)
+            };
+            if let Some(forecast) = forecasts.get(code).filter(current) {
                 row["forecast"] = json!({"date": forecast.date, "price": forecast.price});
             }
             Some(row)
@@ -398,9 +409,12 @@ async fn refresh(
 struct Failure {
     count: u32,
     retry_at: Option<DateTime<FixedOffset>>,
+    /// 哪天回填全部历史失败过: 当天不再试回填, 改按平时的窗口拉, 第二天再试一次.
+    backfill_failed_on: Option<NaiveDate>,
 }
 
-/// 一轮: 逐条序列看要不要拉; 失败的按 [`backoff`] 隔开再试.
+/// 一轮: 逐条序列看要不要拉; 失败的按 [`backoff`] 隔开再试. 库里已有数据的序列回填全部历史
+/// 失败时不退避、当天不再回填 —— 它只影响一周后的预测, 不能挡住估价要用的每天更新.
 async fn tick(
     pool: &PgPool,
     client: &reqwest::Client,
@@ -421,9 +435,13 @@ async fn tick(
         if failure.retry_at.is_some_and(|at| now < at) {
             continue;
         }
-        let Some((start, end)) = fetch_window(now, state.get(&series.code).copied()) else {
+        let stored = state.get(&series.code).copied();
+        let today = now.date_naive();
+        let try_backfill = failure.backfill_failed_on != Some(today);
+        let Some((start, end)) = fetch_window(now, stored, try_backfill) else {
             continue;
         };
+        let backfilling = stored.is_some() && start == BACKFILL_FROM;
         if fetched_any {
             tokio::time::sleep(BETWEEN_SERIES).await;
         }
@@ -432,6 +450,13 @@ async fn tick(
             Ok(count) => {
                 *failure = Failure::default();
                 tracing::info!(code = %series.code, %start, %end, count, "已更新钢铁网炼焦煤指数");
+            }
+            Err(error) if backfilling => {
+                failure.backfill_failed_on = Some(today);
+                tracing::error!(
+                    code = %series.code, %error,
+                    "回填钢铁网指数全部历史失败, 今天不再试 (一周后的预测暂时没有), 每天的更新照常"
+                );
             }
             Err(error) => {
                 failure.count += 1;
@@ -554,7 +579,7 @@ mod tests {
     #[test]
     fn test_fetch_window_backfills_new_series_any_time() {
         assert_eq!(
-            fetch_window(at("2026-10-27", "09:00"), None),
+            fetch_window(at("2026-10-27", "09:00"), None, true),
             Some((day("2018-04-05"), day("2026-10-27")))
         );
     }
@@ -571,21 +596,55 @@ mod tests {
             })
         };
         assert_eq!(
-            fetch_window(at("2026-10-27", "09:00"), partial(("2026-10-26", "18:00"))),
+            fetch_window(
+                at("2026-10-27", "09:00"),
+                partial(("2026-10-26", "18:00")),
+                true
+            ),
             Some((day("2018-04-05"), day("2026-10-27")))
         );
         assert_eq!(
-            fetch_window(at("2026-10-27", "09:00"), partial(("2026-10-27", "08:00"))),
+            fetch_window(
+                at("2026-10-27", "09:00"),
+                partial(("2026-10-27", "08:00")),
+                true
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn test_fetch_window_failed_backfill_does_not_block_daily_updates() {
+        // 历史只有一年、今天回填已经失败过: 不再回填, 按平时的规则走 —— 发布前不拉, 发布后拉近 15 天.
+        let one_year = Some(Stored {
+            first: day("2025-10-27"),
+            latest: day("2026-10-26"),
+            fetched_at: at("2026-10-26", "18:00"),
+        });
+        assert_eq!(
+            fetch_window(at("2026-10-27", "09:00"), one_year, false),
+            None
+        );
+        assert_eq!(
+            fetch_window(at("2026-10-27", "17:30"), one_year, false),
+            Some((day("2026-10-12"), day("2026-10-27")))
+        );
+        // 库里一条都没有的序列没有 "平时的窗口", 仍然回填.
+        assert_eq!(
+            fetch_window(at("2026-10-27", "09:00"), None, false),
+            Some((day("2018-04-05"), day("2026-10-27")))
         );
     }
 
     #[test]
     fn test_fetch_window_waits_for_publish() {
         let yesterday = stored("2026-10-26", ("2026-10-26", "18:00"));
-        assert_eq!(fetch_window(at("2026-10-27", "17:29"), yesterday), None);
         assert_eq!(
-            fetch_window(at("2026-10-27", "17:30"), yesterday),
+            fetch_window(at("2026-10-27", "17:29"), yesterday, true),
+            None
+        );
+        assert_eq!(
+            fetch_window(at("2026-10-27", "17:30"), yesterday, true),
             Some((day("2026-10-12"), day("2026-10-27")))
         );
     }
@@ -593,24 +652,24 @@ mod tests {
     #[test]
     fn test_fetch_window_stops_once_today_is_in() {
         let today = stored("2026-10-27", ("2026-10-27", "17:31"));
-        assert_eq!(fetch_window(at("2026-10-27", "18:30"), today), None);
+        assert_eq!(fetch_window(at("2026-10-27", "18:30"), today, true), None);
     }
 
     #[test]
     fn test_fetch_window_retries_weekday_until_today_shows_up() {
         // 17:30 拉过但今天的值还没发布: 工作日每小时再试, 22:30 后放弃 (节假日).
         let pulled = stored("2026-10-26", ("2026-10-27", "17:30"));
-        assert!(fetch_window(at("2026-10-27", "20:00"), pulled).is_some());
-        assert_eq!(fetch_window(at("2026-10-27", "22:30"), pulled), None);
+        assert!(fetch_window(at("2026-10-27", "20:00"), pulled, true).is_some());
+        assert_eq!(fetch_window(at("2026-10-27", "22:30"), pulled, true), None);
     }
 
     #[test]
     fn test_fetch_window_weekend_pulls_once() {
         // 周六: 第一次照拉 (补周五可能漏的), 拉过就不再试.
         let friday = stored("2026-10-30", ("2026-10-30", "18:00"));
-        assert!(fetch_window(at("2026-10-31", "18:00"), friday).is_some());
+        assert!(fetch_window(at("2026-10-31", "18:00"), friday, true).is_some());
         let pulled = stored("2026-10-30", ("2026-10-31", "17:30"));
-        assert_eq!(fetch_window(at("2026-10-31", "19:00"), pulled), None);
+        assert_eq!(fetch_window(at("2026-10-31", "19:00"), pulled, true), None);
     }
 
     #[test]
@@ -619,7 +678,8 @@ mod tests {
         assert_eq!(
             fetch_window(
                 at("2026-10-27", "18:00"),
-                stored("2026-09-20", ("2026-09-20", "18:00"))
+                stored("2026-09-20", ("2026-09-20", "18:00")),
+                true
             ),
             Some((day("2026-09-20"), day("2026-10-27")))
         );
@@ -672,6 +732,17 @@ mod tests {
         )]);
         let rows = overview(&config, &history, &forecasts);
         assert_eq!(rows.len(), 2);
+        // 预测不是按最新一期做的 (新一期刚入库, 预测还没重算): 不带.
+        let outdated = HashMap::from([(
+            "LJM_FM".to_string(),
+            Forecast {
+                made_on: "2026-10-23".into(),
+                ..forecasts["LJM_FM"].clone()
+            },
+        )]);
+        assert!(overview(&config, &history, &outdated)[0]
+            .get("forecast")
+            .is_none());
         // 有预测的带上预测的那天与值; 没有的不带这个键.
         assert_eq!(
             rows[0]["forecast"],
