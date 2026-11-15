@@ -61,7 +61,7 @@ pub(crate) struct QuoteItem {
     pub changed: Vec<String>,
 }
 
-fn validate(batch: &QuoteBatch) -> Result<(), String> {
+pub(crate) fn validate(batch: &QuoteBatch) -> Result<(), String> {
     let id = &batch.batch_id;
     if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
@@ -288,6 +288,54 @@ async fn replace_batch(
     tx.commit().await
 }
 
+/// 存档失败的三种情形, HTTP 各回各的状态码.
+pub(crate) enum StoreError {
+    /// 这批询价没过校验.
+    Invalid(String),
+    /// 没配数据库.
+    Unavailable(Box<Response>),
+    Database(sqlx::Error),
+}
+
+impl StoreError {
+    /// 写日志用的一句话.
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            StoreError::Invalid(reason) => reason.clone(),
+            StoreError::Unavailable(_) => "数据库未配置".into(),
+            StoreError::Database(error) => error.to_string(),
+        }
+    }
+
+    /// 给调用方看的简短说法: 数据库报错的原文只进日志, 不往外带.
+    pub(crate) fn brief(&self) -> String {
+        match self {
+            StoreError::Database(_) => "数据库写入失败".into(),
+            other => other.reason(),
+        }
+    }
+}
+
+/// 存档一批询价 (`POST /api/quotes` 与 MCP 的 quote_blend 共用): 校验 → 按这批指标与当天基准
+/// 重算出厂估价 (不信任调用方带来的估价) → 按批覆盖, 记在 `day` (北京时间的日期) 名下.
+/// 返回每条报价与估价的对比.
+pub(crate) async fn store(
+    state: &AppState,
+    username: &str,
+    batch: &QuoteBatch,
+    day: NaiveDate,
+) -> Result<Vec<ArchivedQuote>, StoreError> {
+    validate(batch).map_err(StoreError::Invalid)?;
+    let master: Value = serde_json::from_str(&merged_master_json(state).await).unwrap_or_default();
+    let benchmarks = benchmarks::current(state, &master).await;
+    let estimates = estimates_or_blank(&batch.items, &master, &benchmarks);
+    let pool = require_database(state).map_err(StoreError::Unavailable)?;
+    replace_batch(pool, username, day, batch, &estimates)
+        .await
+        .map_err(StoreError::Database)?;
+    Ok(archived(&batch.items, &estimates))
+}
+
 /// POST /api/quotes —— 存档一批询价 (登录即可). 估价由这里重算, 不信任浏览器.
 pub(crate) async fn archive(
     State(state): State<AppState>,
@@ -308,22 +356,12 @@ pub(crate) async fn archive(
         Ok(batch) => batch,
         Err(error) => return bad_request(&format!("询价格式无效: {error}")),
     };
-    if let Err(reason) = validate(&batch) {
-        return bad_request(&reason);
-    }
-    let master: Value = serde_json::from_str(&merged_master_json(&state).await).unwrap_or_default();
-    let benchmarks = benchmarks::current(&state, &master).await;
-    let estimates = estimates_or_blank(&batch.items, &master, &benchmarks);
-    let pool = match require_database(&state) {
-        Ok(pool) => pool,
-        Err(response) => return *response,
-    };
     let day = Utc::now().with_timezone(&mcci::beijing()).date_naive();
-    match replace_batch(pool, &username, day, &batch, &estimates).await {
-        Ok(()) => {
-            Json(json!({ "ok": true, "items": archived(&batch.items, &estimates) })).into_response()
-        }
-        Err(error) => database_error(error),
+    match store(&state, &username, &batch, day).await {
+        Ok(items) => Json(json!({ "ok": true, "items": items })).into_response(),
+        Err(StoreError::Invalid(reason)) => bad_request(&reason),
+        Err(StoreError::Unavailable(response)) => *response,
+        Err(StoreError::Database(error)) => database_error(error),
     }
 }
 

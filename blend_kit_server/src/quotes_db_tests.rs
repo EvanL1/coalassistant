@@ -232,3 +232,163 @@ async fn test_replace_quote_batch_serializes_concurrent_writers() {
     written.unwrap();
     assert_eq!(names, vec!["后到煤"], "同批覆盖不能留下两个请求的并集");
 }
+
+fn mcp_context() -> crate::mcp::Context {
+    crate::mcp::Context {
+        master: json!({
+            "default_contract": {"name": "默认合同", "specs": [
+                {"indicator": "S", "direction": "Upper", "max": 1.5}
+            ]},
+            "price_factor": {"adjusts": [
+                {"indicator": "S", "direction": "Upper", "base": 1.3, "premium_rate": 75, "discount_rate": 125}
+            ]},
+            "coals": [
+                {"name": "甲煤", "status": "verified", "coal_type": "焦煤", "province": "山西省",
+                 "props": {"S": 0.6}},
+                {"name": "乙煤", "status": "verified", "coal_type": "焦煤", "props": {"S": 2.4}},
+                {"name": "丙煤", "status": "active", "props": {"S": 1.0}}
+            ]
+        }),
+        storage: crate::database::UserStorage {
+            initialized: true,
+            coal_prefs: json!({}),
+            contract: None,
+            quantity: 1000.0,
+            user_coals: json!([]),
+            shovel_tons: None,
+        },
+        market_price: None,
+        benchmarks: vec![
+            json!({"name": "焦煤基准", "coal_type": "焦煤", "props": {"S": 1.3},
+                                "price": 2000.0, "date": "2026-11-01"}),
+        ],
+        rank_k: None,
+        coal_prices: None,
+        market: None,
+        today: "2026-11-14".parse().unwrap(),
+    }
+}
+
+/// 一条 MCP `quote_blend` 消息 → 存档批 → 重算估价 → 按批覆盖, 即 `store` 里校验之后的那几步
+/// (master 与基准换成固定数据).
+async fn archive_mcp_call(pool: &PgPool, context: &crate::mcp::Context, quotes: Value) -> String {
+    let message = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": {"name": "quote_blend", "arguments": {"quotes": quotes}}});
+    let batch = crate::mcp::quote_archive(&message, context).expect("合法的询价应有存档批");
+    validate(&batch).unwrap();
+    let estimates = estimates_or_blank(&batch.items, &context.master, &context.benchmarks);
+    replace_batch(pool, "tester", context.today, &batch, &estimates)
+        .await
+        .unwrap();
+    batch.batch_id
+}
+
+async fn stored_quotes(pool: &PgPool) -> Vec<QuoteRecord> {
+    let mut records: Vec<QuoteRecord> = sqlx::query_as("SELECT * FROM coal_quotes")
+        .fetch_all(pool)
+        .await
+        .unwrap();
+    // 在这边排序: 中文煤名在库里的次序随排序规则而变.
+    records.sort_by(|a, b| {
+        (a.quoted_on, &a.batch_id, &a.name).cmp(&(b.quoted_on, &b.batch_id, &b.name))
+    });
+    records
+}
+
+/// MCP 询价精算的存档: 落进询价表 (煤池里的煤名与标签、这次实际用的指标、服务端重算的估价);
+/// 同一天同一组煤再算一次覆盖上一次, 换一组煤或隔一天另起一批.
+#[tokio::test]
+#[ignore = "需要独立 PostgreSQL, 设置 DATABASE_URL 后用 --ignored 执行"]
+async fn test_mcp_quote_archive_is_stored_and_same_coals_same_day_replace() {
+    let isolated = isolated(&[QUOTES, PLACE_PREREQUISITES, PLACE]).await;
+    let pool = &isolated.pool;
+    let mut context = mcp_context();
+
+    let first = archive_mcp_call(
+        pool,
+        &context,
+        json!({"甲煤": {"fob": 2200, "frt": 60, "props": {"S": 0.6, "A": 9.5}}, "乙煤": {"fob": 1700}}),
+    )
+    .await;
+    let stored = stored_quotes(pool).await;
+    // 同一组煤同一天: 报价变了, 整批覆盖, 不留旧的.
+    let second = archive_mcp_call(
+        pool,
+        &context,
+        json!({" 乙煤": {"fob": 1650, "frt": 30}, "甲煤": {"fob": 2300}}),
+    )
+    .await;
+    let replaced = stored_quotes(pool).await;
+    // 换一组煤、隔一天: 各起一批, 之前的不动.
+    let other = archive_mcp_call(
+        pool,
+        &context,
+        json!({"甲煤": {"fob": 2200}, "丙煤": {"fob": 2000}}),
+    )
+    .await;
+    context.today = "2026-11-15".parse().unwrap();
+    let next_day = archive_mcp_call(
+        pool,
+        &context,
+        json!({"甲煤": {"fob": 2250}, "乙煤": {"fob": 1680}}),
+    )
+    .await;
+    let all = stored_quotes(pool).await;
+    drop_schema(isolated).await;
+
+    assert_eq!(stored.len(), 2);
+    let named = |name: &str| stored.iter().find(|record| record.name == name).unwrap();
+    let (a, b) = (named("甲煤"), named("乙煤"));
+    assert_eq!((a.name.as_str(), a.fob, a.frt), ("甲煤", 2200.0, 60.0));
+    assert_eq!((b.name.as_str(), b.fob, b.frt), ("乙煤", 1700.0, 0.0));
+    for record in &stored {
+        assert_eq!(record.username, "tester");
+        assert_eq!(record.batch_id, first);
+        assert_eq!(record.quoted_on.to_string(), "2026-11-14");
+    }
+    assert_eq!(Value::Object(a.props.clone()), json!({"S": 0.6, "A": 9.5}));
+    assert_eq!(a.changed, ["A"]);
+    assert_eq!(a.coal_type.as_deref(), Some("焦煤"));
+    assert_eq!(a.province.as_deref(), Some("山西省"));
+    // 估价由服务端按这批指标与基准重算: 2000 × 1052.5 / 1000.
+    assert!(
+        (a.estimate.unwrap() - 2105.0).abs() < 1e-6,
+        "{:?}",
+        a.estimate
+    );
+    assert_eq!(a.benchmark.as_deref(), Some("焦煤基准"));
+    assert_eq!(Value::Object(b.props.clone()), json!({"S": 2.4}));
+    assert!(b.changed.is_empty());
+
+    assert_eq!(second, first);
+    let prices: Vec<(&str, f64, f64)> = replaced
+        .iter()
+        .map(|record| (record.name.as_str(), record.fob, record.frt))
+        .collect();
+    assert_eq!(prices, [("乙煤", 1650.0, 30.0), ("甲煤", 2300.0, 0.0)]);
+    assert!(replaced.iter().all(|record| record.changed.is_empty()));
+
+    assert_ne!(other, first);
+    assert_ne!(next_day, first);
+    assert_eq!(next_day[13..], first[13..], "批号后半段只由这组煤定");
+    let batches: Vec<(String, &str, &str)> = all
+        .iter()
+        .map(|record| {
+            (
+                record.quoted_on.to_string(),
+                record.batch_id.as_str(),
+                record.name.as_str(),
+            )
+        })
+        .collect();
+    let mut expected = vec![
+        ("2026-11-14".to_string(), first.as_str(), "甲煤"),
+        ("2026-11-14".to_string(), first.as_str(), "乙煤"),
+        ("2026-11-14".to_string(), other.as_str(), "丙煤"),
+        ("2026-11-14".to_string(), other.as_str(), "甲煤"),
+        ("2026-11-15".to_string(), next_day.as_str(), "甲煤"),
+        ("2026-11-15".to_string(), next_day.as_str(), "乙煤"),
+    ];
+    expected.sort();
+    assert_eq!(batches, expected);
+}

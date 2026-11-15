@@ -2,7 +2,7 @@
  * 管理端 - API 密钥.
  *
  * 生成 / 命名 / 销毁两种用途的密钥: data 给协作者写煤库指标, mcp 给手机 Agent
- * (Kimi 等) 经 /mcp 只读 + 求解。
+ * (Kimi 等) 经 /mcp 查询 + 求解 + 询价存档。
  * 服务端只存哈希, 明文仅在创建响应里出现一次, 所以这里必须当场让用户复制,
  * 并把"只显示这一次"讲清楚 —— 关掉就再也拿不回来了.
  */
@@ -90,7 +90,7 @@ export function ApiKeyCard() {
     <div className="card">
       <div className="card-title">API 密钥</div>
       <p style={{ fontSize: 11, color: "var(--c-text-3)", margin: "0 0 12px" }}>
-        「手机 Agent」给同事在 Kimi 等 App 里调配煤 (只读 + 求解, 改不了数据)；「写煤库」给协作者补煤库指标。一人一把, 销毁后立即失效, 不影响其他人。
+        「手机 Agent」给同事在 Kimi 等 App 里调配煤 (查询 + 求解 + 询价存档, 改不了煤池、合同和煤库)；「写煤库」给协作者补煤库指标。一人一把, 销毁后立即失效, 不影响其他人。
       </p>
 
       {/* 新生成的明文: 只显示这一次 */}
@@ -174,7 +174,7 @@ export function ApiKeyCard() {
             color: "inherit",
           }}
         >
-          <option value="mcp">手机 Agent (只读+求解)</option>
+          <option value="mcp">手机 Agent (查询+求解+询价存档)</option>
           <option value="data">写煤库</option>
         </select>
         <input

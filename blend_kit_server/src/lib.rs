@@ -318,7 +318,7 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         .route("/api/history/count", get(count_history))
         .route("/api/history/import", post(import_history))
         .route("/api/history/{id}/measured", patch(set_measured_quality))
-        // MCP (手机 Agent): mcp 用途密钥, 只读 + 求解
+        // MCP (手机 Agent): mcp 用途密钥, 查询 + 求解 + 询价存档
         .route("/mcp", post(mcp_post).get(mcp_get))
         .route("/mcp/{key}", post(mcp_post_with_key).get(mcp_get))
         .nest_service("/assets", assets)
@@ -937,7 +937,7 @@ async fn check_data_api_key(
 #[derive(Debug, Deserialize)]
 struct CreateKeyRequest {
     name: String,
-    /// 用途: data (写煤库, 默认) 或 mcp (手机 Agent 只读 + 求解).
+    /// 用途: data (写煤库, 默认) 或 mcp (手机 Agent 查询 + 求解 + 询价存档).
     #[serde(default = "default_key_scope")]
     scope: String,
 }
@@ -1163,7 +1163,7 @@ async fn delete_coal_override(
 }
 
 // ---------------------------------------------------------------------------
-// MCP 入口 (手机 Agent): 用途为 mcp 的密钥, 只读 + 求解, 写不了煤库
+// MCP 入口 (手机 Agent): 用途为 mcp 的密钥, 查询 + 求解 + 询价存档, 写不了煤库
 // ---------------------------------------------------------------------------
 
 /// 从请求头取 MCP 密钥: `Authorization: Bearer <key>` 或 `X-API-Key`.
@@ -1238,14 +1238,19 @@ async fn mcp_serve(state: &AppState, presented: &str, body: &[u8]) -> Response {
         Err(error) => return Json(error).into_response(),
     };
     let context = if messages.iter().any(mcp::needs_context) {
-        match load_mcp_context(state, pool).await {
+        match load_mcp_context(state, pool, &messages).await {
             Ok(context) => Some(context),
             Err(error) => return database_error(error),
         }
     } else {
         None
     };
-    let mut replies = mcp_replies(messages, context, limits::run_solver).await;
+    let store = |day, batch: quotes::QuoteBatch| async move {
+        quotes::store(state, &state.auth.username, &batch, day)
+            .await
+            .map(drop)
+    };
+    let mut replies = mcp_answer(messages, context, limits::run_solver, store).await;
     match (replies.is_empty(), batch) {
         // 全是通知: 规范要求 202, 不带内容
         (true, _) => StatusCode::ACCEPTED.into_response(),
@@ -1274,9 +1279,138 @@ fn mcp_messages(
 /// 一批 MCP 消息里要在求解闸门里算的那部分 (带原位置), 交给 `run` 执行.
 type McpTask = Box<dyn FnOnce() -> Vec<(usize, serde_json::Value)> + Send>;
 
-/// 要求解或估价的消息: 除查合同 (只拼文字) 外的 tools/call.
+/// 要求解或估价的消息: 除查合同、看行情 (都只拼文字) 外的 tools/call.
 fn mcp_computes(message: &serde_json::Value) -> bool {
-    mcp::needs_context(message) && message["params"]["name"].as_str() != Some("get_contract")
+    let name = message["params"]["name"].as_str();
+    mcp::needs_context(message) && !matches!(name, Some("get_contract" | "market"))
+}
+
+/// 回一批 MCP 消息, 并给其中算成了的询价精算存档 (`store`: 线上为 [`quotes::store`], 与
+/// `POST /api/quotes` 同一条路, 记在网页账号名下). 要存的报价先由纯函数算出来, 回包算完才落库:
+/// 存档不影响精算结果, 没求解成功的调用也不会留下存档.
+async fn mcp_answer<Run, Solving, Store, Storing>(
+    messages: Vec<serde_json::Value>,
+    context: Option<mcp::Context>,
+    run: Run,
+    store: Store,
+) -> Vec<serde_json::Value>
+where
+    Run: FnOnce(McpTask) -> Solving,
+    Solving:
+        std::future::Future<Output = Result<Vec<(usize, serde_json::Value)>, limits::ComputeError>>,
+    Store: FnOnce(chrono::NaiveDate, quotes::QuoteBatch) -> Storing,
+    Storing: std::future::Future<Output = Result<(), quotes::StoreError>>,
+{
+    let archives = mcp_quote_archives(&messages, context.as_ref());
+    let mut replies = mcp_replies(messages, context, run).await;
+    archive_mcp_quotes(archives, &mut replies, store).await;
+    replies
+}
+
+/// 一条询价精算消息要存档的那批报价.
+struct McpQuoteArchive {
+    /// 这条消息的回包在回包列表里的位置 (不带 id 的通知不回包, 不占位置).
+    reply_at: usize,
+    id: serde_json::Value,
+    /// 算批号用的那一天 (北京时间); 落库的 `quoted_on` 也用它, 跨零点的调用才不会批号是前一天、
+    /// 日期是后一天.
+    day: chrono::NaiveDate,
+    batch: quotes::QuoteBatch,
+}
+
+/// 这批消息里各条询价精算要存档的报价; 没加载数据 (没有 tools/call) 为空.
+fn mcp_quote_archives(
+    messages: &[serde_json::Value],
+    context: Option<&mcp::Context>,
+) -> Vec<McpQuoteArchive> {
+    let Some(context) = context else {
+        return Vec::new();
+    };
+    let answered = messages
+        .iter()
+        .filter(|message| message.get("id").is_some_and(|id| !id.is_null()));
+    answered
+        .enumerate()
+        .filter_map(|(reply_at, message)| {
+            Some(McpQuoteArchive {
+                reply_at,
+                id: message["id"].clone(),
+                day: context.today,
+                batch: mcp::quote_archive(message, context)?,
+            })
+        })
+        .collect()
+}
+
+const MCP_QUOTES_ARCHIVED: &str = "这批报价已按批存档, 供后台「询价对比」校准估价。";
+const MCP_QUOTES_NOT_LAST: &str = "这批报价没有存档: 同一请求里有多条询价精算, 只存档最后一条。";
+
+/// 哪一批真去存档. 只有回包是工具结果、且工具没报错的询价精算才算求解过: 求解闸门拒绝 (忙、超时)
+/// 回的是 JSON-RPC error, 参数没过校验回的是 `isError`. 一个请求最多存一批 (不然批量消息能绕过
+/// 求解闸门成批写库): 留最后一条, 其余的另列, 好在各自的回包里说明.
+fn mcp_archives_to_store(
+    archives: Vec<McpQuoteArchive>,
+    replies: &[serde_json::Value],
+) -> (Option<McpQuoteArchive>, Vec<McpQuoteArchive>) {
+    let mut solved: Vec<McpQuoteArchive> = archives
+        .into_iter()
+        .filter(|archive| {
+            replies.get(archive.reply_at).is_some_and(|reply| {
+                reply["id"] == archive.id && reply["result"]["isError"] == false
+            })
+        })
+        .collect();
+    let last = solved.pop();
+    (last, solved)
+}
+
+/// 往工具回包的文本结尾补一行; 不是带文本的工具结果 (如 JSON-RPC error) 原样返回.
+fn mcp_reply_with_line(mut reply: serde_json::Value, line: &str) -> serde_json::Value {
+    if let Some(serde_json::Value::String(text)) = reply.pointer_mut("/result/content/0/text") {
+        text.push('\n');
+        text.push_str(line);
+    }
+    reply
+}
+
+/// 存档的结论, 写给读回包的人: 存成了才说存了, 没存成说明原因 (数据库报错的原文只进日志).
+fn mcp_archive_line(outcome: &Result<(), quotes::StoreError>) -> String {
+    match outcome {
+        Ok(()) => MCP_QUOTES_ARCHIVED.to_string(),
+        Err(error) => format!("这批报价没有存档成功 (不影响上面的结果): {}", error.brief()),
+    }
+}
+
+/// 给算成了的询价精算存档, 并把结论补到对应回包的文本结尾: 落库之后才知道成败, 所以这句话
+/// 不能由排版那一层提前写. 存不成不影响回包里的精算结果, 只多一行说明并记日志.
+async fn archive_mcp_quotes<Store, Storing>(
+    archives: Vec<McpQuoteArchive>,
+    replies: &mut [serde_json::Value],
+    store: Store,
+) where
+    Store: FnOnce(chrono::NaiveDate, quotes::QuoteBatch) -> Storing,
+    Storing: std::future::Future<Output = Result<(), quotes::StoreError>>,
+{
+    let (last, skipped) = mcp_archives_to_store(archives, replies);
+    let mut note = |at: usize, line: &str| {
+        replies[at] = mcp_reply_with_line(std::mem::take(&mut replies[at]), line);
+    };
+    for archive in skipped {
+        note(archive.reply_at, MCP_QUOTES_NOT_LAST);
+    }
+    let Some(archive) = last else {
+        return;
+    };
+    let batch_id = archive.batch.batch_id.clone();
+    let outcome = store(archive.day, archive.batch).await;
+    if let Err(error) = &outcome {
+        tracing::warn!(
+            %batch_id,
+            reason = %error.reason(),
+            "MCP 询价存档失败, 不影响精算结果"
+        );
+    }
+    note(archive.reply_at, &mcp_archive_line(&outcome));
 }
 
 /// 逐条回 MCP 消息, 按原顺序. 只有求解/估价的消息交给 `run` (线上为求解闸门: CPU 密集,
@@ -1343,7 +1477,31 @@ fn mcp_internal_errors(ids: Vec<serde_json::Value>, message: &str) -> Vec<serde_
 }
 
 /// 求解要用的线上数据: 合并后的煤库、网页账号保存的合同与煤池、现货指数最新值、煤阶交互 k.
-async fn load_mcp_context(state: &AppState, pool: &PgPool) -> Result<mcp::Context, sqlx::Error> {
+/// 估价快照与行情只在这批消息里有工具用得着时才读; 读不到不算错, 工具照旧输出或如实说取不到.
+async fn load_mcp_context(
+    state: &AppState,
+    pool: &PgPool,
+    messages: &[serde_json::Value],
+) -> Result<mcp::Context, sqlx::Error> {
+    let wanted = |tool: &str| messages.iter().any(|message| mcp::calls(message, tool));
+    let coal_prices = if wanted("find_coal") {
+        coal_prices::latest_snapshot(pool)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "读取每日估价快照失败, find_coal 不带涨跌与预测");
+                None
+            })
+    } else {
+        None
+    };
+    let market = if wanted("market") {
+        mcci::stored_overview(pool)
+            .await
+            .map_err(|error| tracing::warn!(%error, "读取指数行情失败, market 工具取不到数据"))
+            .ok()
+    } else {
+        None
+    };
     let master: serde_json::Value =
         serde_json::from_str(&merged_master_json(state).await).unwrap_or_default();
     let storage = database::load_storage(pool, &state.auth.username).await?;
@@ -1362,6 +1520,11 @@ async fn load_mcp_context(state: &AppState, pool: &PgPool) -> Result<mcp::Contex
         market_price,
         benchmarks,
         rank_k: state.rank_k(),
+        coal_prices,
+        market,
+        today: chrono::Utc::now()
+            .with_timezone(&mcci::beijing())
+            .date_naive(),
     })
 }
 

@@ -7,7 +7,7 @@
 
 import { apiFetch, readOk } from "./http";
 
-/** 密钥用途: data = 写煤库 (调研录入), mcp = 手机 Agent 只读 + 求解. */
+/** 密钥用途: data = 写煤库 (调研录入), mcp = 手机 Agent 查询 + 求解 + 询价存档. */
 export type KeyScope = "data" | "mcp";
 
 export interface ApiKey {

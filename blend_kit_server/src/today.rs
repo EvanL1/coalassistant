@@ -32,7 +32,7 @@ pub const TRUNCATE_DECIMAL: bool = true;
 const MAX_CANDIDATES: usize = 10;
 
 /// 组装结果: 请求本体, 合同名, 以及要告诉调用方的口径说明.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TodayRequest {
     pub request: Value,
     pub contract_name: String,
@@ -41,6 +41,12 @@ pub struct TodayRequest {
     pub excluded: Vec<String>,
     /// `exclude` 里点到了、但本来就不参与求解的煤, 带各自不参与的原因.
     pub excluded_idle: Vec<(String, &'static str)>,
+    /// 本次按次改过的合同项 (指标键, 按 [`INDICATORS`] 的顺序); 没传 `specs` 为空.
+    pub spec_changes: Vec<String>,
+    /// 本次候选煤 (煤池里的写法, 按点名顺序, 已去掉本次排除的); 没传 `only` 为空.
+    pub only: Vec<String>,
+    /// 询价精算里进了请求的报价, 与 `request.coals` 一一对应; 不是询价精算为空.
+    pub quoted: Vec<QuotedCoal>,
 }
 
 /// 求解口径的可调项 (都可省).
@@ -53,6 +59,38 @@ pub struct TodayOptions {
     /// 验算配比: 煤名 → 份数. 给了就不求最优. 煤名按归一化后匹配, 传给核心时换成煤池里的写法;
     /// 点到对不上或不参与求解的煤就不组装.
     pub fixed_ratios: Option<Map<String, Value>>,
+    /// 本次合同要求: 指标 → `{min, max}` 或 null (本次不约束), 在保存的合同上逐项覆盖;
+    /// 只对这一次生效. 写法不对就不组装.
+    pub specs: Option<Map<String, Value>>,
+    /// 本次候选煤 (完整煤名): 只在这几种里配, 煤池里没启用或隐藏的被点到也算进来;
+    /// 已停用、重名、数据非法的仍不行. 煤名比对同 `exclude`.
+    pub only: Option<Vec<String>>,
+    /// 询价精算: 只用报了价的这几种煤、按报价求解 (候选煤规则同 `only`, 给了它就不看 `only`).
+    pub quotes: Option<Vec<Quote>>,
+}
+
+/// 询价精算里一种煤的报价.
+#[derive(Debug, Clone)]
+pub struct Quote {
+    pub name: String,
+    /// 出厂价 (含税), 元/吨.
+    pub fob: f64,
+    /// 运费, 元/吨; 没给按 0.
+    pub frt: Option<f64>,
+    /// 当场改的化验值: 只进本次请求与存档, 不写煤池.
+    pub props: Map<String, Value>,
+}
+
+/// 进了请求的一条报价.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotedCoal {
+    /// 煤池里的写法.
+    pub name: String,
+    pub fob: f64,
+    pub frt: f64,
+    pub frt_given: bool,
+    /// 当场改过、且与煤池值不同的指标.
+    pub changed: Vec<String>,
 }
 
 /// 估价用的市场数据.
@@ -100,6 +138,8 @@ pub struct ResolvedCoal<'a> {
     pub readiness: Readiness,
     /// 不计重名时的状态: 判重名的煤原本会不会参与.
     pub own_readiness: Readiness,
+    /// 数据是否非法, 不论启用与隐藏 (`readiness` 先看隐藏与启用, 盖住了它).
+    pub invalid: bool,
 }
 
 pub fn normalize(name: &str) -> String {
@@ -123,14 +163,33 @@ fn is_valid_user_coal(entry: &Value) -> bool {
 
 /// 不参与求解的原因; 参与的煤为 None.
 pub fn idle_reason(coal: &ResolvedCoal) -> Option<&'static str> {
-    match coal.readiness {
+    readiness_reason(coal.readiness, coal.entry)
+}
+
+fn readiness_reason(readiness: Readiness, entry: &Value) -> Option<&'static str> {
+    match readiness {
         Readiness::Ready => None,
-        Readiness::Disabled if coal.entry["status"] == "archived" => Some("煤矿已停用"),
+        Readiness::Disabled if entry["status"] == "archived" => Some("煤矿已停用"),
         Readiness::Disabled => Some("煤池里没启用"),
         Readiness::Hidden => Some("在煤池里隐藏了"),
         Readiness::DuplicateName => Some("煤池里有重名的煤"),
         Readiness::InvalidOverride => Some("数据非法"),
     }
+}
+
+/// 被按次点名 (`only`、询价精算) 时仍不能用的原因. 没启用、隐藏只是煤池里的开关, 点名就按次
+/// 放行; 已停用、重名、数据非法不行.
+fn pick_block_reason(coal: &ResolvedCoal) -> Option<&'static str> {
+    let forced = if coal.readiness == Readiness::DuplicateName {
+        Readiness::DuplicateName
+    } else if coal.entry["status"] == "archived" {
+        Readiness::Disabled
+    } else if coal.invalid {
+        Readiness::InvalidOverride
+    } else {
+        Readiness::Ready
+    };
+    readiness_reason(forced, coal.entry)
 }
 
 fn valid_number(value: &Value) -> Option<f64> {
@@ -227,6 +286,7 @@ fn resolve_coal<'a>(entry: &'a Value, name: &str, pref: Option<&Value>) -> Resol
         overridden,
         readiness,
         own_readiness: readiness,
+        invalid,
     }
 }
 
@@ -324,6 +384,12 @@ struct NameProblems {
     lines: Vec<String>,
     unknown: bool,
     idle: bool,
+    /// 点到的不参与求解的煤里, 有只是没启用或隐藏的 (列进 `only` 就能用).
+    switchable: bool,
+    /// 按次点名了已停用、重名或数据非法的煤.
+    blocked: bool,
+    /// 给了 `only`, 验算配比却点到 `only` 以外的煤.
+    outside: bool,
 }
 
 impl NameProblems {
@@ -338,15 +404,34 @@ impl NameProblems {
         if self.idle {
             tail.push_str("不参与求解的煤不能放进验算配比.");
         }
+        if self.switchable {
+            tail.push_str("要把没启用或隐藏的煤算进来, 把这次要用的煤名都列进 only.");
+        }
+        if self.blocked {
+            tail.push_str("已停用、重名或数据非法的煤, 点了名这次也用不了.");
+        }
+        if self.outside {
+            tail.push_str("给了 only 时, 验算配比里的煤都要列在 only 里.");
+        }
         self.lines.push(tail);
         Some(self.lines.join("\n"))
     }
 }
 
+/// 这种煤本次参不参与: 按次点了名 (`picked`, 归一化煤名) 就只看点名, 否则看煤池里的状态.
+fn joins(coal: &ResolvedCoal, picked: Option<&[String]>) -> bool {
+    match picked {
+        Some(keys) => keys.contains(&normalize(&coal.name)),
+        None => coal.readiness == Readiness::Ready,
+    }
+}
+
 /// 把验算配比的煤名换成煤池里的写法; 对不上、不参与求解或两项指向同一种煤的, 记进 `problems`.
+/// 按次点了候选煤 (`picked`) 时, 配比里的煤只需在候选煤之内.
 fn map_ratio_names(
     pool: &[ResolvedCoal],
     ratios: &Map<String, Value>,
+    picked: Option<&[String]>,
     problems: &mut NameProblems,
 ) -> Map<String, Value> {
     let mut mapped = Map::new();
@@ -363,13 +448,20 @@ fn map_ratio_names(
             .filter(|coal| normalize(&coal.name) == key)
             .collect();
         if same.is_empty() {
-            problems.lines.push(unknown_name_line(pool, name, true));
+            problems
+                .lines
+                .push(unknown_name_line(pool, name, picked.is_none()));
             problems.unknown = true;
             continue;
         }
-        let Some(coal) = same.iter().find(|coal| coal.readiness == Readiness::Ready) else {
-            problems.lines.push(idle_name_line(name, &same));
-            problems.idle = true;
+        let Some(coal) = same.iter().find(|coal| joins(coal, picked)) else {
+            if picked.is_some() {
+                overrides::outside_candidates(name, problems);
+            } else {
+                problems.lines.push(idle_name_line(name, &same));
+                problems.idle = true;
+                problems.switchable |= pick_block_reason(same[0]).is_none();
+            }
             continue;
         };
         match given.insert(&coal.name, name) {
@@ -391,12 +483,16 @@ fn map_ratio_names(
 /// `exclude` 或 `fixed_ratios` 里有煤名对不上煤池里任何一种煤 (归一化后精确比较) 时
 /// 返回 Err, 说明里列出近似的煤名 —— 不能把"没排除掉"当成"排除了"去求解.
 /// 验算配比点到不参与求解的煤时同样返回 Err, 说明原因.
+///
+/// `specs` / `only` / `quotes` 是按次的覆盖 (见 [`TodayOptions`]), 只改这一次的请求, 不写任何
+/// 存储; 都不给时组装出的请求与没有这几项时完全相同.
 pub fn build(
     master: &Value,
     storage: &UserStorage,
     market: &Market,
     options: &TodayOptions,
 ) -> Result<TodayRequest, String> {
+    let spec_overrides = overrides::parse_specs(options.specs.as_ref())?;
     let pool = resolve_pool(master, storage)?;
     let known: Vec<String> = pool.iter().map(|coal| normalize(&coal.name)).collect();
     let mut problems = NameProblems::default();
@@ -409,10 +505,12 @@ pub fn build(
             problems.unknown = true;
         }
     }
+    let picked = overrides::pick_candidates(&pool, options, &mut problems);
+    let picked = picked.as_deref();
     let fixed_ratios = options
         .fixed_ratios
         .as_ref()
-        .map(|ratios| map_ratio_names(&pool, ratios, &mut problems));
+        .map(|ratios| map_ratio_names(&pool, ratios, picked, &mut problems));
     if let Some(message) = problems.into_message() {
         return Err(message);
     }
@@ -429,15 +527,26 @@ pub fn build(
     let mut excluded = Vec::new();
     let mut excluded_idle = Vec::new();
     for coal in &pool {
+        let joining = joins(coal, picked);
         if excluded_keys.contains(&normalize(&coal.name)) {
-            if coal.readiness == Readiness::Ready {
+            let reason = match picked {
+                Some(_) => Some(overrides::NOT_PICKED),
+                None => idle_reason(coal),
+            };
+            if joining {
                 if !excluded.contains(&coal.name) {
                     excluded.push(coal.name.clone());
                 }
-            } else if let Some(reason) = idle_reason(coal) {
+            } else if let Some(reason) = reason {
                 if !excluded_idle.iter().any(|(name, _)| name == &coal.name) {
                     excluded_idle.push((coal.name.clone(), reason));
                 }
+            }
+            continue;
+        }
+        if picked.is_some() {
+            if joining {
+                estimated.push(request_coal(coal));
             }
             continue;
         }
@@ -461,6 +570,9 @@ pub fn build(
         .and_then(Value::as_object)
         .cloned()
         .ok_or("缺少估价参数 (price_factor), 无法估算煤价")?;
+    if let Some(message) = overrides::too_few_candidates(options, estimated.len()) {
+        return Err(message);
+    }
     if estimated.is_empty() {
         return Err("没有可参与求解的煤: 请在煤池启用煤种".into());
     }
@@ -475,6 +587,7 @@ pub fn build(
                 .to_string(),
         ),
     };
+    let (specs, spec_changes, mut notes) = overrides::apply_specs(specs, &spec_overrides);
 
     let mut request = json!({
         "coals": [],
@@ -491,15 +604,17 @@ pub fn build(
     } else if let Some(price) = market.market_price {
         factor.insert("market_price".into(), json!(price));
     }
-    factor.insert("extra_coals".into(), Value::Array(estimated));
-    factor.insert("estimate_unpriced".into(), json!(true));
+    let quoted = overrides::price_by_quotes(&pool, options, &mut request, &mut factor, &mut notes);
+    if quoted.is_none() {
+        factor.insert("extra_coals".into(), Value::Array(estimated));
+        factor.insert("estimate_unpriced".into(), json!(true));
+    }
     request["price_factor"] = Value::Object(factor);
     // 不带 price_robustness: 今日页已不做估价可靠度分析, 这里与网页一致.
     if let Some(ratios) = fixed_ratios {
         request["fixed_ratios"] = Value::Object(ratios);
     }
 
-    let mut notes = Vec::new();
     if !skipped_invalid.is_empty() {
         notes.push(format!("数据非法未参与: {}", skipped_invalid.join("、")));
     }
@@ -516,15 +631,23 @@ pub fn build(
     }) {
         notes.push("采购扣款模板只存在浏览器, 本次未计买入侧扣款".into());
     }
-    if market.benchmarks.is_empty() && market.market_price.is_none() {
+    // 询价精算按报价算, 首行已写明 "这次不比估算价", 不再重复说估不出.
+    if quoted.is_none() && market.benchmarks.is_empty() && market.market_price.is_none() {
         notes.push("没有基准报价, 现货指数也取不到, 估不出煤价".into());
     }
+    let only = match (picked, &options.quotes) {
+        (Some(keys), None) => overrides::candidate_names(&pool, keys, &excluded_keys),
+        _ => Vec::new(),
+    };
     Ok(TodayRequest {
         request,
         contract_name,
         notes,
         excluded,
         excluded_idle,
+        spec_changes,
+        only,
+        quoted: quoted.unwrap_or_default(),
     })
 }
 
@@ -539,6 +662,10 @@ fn request_coal(coal: &ResolvedCoal) -> Value {
     }
     out
 }
+
+#[path = "today_overrides.rs"]
+mod overrides;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +757,7 @@ mod tests {
                 exclude: vec![],
                 total_quantity: Some(100.0),
                 fixed_ratios: None,
+                ..Default::default()
             },
         )
         .unwrap();
