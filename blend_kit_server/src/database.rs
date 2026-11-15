@@ -530,7 +530,7 @@ pub fn count_response(count: i64) -> Value {
 pub struct ApiKeyRow {
     pub id: String,
     pub name: String,
-    /// 用途: data = 写煤库, mcp = 只读 + 求解.
+    /// 用途: data = 写煤库, mcp = 查询 + 求解 + 询价存档.
     pub scope: String,
     pub key_prefix: String,
     pub created_at: String,

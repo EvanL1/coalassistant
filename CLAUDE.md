@@ -190,10 +190,18 @@ cargo run --release --bin doudou -- --profile admin login <账号>   # 线上命
 `master`、`history [measured <id>]`、`admin settings [--k|--off]|calibration|csr-model|keys|overrides`、`api <METHOD> <路径>`。
 `blend` 只在本机用内置 master 离线算; 要和用户看到的一致, 用 `doudou`。
 
-**MCP 入口 `/mcp`** (手机 Agent, 如 Kimi): 无状态 JSON-RPC, 工具 `today_blend` / `check_ratios` / `find_coal` /
-`get_contract`。鉴权用后台生成的 **mcp 用途**密钥 (`data_api_keys.scope`, 只读+求解, 写不了煤库; data 用途的写煤库密钥
-进不来)。求解请求由 `src/today.rs` 按线上保存的合同与煤池组装 —— 规则对照前端 `domain/resolvedCoal.ts`,
-改了前端的煤池规则要同步改这里。接入说明见 `docs/mcp-agent.md`。
+**MCP 入口 `/mcp`** (手机 Agent, 如 Kimi; 配煤咨询按 打分 → 计算 → 询价 → 再计算 四步走): 无状态 JSON-RPC, 六个工具
+`today_blend` / `check_ratios` / `quote_blend` / `find_coal` / `get_contract` / `market`。鉴权用后台生成的 **mcp 用途**密钥
+(`data_api_keys.scope`, 查询+求解+询价存档, 写不了煤库; data 用途的写煤库密钥进不来)。求解请求由 `src/today.rs` 按线上
+保存的合同与煤池组装 —— 规则对照前端 `domain/resolvedCoal.ts`, 改了前端的煤池规则要同步改这里。每个客户的合同要求、
+候选煤、报价按次传 (`specs` / `only` / `quotes`, 覆盖规则在 `src/today_overrides.rs`), 只改这一次的请求, 不写存储。
+`quote_blend` 是 MCP 侧的询价精算 (只用报了价的煤, 按到厂价求解), 报价按批存档到 `coal_quotes`: `mcp.rs` 只算出要存的
+那一批 (`quote_archive`, 批号 `mcp-<日期>-<煤名摘要>`, 同一天同一组煤覆盖), 落库在 `lib.rs` 回包算完之后走
+`quotes::store` (与 `POST /api/quotes` 同一条路; `store` 带批号那一天, 成败返回给调用方): 只给回包是 result 且工具
+没报错的调用存 (求解闸门拒绝的不存), 一个请求最多存最后一条算成的, 「已存档 / 没存成」由 `lib.rs` 补到回包文本结尾,
+失败另记日志。`find_coal` 带每日估价快照的涨跌与一周后预测,
+`market` 给指数现值、涨跌与预测 (`src/mcp_market.rs`; 预测只作参考, 不进求解)。`mcp.rs` 及其子模块保持纯函数:
+不查库不联网, 新数据加到 `Context`, 在 `lib.rs` 的 `load_mcp_context` 里装。接入说明见 `docs/mcp-agent.md`。
 
 **WASM package** (standalone — not needed for the app):
 ```bash

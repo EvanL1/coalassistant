@@ -273,27 +273,32 @@ pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> R
     if !is_authenticated(&headers, &state.auth) {
         return unauthorized();
     }
-    // 指数序列不在煤库覆盖层里, 读内置 master 即可 (与 spawn_daily 同一份), 不用合并覆盖层.
-    let master: Value = serde_json::from_str(blend_kit::master_json()).unwrap_or_default();
-    let config = series_config(&master);
-    let (history, forecasts) = match &state.database {
-        Some(pool) => {
-            let history = match history(pool).await {
-                Ok(history) => history,
-                Err(error) => return database_error(error),
-            };
-            // 预测只是参考: 读不到就不带, 行情照常显示.
-            let today = Utc::now().with_timezone(&beijing()).date_naive();
-            let forecasts = forecast::latest(pool, today).await.unwrap_or_else(|error| {
-                tracing::warn!(%error, "读取指数预测失败, 行情条不带预测");
-                HashMap::new()
-            });
-            (history, forecasts)
-        }
-        None => (HashMap::new(), HashMap::new()),
+    let series = match &state.database {
+        Some(pool) => match stored_overview(pool).await {
+            Ok(series) => series,
+            Err(error) => return database_error(error),
+        },
+        None => overview(&builtin_config(), &HashMap::new(), &HashMap::new()),
     };
-    let series = overview(&config, &history, &forecasts);
     Json(json!({ "ok": true, "series": series })).into_response()
+}
+
+/// 指数序列不在煤库覆盖层里, 读内置 master 即可 (与 spawn_daily 同一份), 不用合并覆盖层.
+fn builtin_config() -> Vec<Value> {
+    let master: Value = serde_json::from_str(blend_kit::master_json()).unwrap_or_default();
+    series_config(&master)
+}
+
+/// 按库里的数据拼指数总览 (`GET /api/mcci` 与 MCP 的 market 工具共用).
+pub(crate) async fn stored_overview(pool: &PgPool) -> Result<Vec<Value>, sqlx::Error> {
+    let history = history(pool).await?;
+    // 预测只是参考: 读不到就不带, 行情照常显示.
+    let today = Utc::now().with_timezone(&beijing()).date_naive();
+    let forecasts = forecast::latest(pool, today).await.unwrap_or_else(|error| {
+        tracing::warn!(%error, "读取指数预测失败, 行情条不带预测");
+        HashMap::new()
+    });
+    Ok(overview(&builtin_config(), &history, &forecasts))
 }
 
 /// 一条序列一条语句写完 (回填一年也只一次往返).

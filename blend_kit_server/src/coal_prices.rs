@@ -249,6 +249,11 @@ fn compose(latest: Option<DaySnapshot>, prev: Option<DaySnapshot>) -> Value {
     let Some(latest) = latest else {
         return json!({"ok": true, "day": null, "prices": []});
     };
+    json!(served(latest, prev))
+}
+
+/// 最新一天的快照配上前一天的价.
+fn served(latest: DaySnapshot, prev: Option<DaySnapshot>) -> CoalPriceSnapshot {
     let prev_day = prev.as_ref().map(|snapshot| snapshot.day);
     let previous: HashMap<_, _> = prev
         .into_iter()
@@ -268,14 +273,14 @@ fn compose(latest: Option<DaySnapshot>, prev: Option<DaySnapshot>) -> Value {
             missing: row.missing,
         })
         .collect();
-    json!(CoalPriceSnapshot {
+    CoalPriceSnapshot {
         ok: true,
         day: Some(latest.day),
         prev_day,
         forecast_day: latest.forecast_day,
         computed_at: latest.computed_at,
         prices,
-    })
+    }
 }
 
 /// 补算范围: 最早一条能定价的输入 (指数各序列首日、master 与库表报价日) 与 400 天前取晚的,
@@ -691,6 +696,23 @@ pub(crate) fn spawn_hourly(pool: PgPool) {
 }
 
 async fn read_snapshots(pool: &PgPool) -> Result<Value, sqlx::Error> {
+    let (latest, prev) = read_days(pool).await?;
+    Ok(compose(latest, prev))
+}
+
+/// 最新一天的估价快照 (`GET /api/coal-prices` 背后那份), 给 MCP 的 find_coal 用;
+/// 还没有任何快照为 None.
+pub(crate) async fn latest_snapshot(
+    pool: &PgPool,
+) -> Result<Option<CoalPriceSnapshot>, sqlx::Error> {
+    let (latest, prev) = read_days(pool).await?;
+    Ok(latest.map(|latest| served(latest, prev)))
+}
+
+/// 库里最近的两天: (最新一天, 前一天).
+async fn read_days(
+    pool: &PgPool,
+) -> Result<(Option<DaySnapshot>, Option<DaySnapshot>), sqlx::Error> {
     let rows = sqlx::query_as::<_, StoredRow>(
         r#"SELECT day, name, price, points, benchmark, benchmark_price, missing,
                   forecast_price, forecast_day,
@@ -713,7 +735,7 @@ async fn read_snapshots(pool: &PgPool) -> Result<Value, sqlx::Error> {
         snapshot.rows.push(row.price);
     }
     let mut snapshots = days.into_values().rev();
-    Ok(compose(snapshots.next(), snapshots.next()))
+    Ok((snapshots.next(), snapshots.next()))
 }
 
 pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> Response {
