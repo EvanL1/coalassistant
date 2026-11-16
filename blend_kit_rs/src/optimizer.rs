@@ -8,12 +8,12 @@ use crate::penalty::{cif_eff, cif_eff_or_quoted, clauses_missing_assay, tiered_a
 use crate::petrography::{self, Petrography, NOTCH_WINDOW};
 use crate::predict::EvaluatorSet;
 use crate::quality::{
-    acceptance_rule, check_value, effective_lower, effective_upper, formula_for, validate_request,
-    MetricFormula,
+    accept_slack, acceptance_rule, check_value, executed_lower, executed_upper, formula_for,
+    grid_ceil, grid_floor, judging_allowance, quantum, validate_request, MetricFormula,
 };
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const MAX_EVALUATION_ITERATIONS: usize = 4;
 const PETRO_SHRINK_SAFETY: f64 = 0.999;
@@ -68,14 +68,17 @@ const CONFLICT_REASON: &str = "约束冲突, LP 不可行";
 /// 验算模式不做岩相精确复核时的提示. 按整铲验算 ([`crate::shovel`]) 沿用凑整前的复核, 会把它摘掉.
 pub(crate) const FIXED_PETRO_NOTE: &str = "验算模式未做岩相精确复核, 岩相按线性代理估算";
 
-/// LP 没解出可用配方的原因. 两种必须分开报: 说成"约束冲突"会让用户去放宽一份
-/// 也许本来可行的合同.
+/// LP 没解出可用配方的原因. 三种必须分开报: 说成"约束冲突"会让用户去放宽一份
+/// 也许本来可行的合同; 后两种都是"没算出可靠结论", 置 undetermined.
 #[derive(Debug, Clone, PartialEq)]
 enum LpFailure {
-    /// 求解器证实不可行, 或 LP 的解在复算里越了 Hard 界.
+    /// 求解器证实不可行 (不可行证书).
     Infeasible,
-    /// 求解器没算出结论 (迭代用尽 / 数值错误 / 解过不了复核), 带上原因.
+    /// 求解器没算出结论 (迭代用尽 / 数值错误 / 解过不了约束复核), 带上原因.
     Numerical(String),
+    /// LP 有解, 但那个解没过解后 Hard 复核 (带没过复核的指标). 合同与煤池
+    /// 并未被证实冲突 —— 可能真有可行配方, 只是这次没求出来.
+    PostCheck(Vec<String>),
 }
 
 impl LpFailure {
@@ -85,6 +88,10 @@ impl LpFailure {
             LpFailure::Numerical(detail) => {
                 format!("求解器没有算出可靠结论 ({detail}), 无法判定合同是否可行")
             }
+            LpFailure::PostCheck(indicators) => format!(
+                "求解器给出了解, 但解后复核{}不达标, 无法判定合同是否可行",
+                indicators.join("、")
+            ),
         }
     }
 }
@@ -98,6 +105,10 @@ pub fn solve(request: &BlendRequest) -> BlendResult {
 ///
 /// `ok` 只表示是否得到配方；可信度由 `quality_status` 表示。
 pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) -> BlendResult {
+    // 方向忽略的一侧 (Upper 的 min / Lower 的 max) 在入口归一化一次, 之后估价并入、
+    // 整铲、稳健性重解、求解与验算全都只看归一化值.
+    let normalized = crate::quality::normalize_ignored_sides(request);
+    let request = normalized.as_ref().unwrap_or(request);
     // 无报价的煤按估算价并入煤池 (价格因子 estimate_unpriced); 煤价对比仍按原请求评估.
     let (priced, note) = match crate::price_factor::with_estimated_prices(request) {
         Ok(Some((priced, note))) => (Some(priced), Some(note)),
@@ -205,7 +216,8 @@ fn solve_core(
 
     // 只有 Hard/Priced 约束会剔除缺字段煤；Soft/Advisory 不能改变候选煤池。
     // Priced 同样入列: 它的拒收线是 LP 硬行, 缺输入时无法建约束, 必须和 Hard 一样剔煤。
-    let mut required: HashSet<String> = active_specs
+    // BTreeSet 而不是 HashSet: 下面要把缺的指标拼进警告文字, 迭代顺序必须每次相同.
+    let mut required: BTreeSet<String> = active_specs
         .iter()
         .filter(|spec| matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced))
         .map(|spec| spec.indicator.clone())
@@ -216,10 +228,17 @@ fn solve_core(
 
     let mut kept = Vec::new();
     for coal in &coals {
-        let missing: Vec<&String> = required
+        let mut missing: Vec<&String> = required
             .iter()
             .filter(|indicator| !coal.has(indicator))
             .collect();
+        // 按指标的固定顺序 (硫、灰、挥发分…) 列出, 与界面一致; 不认识的排最后.
+        missing.sort_by_key(|indicator| {
+            INDICATORS
+                .iter()
+                .position(|known| known == indicator)
+                .unwrap_or(INDICATORS.len())
+        });
         if missing.is_empty() {
             // 自身化验值越过采购合同拒收线的煤根本收不进来, 与缺指标同样剔出煤池.
             match cif_eff(coal) {
@@ -303,26 +322,19 @@ fn solve_core(
         .iter()
         .find(|spec| spec.indicator == "petro")
         .copied();
-    let petro_internal_upper = petro_spec
-        .filter(|spec| {
-            spec.enforcement == Enforcement::Hard
-                && matches!(spec.direction, Direction::Upper | Direction::Range)
-        })
-        .and_then(|spec| {
-            let rule = acceptance_rule(spec, request.truncate_decimal);
-            spec.max
-                .map(|maximum| effective_upper(maximum, &rule) - spec.margin.unwrap_or(0.0))
-        });
-    let petro_internal_lower = petro_spec
-        .filter(|spec| {
-            spec.enforcement == Enforcement::Hard
-                && matches!(spec.direction, Direction::Lower | Direction::Range)
-        })
-        .and_then(|spec| {
-            let rule = acceptance_rule(spec, request.truncate_decimal);
-            spec.min
-                .map(|minimum| effective_lower(minimum, &rule) + spec.margin.unwrap_or(0.0))
-        });
+    // 岩相精确复核守的内部界就是 LP 按合同执行的那两条 (代理界此时还没被收紧).
+    let petro_limits = petro_spec
+        .filter(|spec| spec.enforcement == Enforcement::Hard)
+        .map(|spec| enforced_bounds(spec, request, None, None))
+        .unwrap_or_default();
+    let petro_internal = |side: Direction| {
+        petro_limits
+            .iter()
+            .find(|(direction, _, _)| *direction == side)
+            .map(|(_, _, enforced)| *enforced)
+    };
+    let petro_internal_upper = petro_internal(Direction::Upper);
+    let petro_internal_lower = petro_internal(Direction::Lower);
 
     let mut petro_proxy_upper = None;
     let mut petro_proxy_lower = None;
@@ -382,8 +394,8 @@ fn solve_core(
                         Vec::new()
                     };
                     // 求解器没算出结论、诊断也落空: 合同可行与否未经证实, 单独标出来.
-                    let undetermined =
-                        bounds.is_empty() && matches!(failure, LpFailure::Numerical(_));
+                    let undetermined = bounds.is_empty()
+                        && matches!(failure, LpFailure::Numerical(_) | LpFailure::PostCheck(_));
                     let mut failed =
                         BlendResult::infeasible(&failure_reason(&failure, &bounds), warnings)
                             .with_infeasible_bounds(bounds);
@@ -652,12 +664,12 @@ fn append_priced_blocks(
         // 合同界是精确的合同数字, 不加 margin; margin 只收紧拒收线.
         let (limit, reject) = match spec.direction {
             Direction::Upper => (
-                effective_upper(spec.max?, &rule),
-                effective_upper(penalty.reject, &rule) - margin,
+                executed_upper(spec.max?, &rule, 0.0),
+                executed_upper(penalty.reject, &rule, margin),
             ),
             Direction::Lower => (
-                effective_lower(spec.min?, &rule),
-                effective_lower(penalty.reject, &rule) + margin,
+                executed_lower(spec.min?, &rule, 0.0),
+                executed_lower(penalty.reject, &rule, margin),
             ),
             Direction::Range => return None,
         };
@@ -699,7 +711,8 @@ fn append_priced_blocks(
 }
 
 /// 从解向量里按块读回各指标的扣款额 (元/吨).
-fn read_back_penalties(blocks: &[PricedBlock], solution: &[f64]) -> HashMap<String, f64> {
+/// 按指标名排序的映射: 键序固定, 下游对值求和的顺序才固定.
+fn read_back_penalties(blocks: &[PricedBlock], solution: &[f64]) -> BTreeMap<String, f64> {
     blocks
         .iter()
         .map(|block| {
@@ -757,7 +770,7 @@ fn enforced_bounds(
     let margin = spec.margin.unwrap_or(0.0);
     let mut limits = Vec::new();
     if let Some(maximum) = upper_source {
-        let enforced = effective_upper(maximum, &rule) - margin;
+        let enforced = executed_upper(maximum, &rule, margin);
         let enforced = if spec.indicator == "petro" {
             petro_proxy_upper.unwrap_or(enforced)
         } else {
@@ -766,7 +779,7 @@ fn enforced_bounds(
         limits.push((Direction::Upper, maximum, enforced));
     }
     if let Some(minimum) = lower_source {
-        let enforced = effective_lower(minimum, &rule) + margin;
+        let enforced = executed_lower(minimum, &rule, margin);
         let enforced = if spec.indicator == "petro" {
             petro_proxy_lower.unwrap_or(enforced)
         } else {
@@ -812,8 +825,8 @@ fn relax_target(
     let margin = spec.margin.unwrap_or(0.0);
     let tolerance = rule.tolerance.max(0.0);
     let fits = |bound: f64| match direction {
-        Direction::Upper => effective_upper(bound, &rule) - margin >= achievable,
-        Direction::Lower => effective_lower(bound, &rule) + margin <= achievable,
+        Direction::Upper => executed_upper(bound, &rule, margin) >= achievable,
+        Direction::Lower => executed_lower(bound, &rule, margin) <= achievable,
         Direction::Range => false,
     };
     let (target, sign) = match direction {
@@ -822,13 +835,12 @@ fn relax_target(
     };
 
     let (start, step) = match rule.decimals.filter(|_| rule.mode != AcceptanceMode::Raw) {
-        Some(decimals) => {
-            let scale = 10_f64.powi(i32::from(decimals.min(6)));
+        Some(_) => {
             let aligned = match direction {
-                Direction::Upper => (target * scale).floor() / scale,
-                _ => (target * scale).ceil() / scale,
+                Direction::Upper => grid_floor(target, &rule),
+                _ => grid_ceil(target, &rule),
             };
-            (aligned, 1.0 / scale)
+            (aligned, quantum(&rule))
         }
         // Raw: 执行界 = 合同界 ± tolerance, 连续可逆; 步长只用来兜浮点边界.
         // "非 Raw 却没有 decimals"也落到这里, 但 validate_request 会先把那种规则挡掉;
@@ -940,8 +952,10 @@ fn build_lp(
                 Direction::Lower => formula.lower_constraint(limit),
                 Direction::Range => {
                     // enforced_bounds 只产出 Upper/Lower 两向, Range 在那里就拆开了.
-                    // 不 panic: 两个 crate 的 release profile 都是 panic = "abort",
-                    // 求解线程一炸整个服务端进程跟着没, CatchPanicLayer 也接不住.
+                    // 不 panic: 本 crate 自己的 release profile 与 wasm 包都是
+                    // panic = "abort", `blend` 命令行会整个进程中止, wasm 里是 trap.
+                    // (server 按它自己的 profile 编, 是 panic = "unwind", 求解跑在
+                    // 阻塞线程里, 那里 panic 只失败这一次请求.)
                     debug_assert!(false, "enforced_bounds 不该产出 Range");
                     return None;
                 }
@@ -1021,6 +1035,7 @@ fn diagnose_infeasible(
         if limits.is_empty() {
             continue;
         }
+        let rule = acceptance_rule(spec, request.truncate_decimal);
         let Some(formula) = formulas.get(&spec.indicator) else {
             continue;
         };
@@ -1044,7 +1059,9 @@ fn diagnose_infeasible(
             // 两条界都要带出去 —— 合同界是用户在合同上认得的那个数, 执行界才是真正
             // 卡住这一单的线. 有 margin 时两者能差出一整个安全余量, 只报合同界的话,
             // 界面会出现"要求 ≤9, 最好能做到 9"这种看着已经达标、却被说成是元凶的行.
-            let slack = FEASIBILITY_TOLERANCE * (1.0 + enforced.abs());
+            // 与体检同一个放行量: 体检判 Fail 的值, 这里必须也认它越了界, 否则报出
+            // "约束冲突"却一项都指认不出来.
+            let slack = judging_allowance(achievable, enforced, &rule);
             let violated = match direction {
                 Direction::Upper => achievable > enforced + slack,
                 Direction::Lower => achievable + slack < enforced,
@@ -1114,18 +1131,21 @@ fn solve_once(
         &penalty_by_indicator,
         warnings,
     );
-    // LP 给出的配方若在复算里越了 Hard 界, 视同本轮无解, 交上层 (岩相修复 / 报不可行).
-    // 验算不走这里: 用户给定的配方超标要逐项报出来, 不能吞掉.
-    let hard_failed = specs
+    // LP 给出的配方若在复算里越了 Hard 界, 视同本轮无解, 交上层 (岩相修复 / 报失败).
+    // 这是"有解但解不过关", 不是"求解器证实不可行": 交 PostCheck, 由上层如实说
+    // 没算出可靠结论. 验算不走这里: 用户给定的配方超标要逐项报出来, 不能吞掉.
+    let hard_failed: Vec<String> = specs
         .iter()
         .filter(|spec| spec.enforcement == Enforcement::Hard)
-        .any(|spec| {
+        .filter(|spec| {
             result.indicator_check.iter().any(|check| {
                 check.indicator == spec.indicator && check.status == EvaluationStatus::Fail
             })
-        });
-    if hard_failed {
-        return Err(LpFailure::Infeasible);
+        })
+        .map(|spec| label_zh(&spec.indicator).to_string())
+        .collect();
+    if !hard_failed.is_empty() {
+        return Err(LpFailure::PostCheck(hard_failed));
     }
     // 配煤价值给煤价对比卡与价格稳健性 (挑离入选最近的煤) 用; 两者都不要时不多解一次 LP,
     // 结果与以前逐字节一致.
@@ -1214,18 +1234,25 @@ fn output_recipe_fails(
             }
             // 计价项超合同界是预期行为 (已折算成扣款), 越过拒收线才算不达标; 与体检同一个口径.
             if spec.enforcement == Enforcement::Priced {
-                let within_reject = spec.penalty.as_ref().is_some_and(|penalty| {
-                    let slack = FEASIBILITY_TOLERANCE * (1.0 + penalty.reject.abs());
-                    match spec.direction {
-                        Direction::Upper => value <= penalty.reject + slack,
-                        Direction::Lower => value + slack >= penalty.reject,
-                        Direction::Range => false,
-                    }
-                });
-                return !within_reject;
+                return !within_reject(spec, value);
             }
             true
         })
+}
+
+/// 计价项的原值是否还在合同白纸黑字那条拒收线以内 (不折判定规则, 不带安全余量).
+///
+/// 输出配方复核与体检共用. LP 的悬崖行用的是另一条线 (折了判定规则与安全余量的
+/// 执行界), 那是刻意的, 见 [`assemble_result`] 里的说明.
+fn within_reject(spec: &Spec, value: f64) -> bool {
+    spec.penalty.as_ref().is_some_and(|penalty| {
+        let slack = accept_slack(penalty.reject, penalty.reject);
+        match spec.direction {
+            Direction::Upper => value <= penalty.reject + slack,
+            Direction::Lower => value + slack >= penalty.reject,
+            Direction::Range => false,
+        }
+    })
 }
 
 /// 建 LP 需要的、与煤池无关的那几样输入.
@@ -1254,7 +1281,7 @@ fn blend_values(
     extras: &[&Coal],
     formulas: &HashMap<String, MetricFormula>,
     objective: f64,
-) -> HashMap<String, f64> {
+) -> BTreeMap<String, f64> {
     let union: Vec<&Coal> = coals.iter().chain(extras).copied().collect();
     let mut union_formulas = build_formulas(&union, context.models);
     let count = coals.len();
@@ -1275,7 +1302,7 @@ fn blend_values(
         context.petro_proxy_upper,
         None,
     ) else {
-        return HashMap::new();
+        return BTreeMap::new();
     };
     let priced_rows = problem.a_ub.len();
     for column in count..union.len() {
@@ -1285,11 +1312,14 @@ fn blend_values(
         problem.b_ub.push(0.0);
     }
     let Ok((_, union_objective, duals, _)) = problem.solve_with_duals(&problem.c) else {
-        return HashMap::new();
+        return BTreeMap::new();
     };
-    if (union_objective - objective).abs() > FEASIBILITY_TOLERANCE * 10.0 * (1.0 + objective.abs())
-    {
-        return HashMap::new();
+    // 有意比 `accept_slack` 宽 10 倍: 这里比的不是"一个值离它的界多远", 而是两次独立
+    // 求解的目标值对不对得上 —— 两边各带一份收敛残差, 目标值又是各列残差按成本系数
+    // (千元级) 加权的和. 10 是经验取值, 没有实测表; 放宽的后果只是多认一次"对得上"
+    // (配煤价值本就是参考值), 收紧的后果是配煤价值整张表缺失.
+    if (union_objective - objective).abs() > 10.0 * accept_slack(objective, objective) {
+        return BTreeMap::new();
     }
     union
         .iter()
@@ -1317,7 +1347,7 @@ fn assemble_result(
     ratios: &[f64],
     // 占比大于它的煤才进配方与订单; 见 output_grain.
     grain: f64,
-    penalty_by_indicator: &HashMap<String, f64>,
+    penalty_by_indicator: &BTreeMap<String, f64>,
     mut warnings: Vec<String>,
 ) -> BlendResult {
     let penalty_per_ton: f64 = penalty_by_indicator.values().sum();
@@ -1487,22 +1517,15 @@ fn assemble_result(
         // 这里若仍用绝对 SOLUTION_TOLERANCE, 就会把 LP 认可的解判成 Fail,
         // 经 finalize_quality_status 变成 NeedsReview —— 正确配方被盖上"需要复核".
         //
-        // 注意参照值不同, 这是刻意的: LP 悬崖行用 effective_upper(reject)∓margin
-        // (含安全余量的代理), 这里比的是原始 penalty.reject (合同白纸黑字那条线).
+        // 注意参照值不同, 这是刻意的: LP 悬崖行用 `executed_upper`/`executed_lower`
+        // 折过判定规则与安全余量的拒收线, 这里比的是原始 penalty.reject (合同白纸黑字那条线).
         // 体检回答的是"是否越过合同拒收线", 不是"是否越过内部安全代理"; 不要把两者改成一致.
         if let Some(spec) = spec {
-            if spec.enforcement == Enforcement::Priced && outcome.status == EvaluationStatus::Fail {
-                let within_reject = spec.penalty.as_ref().is_some_and(|penalty| {
-                    let slack = FEASIBILITY_TOLERANCE * (1.0 + penalty.reject.abs());
-                    match spec.direction {
-                        Direction::Upper => evaluated <= penalty.reject + slack,
-                        Direction::Lower => evaluated + slack >= penalty.reject,
-                        Direction::Range => false,
-                    }
-                });
-                if within_reject {
-                    outcome.status = EvaluationStatus::TolerancePass;
-                }
+            if spec.enforcement == Enforcement::Priced
+                && outcome.status == EvaluationStatus::Fail
+                && within_reject(spec, evaluated)
+            {
+                outcome.status = EvaluationStatus::TolerancePass;
             }
         }
         if model_summary
@@ -1554,7 +1577,7 @@ fn assemble_result(
         market_price: None,
         market_price_from_group: false,
         price_robustness: None,
-        blend_values: HashMap::new(),
+        blend_values: BTreeMap::new(),
     };
     // 只认算得出来的混合值: 算不出的体检行 value 填的是占位 0.0.
     let blend_value = |indicator: &str| {
@@ -1586,7 +1609,7 @@ fn evaluate_fixed(
     request: &BlendRequest,
     formulas: &HashMap<String, MetricFormula>,
     evaluators: &EvaluatorSet,
-    fixed: &HashMap<String, f64>,
+    fixed: &BTreeMap<String, f64>,
     mut warnings: Vec<String>,
 ) -> BlendResult {
     for (name, share) in fixed {
@@ -1642,7 +1665,7 @@ fn evaluate_fixed(
         }
     }
 
-    let mut penalty_by_indicator = HashMap::new();
+    let mut penalty_by_indicator = BTreeMap::new();
     for spec in specs
         .iter()
         .filter(|spec| spec.enforcement == Enforcement::Priced)
@@ -1656,8 +1679,8 @@ fn evaluate_fixed(
         // 超出合同界的量 —— 与 append_priced_blocks 吸收行的合同界是同一条线.
         let rule = acceptance_rule(spec, request.truncate_decimal);
         let deviation = match spec.direction {
-            Direction::Upper => spec.max.map(|max| value - effective_upper(max, &rule)),
-            Direction::Lower => spec.min.map(|min| effective_lower(min, &rule) - value),
+            Direction::Upper => spec.max.map(|max| value - executed_upper(max, &rule, 0.0)),
+            Direction::Lower => spec.min.map(|min| executed_lower(min, &rule, 0.0) - value),
             Direction::Range => None,
         };
         if let Some(deviation) = deviation {
@@ -1903,7 +1926,7 @@ struct LpProblem {
 
 impl LpProblem {
     /// 返回的布尔标记解是否来自收紧重解 —— 那条路的解要按输出配方再过一道
-    /// ([`recipe_meets_hard_bounds`]), 正常路径不加.
+    /// (`output_grain` 取 `None` 时不算解出), 正常路径不加.
     fn solve(&self) -> Result<(Vec<f64>, f64, bool), LpFailure> {
         self.solve_with_duals(&self.c)
             .map(|(solution, objective, _, tightened)| (solution, objective, tightened))
@@ -2087,13 +2110,14 @@ impl LpProblem {
                 // 相对判据: 配比列经归一化重投影后残差塌到 ~1e-13, 但档位列不归一化,
                 // 残差保持在 Clarabel 的原始收敛量级; 而吸收行在每个计价最优解处按构造都是紧的.
                 // 绝对容限会因此否掉正确解 —— 容限必须随行与解的量级缩放.
-                let magnitude: f64 = row
+                // 公式与解后复核同一个 (`accept_slack`), 量级口径是 LP 行自己的:
+                // `Σ|aᵢxᵢ|` 与 `|界|` 里大的那个 (见 `FEASIBILITY_TOLERANCE` 的说明).
+                let row_magnitude: f64 = row
                     .iter()
                     .zip(&solution)
                     .map(|(coefficient, value)| (coefficient * value).abs())
-                    .sum::<f64>()
-                    .max(bound.abs());
-                (activity > bound + FEASIBILITY_TOLERANCE * (1.0 + magnitude)).then_some(index)
+                    .sum();
+                (activity > bound + accept_slack(row_magnitude, *bound)).then_some(index)
             })
             .collect();
         let objective = c
@@ -2274,6 +2298,17 @@ mod tests {
         assert!(undetermined.contains("无法判定"), "{undetermined}");
         assert!(undetermined.contains("迭代停滞"), "{undetermined}");
         assert_eq!(failure_reason(&LpFailure::Infeasible, &[]), CONFLICT_REASON);
+        // LP 有解但解后复核没过: 诊断找到真凶时仍报冲突, 落空时如实说没算出结论.
+        let post_check = LpFailure::PostCheck(vec!["粘结".into()]);
+        assert_eq!(
+            failure_reason(&post_check, std::slice::from_ref(&culprit)),
+            CONFLICT_REASON
+        );
+        let undetermined = failure_reason(&post_check, &[]);
+        assert!(undetermined.contains("解后复核"), "{undetermined}");
+        assert!(undetermined.contains("粘结"), "{undetermined}");
+        assert!(undetermined.contains("无法判定"), "{undetermined}");
+        assert!(!undetermined.contains("约束冲突"), "{undetermined}");
     }
 
     /// 直接构造两个已门控模型, 用于把 `build_formulas` 的手写 MetricFormula 分支走到.
@@ -2669,6 +2704,38 @@ mod tests {
         );
     }
 
+    /// LP 有解、卡在解后 Hard 复核, 诊断又指认不出哪条约束够不到时, 不能说成"约束冲突":
+    /// 合同与煤池并没有被证实冲突, 用户照着"冲突"去放宽合同是白费劲. 要如实说没算出
+    /// 可靠结论, 并置 `undetermined`.
+    #[test]
+    fn test_post_check_failure_is_reported_as_undetermined() {
+        let mut models = trained_evaluators();
+        models
+            .g
+            .as_mut()
+            .expect("测试评估器应带 G 模型")
+            .predictor
+            .intercept = 50.0;
+        let request = request_of(
+            vec![
+                assay_coal("甲", (0.8, 9.0, 24.0, 90.0, 16.0, 10.0), 1000.0),
+                assay_coal("乙", (0.9, 9.5, 25.0, 88.0, 16.0, 10.0), 1100.0),
+            ],
+            vec![Spec::lower("G", 85.0)],
+        );
+        let result = solve_with_evaluators(&request, &models);
+
+        assert!(!result.ok, "模型输出越出物理范围, 不该给配方");
+        let reason = result.reason.as_deref().unwrap_or_default();
+        assert_ne!(reason, CONFLICT_REASON, "LP 有解, 不是约束冲突");
+        assert!(
+            reason.contains("解后复核") && reason.contains(label_zh("G")),
+            "要说清是哪一项没过解后复核: {reason}"
+        );
+        assert!(reason.contains("无法判定"), "{reason}");
+        assert!(result.undetermined, "合同可行与否未经证实");
+        assert!(result.infeasible_bounds.is_empty());
+    }
     /// 有安全余量时, 合同界与真正卡住这一单的执行界不是同一条线, 两条都要报.
     ///
     /// 合同 灰 ≤9、余量 1.0 ⇒ LP 按 ≤8 执行; 煤池最低只能做到 9.0.
@@ -3120,7 +3187,7 @@ mod tests {
 /// - 累加器一律 `Option` + 样本计数, "零样本"与"恰好测出这个数"在输出上不许长得一样
 ///   (见 [`Extremum::report`]), 且每条路径的每个口径都有断言兜底;
 /// - 出处标签印该行自己的合同界与实测量级, 让数字能自证;
-/// - 执行界不靠方向字段猜, 而是拿生产代码的 `effective_upper`/`effective_lower`
+/// - 执行界不靠方向字段猜, 而是拿生产代码的 `executed_upper`/`executed_lower`
 ///   反过来验, 对不上就 panic (见 [`measure_row`]).
 #[cfg(test)]
 mod measurements {
@@ -3242,11 +3309,11 @@ mod measurements {
         let upper_bound = spec
             .max
             .filter(|_| matches!(spec.direction, Direction::Upper | Direction::Range))
-            .map(|maximum| effective_upper(maximum, &rule));
+            .map(|maximum| executed_upper(maximum, &rule, 0.0));
         let lower_bound = spec
             .min
             .filter(|_| matches!(spec.direction, Direction::Lower | Direction::Range))
-            .map(|minimum| effective_lower(minimum, &rule));
+            .map(|minimum| executed_lower(minimum, &rule, 0.0));
         let fits =
             |candidate: f64, bound: f64| (candidate - bound).abs() <= 1e-9 * (1.0 + bound.abs());
         let (executed, upper) = match (

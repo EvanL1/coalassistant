@@ -1,3 +1,10 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 //! `blend` 命令行: agent 在沙箱里直接调用配煤核心的入口.
 //! 契约: 标准输入读 BlendRequest JSON, 标准输出写 BlendResult JSON;
 //! 退出码 0 = 有结果, 1 = ok=false (原因在 reason), 2 = 用法或 JSON 错误.

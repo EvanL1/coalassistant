@@ -13,10 +13,18 @@ crate-type = ["lib"]
 clarabel = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
 
 [dev-dependencies]
-approx = "0.5"
+# 性质测试 (tests/properties.rs). 只要 std: 不用 fork / timeout, 少拖一串依赖.
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+float_cmp = "deny"
+# CI 历史上放行的写法, 与 CI 命令保持一致 (见 ci.yml 的 clippy 步骤).
+uninlined_format_args = "allow"
 
 [profile.release]
 opt-level = 3

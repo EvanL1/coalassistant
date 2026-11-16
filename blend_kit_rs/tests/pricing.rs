@@ -1,3 +1,10 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 //! 估价模块 (`estimate_json`): 按同煤种、指标最接近的基准报价估价.
 //!
 //! 全部走公开 JSON 入口, 数据都是 fixture, 不读 master. 系数取 master 默认表的形状:

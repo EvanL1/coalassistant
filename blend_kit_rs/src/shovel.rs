@@ -25,8 +25,8 @@ use crate::model::*;
 use crate::optimizer::{
     finalize_quality_status, review_petrography, FIXED_PETRO_NOTE, MIN_RATIO_TOLERANCE,
 };
-use crate::quality::acceptance_rule;
-use std::collections::{HashMap, HashSet};
+use crate::quality::{acceptance_rule, quantum};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// 已有可行解后, 分支定界最多重解几次.
 const MAX_NODES: usize = 40;
@@ -253,9 +253,10 @@ fn apportion(ratios: &[f64], total: u32) -> Vec<u32> {
         let assigned: u32 = counts.iter().sum();
         let surplus = |index: usize| exact[index] - f64::from(counts[index]);
         if assigned < total {
-            let index = (0..counts.len())
-                .max_by(|a, b| surplus(*a).total_cmp(&surplus(*b)))
-                .expect("至少一种煤");
+            let Some(index) = (0..counts.len()).max_by(|a, b| surplus(*a).total_cmp(&surplus(*b)))
+            else {
+                return counts;
+            };
             counts[index] += 1;
         } else if assigned > total {
             let Some(index) = (0..counts.len())
@@ -289,7 +290,7 @@ fn evaluate(
     refine_iterations: usize,
     resolve: &Resolve,
 ) -> BlendResult {
-    let shares: HashMap<String, f64> = names
+    let shares: BTreeMap<String, f64> = names
         .iter()
         .zip(counts)
         .map(|(name, count)| ((*name).clone(), f64::from(*count)))
@@ -518,9 +519,7 @@ fn judging_step(spec: &Spec, legacy_truncate: bool) -> f64 {
                 .fold(0.0_f64, |largest, value| largest.max(value.abs()));
             RAW_STEP_FRACTION * bound.max(1e-6)
         }
-        AcceptanceMode::Truncate | AcceptanceMode::Round => {
-            10_f64.powi(-i32::from(rule.decimals.unwrap_or(0).min(6)))
-        }
+        AcceptanceMode::Truncate | AcceptanceMode::Round => quantum(&rule),
     }
 }
 

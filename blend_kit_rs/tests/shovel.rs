@@ -1,9 +1,16 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 //! 一铲最小量 (`BlendRequest.shovel_tons`) 与单煤配比下限 (`BlendRequest.min_ratios`).
 //!
 //! 现场用铲车配煤: 每种煤要么不用, 要么至少一铲, 且只能整铲配. 数据都是 fixture.
 
 use blend_kit::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// 顺序: (S, A, V, G, Y, petro, CSR, M, FOB, FRT)
 fn coal(name: &str, sulfur: f64, fob: f64) -> Coal {
@@ -24,7 +31,7 @@ fn request(coals: Vec<Coal>, sulfur_max: f64) -> BlendRequest {
         price_factor: None,
         price_robustness: None,
         shovel_tons: None,
-        min_ratios: HashMap::new(),
+        min_ratios: BTreeMap::new(),
     }
 }
 

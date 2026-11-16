@@ -1,9 +1,16 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 //! 求解器数值边缘: 可行的合同不能报成"约束冲突", 求解器没收敛也不能说成"约束冲突".
 //!
 //! fixture 由随机生成的可行合同化简而来, 煤名不指向真实矿; 价格已是定价, 不走估价.
 
 use blend_kit::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 const CONFLICT: &str = "约束冲突, LP 不可行";
 
@@ -22,7 +29,7 @@ fn assert_recipe_passes_review(request: &BlendRequest, result: &BlendResult) {
     let mut replay = request.clone();
     replay.fixed_ratios = Some(result.recipe.clone());
     replay.shovel_tons = None;
-    replay.min_ratios = HashMap::new();
+    replay.min_ratios = BTreeMap::new();
     let review = solve(&replay);
     assert!(review.ok, "回放验算失败: {:?}", review.reason);
     for check in &review.indicator_check {
@@ -132,7 +139,7 @@ fn test_ordinary_solve_unchanged_by_postcheck_retry() {
         price_factor: None,
         price_robustness: None,
         shovel_tons: None,
-        min_ratios: HashMap::new(),
+        min_ratios: BTreeMap::new(),
     };
     let result = solve(&request);
     assert!(result.ok, "{:?}", result.reason);

@@ -1,3 +1,6 @@
+// 单元测试 (#[cfg(test)] 模块) 里的浮点相等断言是测试意图, 生产代码仍 deny float_cmp.
+#![cfg_attr(test, allow(clippy::float_cmp))]
+
 //! 豆哥配煤 - 配煤优化核心算法.
 //!
 //! 数据流程:
@@ -275,6 +278,70 @@ mod tests {
         );
     }
 
+    /// Upper 带一个比上限还大的残留 min 时照常求解 (P0-1 的彻底版): 校验不得拒绝,
+    /// 体检也不再回显被忽略的那一侧.
+    #[test]
+    fn test_upper_ignores_stale_larger_min() {
+        let coals = vec![coal_from_tuple(
+            "单煤",
+            (0.5, 8.0, 22.0, 90.0, 15.0, 0.10, 65.0, 8.0, 1000.0, 30.0),
+        )];
+        let mut s = Spec::upper("S", 3.0);
+        s.min = Some(99.0); // 残留值, 比上限还大; Upper 方向应被忽略
+        let req = BlendRequest {
+            coals,
+            specs: vec![s],
+            total_quantity: None,
+            truncate_decimal: false,
+            fixed_ratios: None,
+            rank_interaction: None,
+            price_factor: None,
+            price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
+        };
+        let r = solve(&req);
+        assert!(r.ok, "{:?}", r.reason);
+        let check = r
+            .indicator_check
+            .iter()
+            .find(|c| c.indicator == "S")
+            .expect("应有 S 体检行");
+        assert_eq!(check.min, None, "被忽略的 min 不回显");
+        assert_eq!(check.max, Some(3.0));
+    }
+
+    /// Lower 忽略 max 的对称用例.
+    #[test]
+    fn test_lower_ignores_stale_smaller_max() {
+        let coals = vec![coal_from_tuple(
+            "单煤",
+            (0.5, 8.0, 22.0, 90.0, 15.0, 0.10, 65.0, 8.0, 1000.0, 30.0),
+        )];
+        let mut g = Spec::lower("G", 80.0);
+        g.max = Some(10.0); // 残留值, 比下限还小; Lower 方向应被忽略
+        let req = BlendRequest {
+            coals,
+            specs: vec![g],
+            total_quantity: None,
+            truncate_decimal: false,
+            fixed_ratios: None,
+            rank_interaction: None,
+            price_factor: None,
+            price_robustness: None,
+            shovel_tons: None,
+            min_ratios: Default::default(),
+        };
+        let r = solve(&req);
+        assert!(r.ok, "{:?}", r.reason);
+        let check = r
+            .indicator_check
+            .iter()
+            .find(|c| c.indicator == "G")
+            .expect("应有 G 体检行");
+        assert_eq!(check.max, None, "被忽略的 max 不回显");
+        assert_eq!(check.min, Some(80.0));
+    }
     /// 验证 slack 字段对无约束指标序列化为 null (P0-2 修复).
     #[test]
     fn test_unconstrained_indicator_slack_is_none() {

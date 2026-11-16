@@ -7,8 +7,8 @@
 
 use crate::model::*;
 
-/// 判定规则自己那一层的容限: 把"落在档位边界上"的浮点噪声吸掉 (`judged_value` 的
-/// 贴边、`strict_bound_epsilon` 的下限)，以及 `raw_pass` —— 后者只区分"✓"和
+/// 判定规则自己那一层的容限: 把"落在档位边界上"的浮点噪声吸掉 (`judged_value` 与
+/// 合同界的贴格, 见 `snap_to_grid`)，以及 `raw_pass` —— 后者只区分"✓"和
 /// "≈判定通过"，不决定这一单认不认。
 ///
 /// **它不是"认不认"的容限**。认不认看 [`ACCEPT_TOLERANCE`]，那一个必须跟着 LP 走；
@@ -96,14 +96,34 @@ const BINDING_TOL: f64 = 0.05;
 /// 原先容限加在量化**之后** (`judged + 放行量 >= 界`), 救不回那一格 —— 线上实例:
 /// 两种煤、G≥80、一位小数截断, LP 解出 G=79.99999998857, 截断成 79.9, 判 Fail,
 /// 有解的合同被报成"LP 不可行"。下界的执行界恰好压在格线上 (80.0), 残差一过线
-/// 就发作; 上界执行界在 `下一格 − strict_bound_epsilon`, 两位小数时 eps=1e-6
-/// 小于放行量, 同样可能发作 (旧文档称之为"倒挂")。
+/// 就发作; 上界执行界在 `下一格 − strict_bound_epsilon`, 残差把解推过执行界一丝时
+/// 同样可能发作。
 ///
-/// 现在 `check_value` 按方向先推再量化: 上界判 `judged(值 − 放行量)`, 下界判
-/// `judged(值 + 放行量)`。外面还有一道闸 —— 离执行界不得超过放行量 —— 所以真超标
-/// 的值照样 Fail, 放宽的只是求解器噪声那一丝。这条后果链切断后, 抬本值不再会引入
-/// 假不可行; `test_accept_tolerance_can_outrun_strict_bound_epsilon` 由"钉住缺陷"
-/// 改为"钉住修复"。
+/// 现在 `check_value` 对原值判不过、又贴着执行界 (越界不超过放行量) 的值按方向先推
+/// 再量化: 上界判 `judged(值 − 放行量)`, 下界判 `judged(值 + 放行量)`。外面还有一道
+/// 闸 —— 离执行界不得超过放行量。这条后果链切断后, 抬本值不再会引入假不可行。
+/// 原值本来就判得过的不推: 推了不改变结论, 只会让展示的判定值少一格
+/// (`tests/judging_grid.rs` 的 `test_judged_value_of_an_in_bound_value_is_its_own_grid_cell`)。
+///
+/// ## 放行量不许盖过执行界留的缓冲
+///
+/// 那道外闸只有在"放行量 < 上界缓冲 [`strict_bound_epsilon`]"时才拦得住界外一格的值:
+/// 上界执行界 = 进位线 − 缓冲, 压在进位线上的值离执行界正好一个缓冲。缓冲曾经只按格宽
+/// 取 (两位小数 1e-6, 三位以上 1e-7), 而放行量随量级涨 (灰分 ≈10.5 时 1.15e-6),
+/// 量级一过 9 就反超 —— A=10.51 对"≤10.50 截断两位"被判通过, 判定值写着 10.50;
+/// 同一单走求解, LP 说不可行, 诊断用同一个放行量去量, 一项也指认不出来。
+///
+/// 两条规矩把这件事钉死 (见 [`strict_bound_epsilon`] 与 [`judging_allowance`]):
+///
+/// 1. 缓冲至少是进位线处放行量的 2 倍 —— 贴着执行界的解 (残差 ≤ 放行量) 照认,
+///    压在进位线上的值 (离执行界一个缓冲) 必判 Fail, 两边各留一倍。
+/// 2. 放行量不超过 1/16 格, 缓冲不超过 1/8 格 —— 格子细到与求解器残差同量级时
+///    (五六位小数), 宁可让解后复核说"没算出可靠结论", 也不把界外一格的值认下来。
+///
+/// 于是对任何判定规则、任何合同界: 判定值越界的值 (界外一格及更远) 必判 Fail;
+/// 顶在执行界上、只差求解器残差的解不判 Fail。
+/// `test_one_grid_beyond_bound_always_fails` 与
+/// `test_accept_tolerance_never_outruns_strict_bound_epsilon` 钉住这两头。
 ///
 /// 没选的修法: 把下界执行界也往里缩一个 eps (与上界"对称")。上界的缓冲在格子
 /// 远端 (2.5999), 碰不到常见的整数化验值; 下界的缓冲却在近端 (80.00001), 恰好
@@ -120,8 +140,23 @@ const BINDING_TOL: f64 = 0.05;
 pub(crate) const ACCEPT_TOLERANCE: f64 = crate::optimizer::FEASIBILITY_TOLERANCE;
 
 /// 放行量 = `ACCEPT_TOLERANCE × (1 + 量级)`，量级取"实测值与界"里大的那个。
-fn accept_slack(value: f64, bound: f64) -> f64 {
+///
+/// 全 crate "相对容限 × (1 + 量级)" 只有这一处; 只有一个量级时两个参数传同一个数。
+pub(crate) fn accept_slack(value: f64, bound: f64) -> f64 {
     ACCEPT_TOLERANCE * (1.0 + value.abs().max(bound.abs()))
+}
+
+/// 放行量最多占一格的几分之几。
+const MAX_ALLOWANCE_CELLS: f64 = 1.0 / 16.0;
+/// 上界缓冲最多占一格的几分之几; 必须大于 [`MAX_ALLOWANCE_CELLS`]。
+const MAX_EPSILON_CELLS: f64 = 1.0 / 8.0;
+
+/// 判"值是否还贴着执行界"用的放行量: [`accept_slack`], 但不超过 1/16 格。
+///
+/// 体检 ([`check_value`]) 与不可行诊断共用 —— 两边用的不是同一个量时, 体检判 Fail
+/// 的值诊断会说"没越界", 报出"约束冲突"却指认不出是哪一项。
+pub(crate) fn judging_allowance(value: f64, executed: f64, rule: &AcceptanceRule) -> f64 {
+    accept_slack(value, executed).min(quantum(rule) * MAX_ALLOWANCE_CELLS)
 }
 
 #[derive(Debug, Clone)]
@@ -215,13 +250,51 @@ pub(crate) fn acceptance_rule(spec: &Spec, legacy_truncate: bool) -> AcceptanceR
     })
 }
 
+/// 判定规则的 `10^小数位`。全 crate 只在这里算一次; 外面要格宽用 [`quantum`]。
 fn scale(rule: &AcceptanceRule) -> f64 {
     10_f64.powi(i32::from(rule.decimals.unwrap_or(0).min(6)))
 }
 
-fn strict_bound_epsilon(rule: &AcceptanceRule) -> f64 {
-    let quantum = 1.0 / scale(rule);
-    (quantum * 1e-4).max(CHECK_TOLERANCE * 10.0)
+/// 判定一格的宽度 (`10^-小数位`)。Raw 不量化, 这一格只用来给放行量封顶。
+pub(crate) fn quantum(rule: &AcceptanceRule) -> f64 {
+    1.0 / scale(rule)
+}
+
+/// 已乘过 `scale` 的值若贴在格线上 (差在 `CHECK_TOLERANCE` 以内) 就取那条格线。
+///
+/// 格点上的十进制数乘 `scale` 很少正好是整数: 0.29 × 100 = 28.999999999999996,
+/// 0.07 × 100 = 7.000000000000001。不先吸掉这点误差就 floor/ceil, 会偏出整整一格。
+fn snap_to_grid(scaled: f64, scale: f64) -> f64 {
+    let nearest = scaled.round();
+    if (scaled - nearest).abs() <= CHECK_TOLERANCE * scale {
+        nearest
+    } else {
+        scaled
+    }
+}
+
+/// 不超过 `value` 的最近一条格线。
+pub(crate) fn grid_floor(value: f64, rule: &AcceptanceRule) -> f64 {
+    let scale = scale(rule);
+    snap_to_grid(value * scale, scale).floor() / scale
+}
+
+/// 不低于 `value` 的最近一条格线。
+pub(crate) fn grid_ceil(value: f64, rule: &AcceptanceRule) -> f64 {
+    let scale = scale(rule);
+    snap_to_grid(value * scale, scale).ceil() / scale
+}
+
+/// 上界执行界离进位线 `line` 留的缓冲: 进位线上的值判定时已经进到下一格, LP 不许顶到。
+///
+/// 取"万分之一格"与"进位线处放行量的 2 倍"里大的, 再封顶到 1/8 格。第二项保证放行量
+/// 盖不过缓冲 (见 [`ACCEPT_TOLERANCE`] 的"放行量不许盖过执行界留的缓冲"一节);
+/// 一位小数、量级 49 以内时第一项 (1e-5) 更大, 默认合同的执行界与以前逐位相同。
+fn strict_bound_epsilon(rule: &AcceptanceRule, line: f64) -> f64 {
+    let quantum = quantum(rule);
+    (quantum * 1e-4)
+        .max(2.0 * accept_slack(line, line))
+        .min(quantum * MAX_EPSILON_CELLS)
 }
 
 pub(crate) fn judged_value(value: f64, rule: &AcceptanceRule) -> f64 {
@@ -229,14 +302,7 @@ pub(crate) fn judged_value(value: f64, rule: &AcceptanceRule) -> f64 {
     let scaled = value * scale;
     let stabilized = match rule.mode {
         AcceptanceMode::Raw => scaled,
-        AcceptanceMode::Truncate => {
-            let boundary = scaled.round();
-            if (scaled - boundary).abs() <= CHECK_TOLERANCE * scale {
-                boundary
-            } else {
-                scaled
-            }
-        }
+        AcceptanceMode::Truncate => snap_to_grid(scaled, scale),
         AcceptanceMode::Round => {
             let boundary = (scaled - 0.5).round() + 0.5;
             if (scaled - boundary).abs() <= CHECK_TOLERANCE * scale {
@@ -253,26 +319,39 @@ pub(crate) fn judged_value(value: f64, rule: &AcceptanceRule) -> f64 {
     }
 }
 
-pub(crate) fn effective_upper(bound: f64, rule: &AcceptanceRule) -> f64 {
+/// 合同上限按判定规则折成的执行界: 判定值不超过 `bound + tolerance` 的最大原值,
+/// 再往里留一个 [`strict_bound_epsilon`]。
+fn effective_upper(bound: f64, rule: &AcceptanceRule) -> f64 {
     let accepted = bound + rule.tolerance.max(0.0);
-    match rule.mode {
-        AcceptanceMode::Raw => accepted,
-        AcceptanceMode::Truncate => {
-            ((accepted * scale(rule)).floor() + 1.0) / scale(rule) - strict_bound_epsilon(rule)
-        }
-        AcceptanceMode::Round => {
-            ((accepted * scale(rule)).floor() + 0.5) / scale(rule) - strict_bound_epsilon(rule)
-        }
-    }
+    // 进位线: 原值到了这条线, 判定值就进到下一格.
+    let line = match rule.mode {
+        AcceptanceMode::Raw => return accepted,
+        AcceptanceMode::Truncate => grid_floor(accepted, rule) + quantum(rule),
+        AcceptanceMode::Round => grid_floor(accepted, rule) + quantum(rule) * 0.5,
+    };
+    line - strict_bound_epsilon(rule, line)
 }
 
-pub(crate) fn effective_lower(bound: f64, rule: &AcceptanceRule) -> f64 {
+/// 合同下限按判定规则折成的执行界: 判定值不低于 `bound − tolerance` 的最小原值。
+/// 不留缓冲 —— 正好压在线上的值判定时算达标。
+fn effective_lower(bound: f64, rule: &AcceptanceRule) -> f64 {
     let accepted = bound - rule.tolerance.max(0.0);
     match rule.mode {
         AcceptanceMode::Raw => accepted,
-        AcceptanceMode::Truncate => (accepted * scale(rule)).ceil() / scale(rule),
-        AcceptanceMode::Round => ((accepted * scale(rule)).ceil() - 0.5) / scale(rule),
+        AcceptanceMode::Truncate => grid_ceil(accepted, rule),
+        AcceptanceMode::Round => grid_ceil(accepted, rule) - quantum(rule) * 0.5,
     }
+}
+
+/// 上限在 LP 里真正执行的界 = 判定规则折算 − 安全余量。建 LP 行、计价块、诊断、
+/// 反解放宽目标、验算扣款都从这里取, 不各写一遍。
+pub(crate) fn executed_upper(bound: f64, rule: &AcceptanceRule, margin: f64) -> f64 {
+    effective_upper(bound, rule) - margin
+}
+
+/// 下限在 LP 里真正执行的界 = 判定规则折算 + 安全余量。见 [`executed_upper`]。
+pub(crate) fn executed_lower(bound: f64, rule: &AcceptanceRule, margin: f64) -> f64 {
+    effective_lower(bound, rule) + margin
 }
 
 pub(crate) struct CheckOutcome {
@@ -310,23 +389,42 @@ pub(crate) fn check_value(
     if use_max {
         if let Some(maximum) = spec.max {
             let executed = effective_upper(maximum, &rule);
-            let allow = accept_slack(value, executed);
-            // 容限在量化之前按方向推: 截断/四舍五入是跳一整格的, 量化之后再加容限,
-            // 救不回已被求解器残差推过格线的那一格.
-            let lenient = judged_value(value - allow, &rule);
-            accepted_slacks.push((executed - value, allow, lenient));
+            let allow = judging_allowance(value, executed, &rule);
+            let distance = executed - value;
+            let limit = maximum + rule.tolerance.max(0.0);
+            // 先按原值判. 原值判不过、而它离执行界不超过放行量时, 才当它是求解器残差,
+            // 在量化之前往里推一个放行量再判: 截断/四舍五入是跳一整格的, 量化之后再加
+            // 容限, 救不回已被残差推过格线的那一格.
+            // 只在这一种情况下推. 界内的值照原值算 —— 不然正好压在格线上的值会被推到
+            // 前一格 (灰分 10.30 显示成判定值 10.2); 离执行界更远的不是残差, 也照原值算
+            // —— 不然判了 Fail, 展示的判定值却还在界内.
+            let plain = judged_value(value, &rule);
+            let lenient = if plain > limit && distance >= -allow {
+                judged_value(value - allow, &rule)
+            } else {
+                plain
+            };
+            accepted_slacks.push((distance, allow, lenient));
             raw_pass &= value <= maximum + CHECK_TOLERANCE;
-            judged_pass &= lenient <= maximum + rule.tolerance.max(0.0);
+            judged_pass &= lenient <= limit;
         }
     }
     if use_min {
         if let Some(minimum) = spec.min {
             let executed = effective_lower(minimum, &rule);
-            let allow = accept_slack(value, executed);
-            let lenient = judged_value(value + allow, &rule);
-            accepted_slacks.push((value - executed, allow, lenient));
+            let allow = judging_allowance(value, executed, &rule);
+            let distance = value - executed;
+            let limit = minimum - rule.tolerance.max(0.0);
+            // 与上界同理: 原值判不过、且离执行界不超过放行量时才往里推.
+            let plain = judged_value(value, &rule);
+            let lenient = if plain < limit && distance >= -allow {
+                judged_value(value + allow, &rule)
+            } else {
+                plain
+            };
+            accepted_slacks.push((distance, allow, lenient));
             raw_pass &= value + CHECK_TOLERANCE >= minimum;
-            judged_pass &= lenient >= minimum - rule.tolerance.max(0.0);
+            judged_pass &= lenient >= limit;
         }
     }
 
@@ -397,6 +495,29 @@ pub(crate) fn validate_coal(coal: &Coal) -> Result<(), String> {
         validate_purchase_terms(&coal.name, terms)?;
     }
     Ok(())
+}
+
+/// 方向忽略的一侧 (Upper 的 min / Lower 的 max) 在入口处清掉, 之后全链路只看
+/// 归一化值: 校验不查它、LP 不建它、体检不回显它、余量步长不读它.
+/// 输入形状不变 —— 不清用户的请求对象, 返回的是内部副本; 无需清理时返回 None.
+pub(crate) fn normalize_ignored_sides(request: &BlendRequest) -> Option<BlendRequest> {
+    let ignored = |spec: &Spec| match spec.direction {
+        Direction::Upper => spec.min.is_some(),
+        Direction::Lower => spec.max.is_some(),
+        Direction::Range => false,
+    };
+    if !request.specs.iter().any(ignored) {
+        return None;
+    }
+    let mut normalized = request.clone();
+    for spec in &mut normalized.specs {
+        match spec.direction {
+            Direction::Upper => spec.min = None,
+            Direction::Lower => spec.max = None,
+            Direction::Range => {}
+        }
+    }
+    Some(normalized)
 }
 
 pub(crate) fn validate_request(request: &BlendRequest) -> Result<(), String> {
@@ -472,10 +593,13 @@ pub(crate) fn validate_request(request: &BlendRequest) -> Result<(), String> {
                 label_zh(&spec.indicator)
             ));
         }
-        if spec
-            .min
-            .zip(spec.max)
-            .is_some_and(|(minimum, maximum)| minimum > maximum)
+        // min > max 只有 Range 才查: Upper 的 min、Lower 的 max 被方向忽略,
+        // 残留值不是错误. 入口归一化后它们已不在, 这里按方向再挡一层.
+        if spec.direction == Direction::Range
+            && spec
+                .min
+                .zip(spec.max)
+                .is_some_and(|(minimum, maximum)| minimum > maximum)
         {
             return Err(format!("{} 下限大于上限", label_zh(&spec.indicator)));
         }
@@ -508,7 +632,7 @@ pub(crate) fn validate_request(request: &BlendRequest) -> Result<(), String> {
                 ));
             };
             // Range 已在上面提前返回, 这里只剩 Upper/Lower; needs_max/needs_min 检查
-            // (:293-298) 已保证对应边界存在, Some(..) else 只是防御式兜底.
+            // (本函数前半段) 已保证对应边界存在, Some(..) else 只是防御式兜底.
             let bound = if spec.direction == Direction::Upper {
                 spec.max
             } else {
@@ -668,19 +792,20 @@ fn validate_penalty(
 mod tests {
     use super::*;
 
-    /// 放行量反超 `strict_bound_epsilon` 时, 顶在上界的解不能被判 Fail.
+    /// 放行量永远盖不过 `strict_bound_epsilon`: 顶在上界执行界、只差求解器残差的解要认,
+    /// 压在进位线上 (判定值已是界外一格) 的值必须判 Fail.
     ///
-    /// 见 [`ACCEPT_TOLERANCE`] 的"容限必须在量化之前加"一节. 两位小数判定下
-    /// `strict_bound_epsilon` = 量子×1e-4 = 1e-6, 而放行量 = 1e-7×(1+量级), 量级
-    /// 超过 9 就反超它. 这里把界放在 10.00、残差取在两者之间, 复现那条后果链:
-    /// slack 这一关认了, 旧实现里判定值却被推过整整一个量化格, `judged_pass` 挂,
-    /// 整条判 Fail —— Hard 指标上这就是一个假不可行.
+    /// 见 [`ACCEPT_TOLERANCE`] 的"放行量不许盖过执行界留的缓冲"一节. 界放在 10.00、
+    /// 两位小数截断: 进位线 10.01, 放行量 ≈1.1e-6. 缓冲曾经只有 1e-6, 比放行量小,
+    /// 10.01 这个值被外闸放行、再被"先推再量化"吸回 10.00 那一格, 判成通过.
     ///
-    /// 原先这里断言 `Fail` —— 钉住的是已知缺陷 (容限加在量化之后). 2026-09-27
-    /// 修成"容限在量化之前按方向推"后改为断言不 Fail, 用例本身保留作回归.
-    /// 直接喂 `check_value` 一个构造值, 不经求解器.
+    /// 这条测试以前叫 `test_accept_tolerance_can_outrun_strict_bound_epsilon`, 断言
+    /// "放行量 > 缓冲"是前提, 并断言缝里的值 (执行界外 (缓冲+放行量)/2) 判定值 10.00、
+    /// 不 Fail. 那个前提本身就是缺陷: 缝里的值离进位线只差 5e-8, 进位线上的值同样
+    /// 落在放行量以内. 现在断言相反的不变量, 并把两头都钉住.
+    /// 直接喂 `check_value` 构造值, 不经求解器.
     #[test]
-    fn test_accept_tolerance_can_outrun_strict_bound_epsilon() {
+    fn test_accept_tolerance_never_outruns_strict_bound_epsilon() {
         let mut spec = Spec::upper("A", 10.00);
         spec.acceptance = Some(AcceptanceRule {
             mode: AcceptanceMode::Truncate,
@@ -689,35 +814,138 @@ mod tests {
         });
         let rule = acceptance_rule(&spec, false);
 
-        let epsilon = strict_bound_epsilon(&rule);
+        let line = 10.01;
+        let epsilon = strict_bound_epsilon(&rule, line);
         let executed = effective_upper(10.00, &rule);
-        let allowance = accept_slack(executed, executed);
+        let allowance = judging_allowance(line, executed, &rule);
         assert!(
-            allowance > epsilon,
-            "本用例的前提就是放行量反超了 eps: 放行量 {allowance:e} vs eps {epsilon:e}"
+            allowance * 2.0 <= epsilon,
+            "放行量至多是缓冲的一半: 放行量 {allowance:e} vs 缓冲 {epsilon:e}"
         );
 
-        // 残差取在 eps 与放行量之间 —— 旧实现在这段缝里会把判定值推过一整格.
-        let residual = (epsilon + allowance) / 2.0;
-        let value = executed + residual;
-        let outcome = check_value(value, Some(&spec), false, true);
+        // 顶在执行界上、残差用满放行量的解: 认, 判定值留在合同那一格.
+        let outcome = check_value(executed + allowance * 0.99, Some(&spec), false, true);
+        assert_ne!(outcome.status, EvaluationStatus::Fail, "求解器残差要认");
+        assert_eq!(outcome.judged, 10.00, "判定值留在合同那一格");
 
-        assert_eq!(
-            outcome.judged, 10.00,
-            "容限在量化之前推回, 判定值留在合同那一格, 实得 {}",
-            outcome.judged
-        );
-        assert_ne!(
-            outcome.status,
-            EvaluationStatus::Fail,
-            "slack 认了的解, judged_pass 也必须认"
-        );
-        assert!(
-            outcome.slack.is_some_and(|slack| slack >= -allowance),
-            "slack 这一关本身是认的 —— 否掉它的是 judged_pass"
-        );
+        // 压在进位线上的值: 截断后是 10.01, 超了合同, 判定值也要如实写 10.01.
+        let outcome = check_value(line, Some(&spec), false, true);
+        assert_eq!(outcome.status, EvaluationStatus::Fail, "界外一格必须 Fail");
+        assert_eq!(outcome.judged, 10.01, "判 Fail 时展示的判定值不能还在界内");
+    }
+    /// 判定格线: 合同界外一格 (及更远) 的值, 任何判定规则下都必须判 Fail; 正好压在
+    /// 合同界上、或顶在执行界上的值不许判 Fail.
+    ///
+    /// 界取在各自的格点上 (化验与合同都按格报数), 量级从 0.0x 到 100 都扫 —— 放行量随
+    /// 量级变大, 缺陷正是出在"量级大、格子细"的组合上.
+    #[test]
+    fn test_one_grid_beyond_bound_always_fails() {
+        let status = |value: f64, spec: &Spec| check_value(value, Some(spec), false, true).status;
+        for mode in [
+            AcceptanceMode::Raw,
+            AcceptanceMode::Truncate,
+            AcceptanceMode::Round,
+        ] {
+            for decimals in 0..=6u8 {
+                let rule = AcceptanceRule {
+                    mode,
+                    decimals: Some(decimals),
+                    tolerance: 0.0,
+                };
+                let scale = scale(&rule);
+                for magnitude in [0.07, 0.29, 0.849, 1.13, 2.5, 10.49, 10.5, 28.0, 80.0, 99.9] {
+                    let grid = (magnitude * scale).round();
+                    let bound = grid / scale;
+                    let label = format!("{mode:?} {decimals} 位, 界 {bound}");
+
+                    let mut upper = Spec::upper("A", bound);
+                    upper.acceptance = Some(rule.clone());
+                    let mut lower = Spec::lower("A", bound);
+                    lower.acceptance = Some(rule.clone());
+
+                    assert_ne!(
+                        status(bound, &upper),
+                        EvaluationStatus::Fail,
+                        "{label}: 上界上"
+                    );
+                    assert_ne!(
+                        status(bound, &lower),
+                        EvaluationStatus::Fail,
+                        "{label}: 下界上"
+                    );
+                    assert_ne!(
+                        status(effective_upper(bound, &rule), &upper),
+                        EvaluationStatus::Fail,
+                        "{label}: 顶在上界执行界"
+                    );
+                    assert_ne!(
+                        status(effective_lower(bound, &rule), &lower),
+                        EvaluationStatus::Fail,
+                        "{label}: 顶在下界执行界"
+                    );
+                    for steps in [1.0, 2.0, 3.0, 10.0] {
+                        let above = (grid + steps) / scale;
+                        assert_eq!(
+                            status(above, &upper),
+                            EvaluationStatus::Fail,
+                            "{label}: 上界外 {steps} 格 ({above})"
+                        );
+                        let below = (grid - steps) / scale;
+                        assert_eq!(
+                            status(below, &lower),
+                            EvaluationStatus::Fail,
+                            "{label}: 下界外 {steps} 格 ({below})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
+    /// 合同界本身落在格点上时, `界 × 10^位数` 的浮点误差不许让执行界偏一整格.
+    ///
+    /// 0.29 × 100 = 28.999999999999996, 直接 floor 得 28, 上界执行界就落到 0.29 以下 ——
+    /// 合同写 ≤0.29, 化验 0.295 (截断后正是 0.29) 却被挡在外面. 0.07 × 100 =
+    /// 7.000000000000001, 直接 ceil 得 8, 下界执行界成了 0.08.
+    #[test]
+    fn test_grid_bounds_keep_their_own_cell() {
+        for decimals in 1..=6u8 {
+            let scale = 10_f64.powi(i32::from(decimals));
+            let quantum = 1.0 / scale;
+            let truncate = AcceptanceRule {
+                mode: AcceptanceMode::Truncate,
+                decimals: Some(decimals),
+                tolerance: 0.0,
+            };
+            let round = AcceptanceRule {
+                mode: AcceptanceMode::Round,
+                ..truncate.clone()
+            };
+            for grid in 1..=3000u32 {
+                let bound = f64::from(grid) / scale;
+                let upper = effective_upper(bound, &truncate);
+                assert!(
+                    upper > bound + quantum * 0.5 && upper < bound + quantum,
+                    "截断 {decimals} 位, 上界 {bound}: 执行界 {upper} 应在这一格的后半格"
+                );
+                let lower = effective_lower(bound, &truncate);
+                assert!(
+                    (lower - bound).abs() < quantum * 1e-6,
+                    "截断 {decimals} 位, 下界 {bound}: 执行界 {lower} 应就是这条格线"
+                );
+                let upper = effective_upper(bound, &round);
+                assert!(
+                    upper > bound && upper < bound + quantum * 0.5,
+                    "四舍五入 {decimals} 位, 上界 {bound}: 执行界 {upper} 应在进位线内侧"
+                );
+                let lower = effective_lower(bound, &round);
+                assert!(
+                    (lower - (bound - quantum * 0.5)).abs() < quantum * 1e-6,
+                    "四舍五入 {decimals} 位, 下界 {bound}: 执行界 {lower} 应是进位线"
+                );
+            }
+        }
+    }
     /// 计价条款校验的共享用例 (`data/penalty_cases.json`).
     ///
     /// 同一份用例前端也跑一遍 (`doudou_blend/src/penalty.test.ts`): 前端那套
@@ -889,6 +1117,36 @@ mod tests {
         }
     }
 
+    /// 方向忽略的一侧必须当作不存在: Upper 带一个比上限还大的残留 min 不再被拒,
+    /// Lower 带一个比下限还小的残留 max 不再被拒; 只有 Range 才查 min > max.
+    #[test]
+    fn test_ignored_side_is_not_validated() {
+        let mut upper = priced_spec(
+            vec![PenaltyTier {
+                width: None,
+                rate: 80.0,
+            }],
+            12.0,
+        );
+        upper.min = Some(99.0);
+        assert!(
+            validate_request(&request_with(upper)).is_ok(),
+            "Upper 的 min 被忽略, 不该查 min > max"
+        );
+
+        let mut lower = Spec::lower("G", 80.0);
+        lower.max = Some(10.0);
+        assert!(
+            validate_request(&request_with(lower)).is_ok(),
+            "Lower 的 max 被忽略, 不该查 min > max"
+        );
+
+        let mut range = Spec::upper("A", 10.0);
+        range.direction = Direction::Range;
+        range.min = Some(12.0);
+        let err = validate_request(&request_with(range)).expect_err("Range 仍要查 min > max");
+        assert!(err.contains("下限大于上限"), "{err}");
+    }
     #[test]
     fn test_priced_spec_requires_penalty() {
         let mut spec = priced_spec(

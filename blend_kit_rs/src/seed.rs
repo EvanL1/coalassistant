@@ -3,8 +3,8 @@
 //! 设计:
 //!   - master 提供完整 10 字段 (S/A/V/G/Y/petro/CSR/M/fob/frt) + per-field 可信度
 //!   - status: verified (生产可用) / active (部分数据) / draft (待核实) / incomplete / archived
-//!   - 用户首次启动 APP 时把 master 全量 seed 到本地 SQLite
-//!   - master 升级时 APP 只 insert 新增项, 不覆盖用户的 override
+//!   - master 编进二进制 (`crate::master_json`), 服务端按原文字节提供给前端
+//!   - 用户的覆盖值单独存 (localStorage / PostgreSQL), master 本体永不被改
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
