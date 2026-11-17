@@ -14,9 +14,8 @@
 use std::collections::HashMap;
 
 use crate::model::{BlendRequest, BlendResult, Coal, Direction};
-use crate::petrography::Petrography;
 
-/// 没有煤岩数据时由挥发换算煤阶: Ro ≈ 2.478 − 0.0458·Vdaf. 由 Vdaf 17–36% 的 8 种
+/// 没有反射率化验, 煤阶由挥发换算: Ro ≈ 2.478 − 0.0458·Vdaf. 由 Vdaf 17–36% 的 8 种
 /// 炼焦煤 (Rmax) 拟合, r = −0.98; 范围外是外推.
 const RO_INTERCEPT: f64 = 2.478;
 const RO_PER_VDAF: f64 = 0.0458;
@@ -29,14 +28,9 @@ const SCAN_STEP: f64 = 0.02;
 /// 试探中心的格点数上限 (不含各煤自身煤阶).
 const MAX_SCAN: usize = 24;
 
-/// 一种煤的煤阶: 有效煤岩数据的反射率均值优先, 否则由挥发换算.
+/// 一种煤的煤阶 (由挥发换算); 缺挥发时为 None.
 pub fn coal_rank(coal: &Coal) -> Option<f64> {
-    coal.petrography
-        .as_ref()
-        .filter(|data| data.is_valid())
-        .and_then(Petrography::mean_std)
-        .map(|(mean, _)| mean)
-        .or_else(|| coal.get("V").map(|vdaf| RO_INTERCEPT - RO_PER_VDAF * vdaf))
+    coal.get("V").map(|vdaf| RO_INTERCEPT - RO_PER_VDAF * vdaf)
 }
 
 /// 求解 (或验算) 并计入煤阶交互. `inner(request, csr_shift, diagnose)` 是不带交互的原求解
@@ -44,7 +38,6 @@ pub fn coal_rank(coal: &Coal) -> Option<f64> {
 /// 时无解不跑逐项诊断 (试探中心时用, 免得每次都诊断一遍).
 pub(crate) fn solve(
     request: &BlendRequest,
-    csr_regression_active: bool,
     inner: impl Fn(&BlendRequest, Option<&HashMap<String, f64>>, bool) -> BlendResult,
 ) -> BlendResult {
     let mut plain = request.clone();
@@ -64,9 +57,6 @@ pub(crate) fn solve(
     if !k.is_finite() || k < 0.0 {
         return skip(format!("k = {k} 无效, 须为非负数"));
     }
-    if csr_regression_active {
-        return skip("CSR 已由实测回归模型预测, 不再叠加".into());
-    }
     // 线性值 ≤ 真实值只对下限保守; 上限反过来会放过真实超标的配方.
     if plain.specs.iter().any(|spec| {
         spec.enabled
@@ -84,10 +74,8 @@ pub(crate) fn solve(
         .map(|(coal, _)| coal.name.as_str())
         .collect();
     if !missing.is_empty() {
-        return skip(format!(
-            "{} 缺挥发和煤岩数据, 算不出煤阶",
-            missing.join("/")
-        ));
+        // 煤阶只由挥发换算.
+        return skip(format!("{} 缺挥发, 算不出煤阶", missing.join("/")));
     }
     let ranks: Vec<f64> = ranks.into_iter().flatten().collect();
 

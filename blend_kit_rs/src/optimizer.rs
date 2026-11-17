@@ -1,12 +1,10 @@
-//! 混合配煤求解器.
+//! 配煤求解器.
 //!
-//! Clarabel LP 负责生成最低成本候选配方；每个指标由独立公式评估。G/CSR 可
-//! 显式接收已训练且通过门控的评估器，岩相在 LP 后按全方差定律复验并收紧重算。
+//! Clarabel LP 给出最低成本配方. 八项指标都按配比线性加权 (`quality::formula_for`),
+//! 解出后逐项按合同的判定规则体检.
 
 use crate::model::*;
 use crate::penalty::{cif_eff, cif_eff_or_quoted, clauses_missing_assay, tiered_amount};
-use crate::petrography::{self, Petrography, NOTCH_WINDOW};
-use crate::predict::EvaluatorSet;
 use crate::quality::{
     accept_slack, acceptance_rule, check_value, executed_lower, executed_upper, formula_for,
     grid_ceil, grid_floor, judging_allowance, quantum, validate_request, MetricFormula,
@@ -15,8 +13,6 @@ use clarabel::algebra::CscMatrix;
 use clarabel::solver::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-const MAX_EVALUATION_ITERATIONS: usize = 4;
-const PETRO_SHRINK_SAFETY: f64 = 0.999;
 const SOLUTION_TOLERANCE: f64 = 1e-8;
 /// 可行性复核的相对容限. 比 SOLUTION_TOLERANCE 宽, 因为档位列不经归一化重投影,
 /// 残差保持在 Clarabel 的原始收敛量级 (~1e-8..1e-7).
@@ -33,12 +29,12 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 /// 156 行, 最大 residual/(1+magnitude) = 6.36e-9, 号称留出约 16 倍余量.
 /// 那只是一张**窄网格**: 只有计价行、只有一个煤种、界只动了 ash 一项.
 ///
-/// ⚠ **真实余量只剩 1.0005 倍** —— 宽网格实测已经贴着本值的 99.95%.
+/// ⚠ **真实余量只剩 1.03 倍** —— 宽网格实测已经贴着本值的 96.7%.
 /// 具体数字见 `quality::ACCEPT_TOLERANCE` 那张实测表 (本 crate 唯一真源), 本处不
 /// 复述: 抄一份就多一处会各自变旧的地方, 这事已经发生过.
 ///
 /// 越过这条线的解由 LP 自己判不可行. 也就是说, 解后复核对齐之后,"可行合同报不可行"
-/// 的风险整体**转移到了本常量上**: 残差再漂 1.2% 就复发, 只是发作点从体检挪到了 LP
+/// 的风险整体**转移到了本常量上**: 残差再漂约 3% 就复发, 只是发作点从体检挪到了 LP
 /// 自己. 煤池变宽、合同变紧、Clarabel 升级, 任何一样都可能吃掉这点余量.
 ///
 /// 想调本值: 先重跑
@@ -47,8 +43,8 @@ const SOLUTION_TOLERANCE: f64 = 1e-8;
 /// 量化之前加" (见 `quality::ACCEPT_TOLERANCE`), 抬它不再会让判定值掉格.
 ///
 /// 安全边界: 放行量是 `本值 × (1 + magnitude)`, 随行量级变化. 实测的最大 LP 侧
-/// 放行量见 `quality::ACCEPT_TOLERANCE` 那张表 (本 crate 唯一真源) —— 约 3.7e-6
-/// 指标单位, 比化验 0.01 的分辨率细约 3.4 个数量级, 拒收线仍是硬墙.
+/// 放行量见 `quality::ACCEPT_TOLERANCE` 那张表 (本 crate 唯一真源) —— 约 2.0e-6
+/// 指标单位, 比化验 0.01 的分辨率细约 3.7 个数量级, 拒收线仍是硬墙.
 ///
 /// 注意**别拿那张表里"复核侧放行量"那一行来读本常量**: 两者量级口径不同, 复核侧取
 /// 界本身, 本常量取 `Σ|aᵢxᵢ|`(行系数相对绑定值的平均绝对偏差), 数值差着四五倍.
@@ -65,8 +61,6 @@ pub(crate) const MIN_RATIO_TOLERANCE: f64 = 1e-9;
 const POSTCHECK_TIGHTEN_STEPS: [f64; 2] = [1e-6, 1e-5];
 /// 合同与煤池确实冲突时的 reason. 前端与历史记录都按原文展示, 不要改字.
 const CONFLICT_REASON: &str = "约束冲突, LP 不可行";
-/// 验算模式不做岩相精确复核时的提示. 按整铲验算 ([`crate::shovel`]) 沿用凑整前的复核, 会把它摘掉.
-pub(crate) const FIXED_PETRO_NOTE: &str = "验算模式未做岩相精确复核, 岩相按线性代理估算";
 
 /// LP 没解出可用配方的原因. 三种必须分开报: 说成"约束冲突"会让用户去放宽一份
 /// 也许本来可行的合同; 后两种都是"没算出可靠结论", 置 undetermined.
@@ -96,15 +90,10 @@ impl LpFailure {
     }
 }
 
-/// 基础求解入口，不读取训练样本，也不在求解期间拟合模型.
-pub fn solve(request: &BlendRequest) -> BlendResult {
-    solve_with_evaluators(request, &EvaluatorSet::default())
-}
-
-/// 使用调用方预先训练好的可选评估器求解.
+/// 求解入口. 请求带 `fixed_ratios` 时是验算: 按给定配比出成本与体检, 不求最优.
 ///
 /// `ok` 只表示是否得到配方；可信度由 `quality_status` 表示。
-pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) -> BlendResult {
+pub fn solve(request: &BlendRequest) -> BlendResult {
     // 方向忽略的一侧 (Upper 的 min / Lower 的 max) 在入口归一化一次, 之后估价并入、
     // 整铲、稳健性重解、求解与验算全都只看归一化值.
     let normalized = crate::quality::normalize_ignored_sides(request);
@@ -117,16 +106,14 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
     };
     let lp_request = priced.as_ref().unwrap_or(request);
     // 一铲最小量 (shovel_tons) 在这里套一层分支定界与凑整铲; 没给时就是一次普通求解.
-    let resolve =
-        |trial: &BlendRequest, diagnose: bool| solve_internal(trial, evaluators, diagnose);
-    let mut result = crate::shovel::solve(lp_request, &resolve);
+    let mut result = crate::shovel::solve(lp_request, &solve_internal);
+    confirm_relax_targets(lp_request, &mut result);
     result.warnings.extend(note);
     if let Some(config) = &request.price_robustness {
         // 验算模式没有"最优"可言; 无解也无从谈稳不稳.
         if result.ok && request.fixed_ratios.is_none() {
             // 重解同样按整铲配, 否则零改价时连续解与整铲基准就差一截, 门槛全塌到第一档.
-            let plain =
-                |trial: &BlendRequest, _diagnose: bool| solve_internal(trial, evaluators, false);
+            let plain = |trial: &BlendRequest, _diagnose: bool| solve_internal(trial, false);
             let resolve = |trial: &BlendRequest| crate::shovel::solve(trial, &plain);
             match crate::robustness::analyze(lp_request, request, &result, config, &resolve) {
                 Ok((report, warnings)) => {
@@ -145,28 +132,19 @@ pub fn solve_with_evaluators(request: &BlendRequest, evaluators: &EvaluatorSet) 
 /// `diagnose = false` 的那一路是给 [`relax_target`] 的试解用的: 它要拿真流程验证
 /// "合同改成这个数到底解不解得出来", 但自己不能再触发诊断 —— 否则诊断里试解、
 /// 试解里又诊断, 一层套一层.
-fn solve_internal(
-    request: &BlendRequest,
-    evaluators: &EvaluatorSet,
-    diagnose: bool,
-) -> BlendResult {
+fn solve_internal(request: &BlendRequest, diagnose: bool) -> BlendResult {
     if request.rank_interaction.is_some() {
-        return crate::rank_interaction::solve(
-            request,
-            evaluators.csr.is_some(),
-            |plain, csr_shift, inner_diagnose| {
-                solve_core(plain, evaluators, diagnose && inner_diagnose, csr_shift)
-            },
-        );
+        return crate::rank_interaction::solve(request, |plain, csr_shift, inner_diagnose| {
+            solve_core(plain, diagnose && inner_diagnose, csr_shift)
+        });
     }
-    solve_core(request, evaluators, diagnose, None)
+    solve_core(request, diagnose, None)
 }
 
 /// `csr_shift`: 煤名 → 该煤 CSR 在公式里要扣的点数 (煤阶交互的线性化). 只改 CSR 公式,
 /// 不改煤的 props —— 输入校验、采购条款扣款与拒收线读的仍是煤的真实化验值.
 fn solve_core(
     request: &BlendRequest,
-    evaluators: &EvaluatorSet,
     diagnose: bool,
     csr_shift: Option<&HashMap<String, f64>>,
 ) -> BlendResult {
@@ -174,60 +152,27 @@ fn solve_core(
         return BlendResult::infeasible(&reason, Vec::new());
     }
 
-    let mut warnings = evaluators.warnings.clone();
-    if evaluators.csr.is_some() {
-        for coal in &request.coals {
-            let missing: Vec<&str> = ["S", "A", "V", "G", "Y", "M"]
-                .into_iter()
-                .filter(|indicator| !coal.has(indicator))
-                .collect();
-            if !missing.is_empty() {
-                warnings.push(format!(
-                    "{}: 缺输入指标 {}，本次 CSR 回退录入代理值",
-                    coal.name,
-                    missing
-                        .into_iter()
-                        .map(label_zh)
-                        .collect::<Vec<_>>()
-                        .join("/")
-                ));
-            }
-        }
-    }
+    let mut warnings = Vec::new();
     let active_specs: Vec<&Spec> = request.specs.iter().filter(|spec| spec.enabled).collect();
-    let mut coals = request.coals.clone();
-    // 价格因子里只评估、不进 LP 的煤: 只用来算配煤价值, 与煤池同样预处理.
+    // 价格因子里只评估、不进 LP 的煤: 只用来算配煤价值.
     // 校验不过就不用 (price_factor::attach 会告警), 配方不受影响.
-    let mut extras: Vec<Coal> = request
+    let extras: &[Coal] = request
         .price_factor
         .as_ref()
         .filter(|_| crate::price_factor::validate_extra_coals(request).is_ok())
-        .map(|factor| factor.extra_coals.clone())
-        .unwrap_or_default();
-
-    // 有 μ/σ 或直方图时，用单煤真实 σ 补齐 LP 代理字段。
-    for coal in coals.iter_mut().chain(extras.iter_mut()) {
-        if !coal.has("petro") {
-            if let Some((_, std_dev)) = coal.petrography.as_ref().and_then(Petrography::mean_std) {
-                coal.props.insert("petro".into(), std_dev);
-            }
-        }
-    }
+        .map_or(&[], |factor| factor.extra_coals.as_slice());
 
     // 只有 Hard/Priced 约束会剔除缺字段煤；Soft/Advisory 不能改变候选煤池。
     // Priced 同样入列: 它的拒收线是 LP 硬行, 缺输入时无法建约束, 必须和 Hard 一样剔煤。
     // BTreeSet 而不是 HashSet: 下面要把缺的指标拼进警告文字, 迭代顺序必须每次相同.
-    let mut required: BTreeSet<String> = active_specs
+    let required: BTreeSet<String> = active_specs
         .iter()
         .filter(|spec| matches!(spec.enforcement, Enforcement::Hard | Enforcement::Priced))
         .map(|spec| spec.indicator.clone())
         .collect();
-    if evaluators.csr.is_some() && required.remove("CSR") {
-        required.extend(["S", "A", "V", "G", "Y", "M"].into_iter().map(String::from));
-    }
 
     let mut kept = Vec::new();
-    for coal in &coals {
+    for coal in &request.coals {
         let mut missing: Vec<&String> = required
             .iter()
             .filter(|indicator| !coal.has(indicator))
@@ -288,12 +233,10 @@ fn solve_core(
         .filter(|coal| required.iter().all(|indicator| coal.has(indicator)))
         .collect();
 
-    let mut formulas = build_formulas(&kept, evaluators);
+    let mut formulas = build_formulas(&kept);
     if let (Some(shift), Some(csr)) = (csr_shift, formulas.get_mut("CSR")) {
         for (index, coal) in kept.iter().enumerate() {
-            let delta = shift.get(&coal.name).copied().unwrap_or(0.0);
-            csr.numerators[index] -= delta;
-            csr.proxy_coefficients[index] -= delta;
+            csr.numerators[index] -= shift.get(&coal.name).copied().unwrap_or(0.0);
         }
     }
     if let Some(spec) = active_specs
@@ -308,302 +251,46 @@ fn solve_core(
         return BlendResult::infeasible(&reason, warnings);
     }
     if let Some(fixed) = &request.fixed_ratios {
-        return evaluate_fixed(
-            &kept,
-            &active_specs,
-            request,
-            &formulas,
-            evaluators,
-            fixed,
-            warnings,
-        );
+        return evaluate_fixed(&kept, &active_specs, request, &formulas, fixed, warnings);
     }
-    let petro_spec = active_specs
-        .iter()
-        .find(|spec| spec.indicator == "petro")
-        .copied();
-    // 岩相精确复核守的内部界就是 LP 按合同执行的那两条 (代理界此时还没被收紧).
-    let petro_limits = petro_spec
-        .filter(|spec| spec.enforcement == Enforcement::Hard)
-        .map(|spec| enforced_bounds(spec, request, None, None))
-        .unwrap_or_default();
-    let petro_internal = |side: Direction| {
-        petro_limits
-            .iter()
-            .find(|(direction, _, _)| *direction == side)
-            .map(|(_, _, enforced)| *enforced)
-    };
-    let petro_internal_upper = petro_internal(Direction::Upper);
-    let petro_internal_lower = petro_internal(Direction::Lower);
 
-    let mut petro_proxy_upper = None;
-    let mut petro_proxy_lower = None;
-    let mut iteration = 0;
-    let mut fallback: Option<BlendResult> = None;
-
-    loop {
-        let solved = solve_once(
-            &kept,
-            &active_specs,
-            request,
-            &formulas,
-            evaluators,
-            petro_proxy_lower,
-            petro_proxy_upper,
-            warnings.clone(),
-            &extras,
-        );
-        let (mut result, ratios) = match solved {
-            Ok(solved) => solved,
-            Err(failure) => {
-                return if let Some(previous) = fallback {
-                    if petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard) {
-                        let mut failure_warnings = previous.warnings;
-                        failure_warnings
-                            .push("岩相精确校验修复后 LP 不可行；请调整煤池或合同级别".into());
-                        // 这里不带诊断: fallback 有值就说明按合同界建的 LP 本来有解 (previous
-                        // 就是那个解), 无解的是岩相修复把上限收紧之后的 LP. 诊断的前提是
-                        // "按合同界建的 LP 无解", 在这条路上不成立 —— 硬跑会拿收紧后的代理界
-                        // 判越界、却按合同界展示, 报出"岩相 ≤0.1 达不到, 最好只能到 0.05"
-                        // 这种自相矛盾的行. 真凶已由 reason 与 warnings 指名为岩相.
-                        BlendResult::infeasible(
-                            "岩相精确 Hard 复核未找到可行配方",
-                            failure_warnings,
-                        )
-                    } else {
-                        let mut previous = previous;
-                        previous
-                            .warnings
-                            .push("岩相修复后 LP 不可行，已保留候选方案".into());
-                        finalize_quality_status(&mut previous, &active_specs);
-                        previous
-                    }
-                } else {
-                    // 只有这条路满足诊断的前提: fallback 为 None ⇒ 一次成功迭代都没有过
-                    // ⇒ petro_proxy_* 必然还是 None (它们与 fallback 在同一处赋值),
-                    // 失败的就是按合同界建的那个 LP 本身.
-                    debug_assert!(
-                        petro_proxy_lower.is_none() && petro_proxy_upper.is_none(),
-                        "未经岩相修复就走到这里, 代理界不该已被收紧"
-                    );
-                    // 求解器没收敛时"LP 无解"未经证实, 但诊断只收"子问题最优值确实越过 LP 界"
-                    // 的项, 可行时自然落空; 真不可行时它正好指出卡在哪.
-                    let bounds = if diagnose {
-                        diagnose_infeasible(&kept, &active_specs, request, &formulas, evaluators)
-                    } else {
-                        Vec::new()
-                    };
-                    // 求解器没算出结论、诊断也落空: 合同可行与否未经证实, 单独标出来.
-                    let undetermined = bounds.is_empty()
-                        && matches!(failure, LpFailure::Numerical(_) | LpFailure::PostCheck(_));
-                    let mut failed =
-                        BlendResult::infeasible(&failure_reason(&failure, &bounds), warnings)
-                            .with_infeasible_bounds(bounds);
-                    failed.undetermined = undetermined;
-                    failed
-                };
-            }
-        };
-        result.evaluation_iterations = iteration;
-
-        let participating: Vec<(&Coal, f64)> = kept
-            .iter()
-            .zip(&ratios)
-            .filter(|(coal, _)| result.recipe.contains_key(&coal.name))
-            .map(|(coal, ratio)| (*coal, *ratio))
-            .collect();
-        let Some((sigma, petro_outcome)) = review_petrography(
-            &mut result,
-            &participating,
-            petro_spec,
-            request.truncate_decimal,
-            iteration,
-        ) else {
-            finalize_quality_status(&mut result, &active_specs);
-            return result;
-        };
-
-        let above_upper =
-            petro_internal_upper.is_some_and(|limit| sigma > limit + SOLUTION_TOLERANCE);
-        let below_lower =
-            petro_internal_lower.is_some_and(|limit| sigma + SOLUTION_TOLERANCE < limit);
-        let needs_refinement = above_upper || below_lower;
-        if needs_refinement && iteration < MAX_EVALUATION_ITERATIONS {
-            if let Some(limit) = petro_internal_upper.filter(|_| above_upper) {
-                let current = petro_proxy_upper.unwrap_or(limit);
-                petro_proxy_upper = Some(current * (limit / sigma).powi(2) * PETRO_SHRINK_SAFETY);
-            }
-            if let Some(limit) = petro_internal_lower.filter(|_| below_lower) {
-                let current = petro_proxy_lower.unwrap_or(limit);
-                let safe_sigma = sigma.max(SOLUTION_TOLERANCE);
-                petro_proxy_lower =
-                    Some(current * (limit / safe_sigma).powi(2) / PETRO_SHRINK_SAFETY);
-            }
-            iteration += 1;
-            fallback = Some(result);
-            continue;
+    match solve_once(
+        &kept,
+        &active_specs,
+        request,
+        &formulas,
+        warnings.clone(),
+        &extras,
+    ) {
+        Ok(result) => result,
+        Err(failure) => {
+            // 求解器没收敛时"LP 无解"未经证实, 但诊断只收"子问题最优值确实越过 LP 界"
+            // 的项, 可行时自然落空; 真不可行时它正好指出卡在哪.
+            let bounds = if diagnose {
+                diagnose_infeasible(&kept, &active_specs, request, &formulas)
+            } else {
+                Vec::new()
+            };
+            // 求解器没算出结论、诊断也落空: 合同可行与否未经证实, 单独标出来.
+            let undetermined = bounds.is_empty()
+                && matches!(failure, LpFailure::Numerical(_) | LpFailure::PostCheck(_));
+            let mut failed = BlendResult::infeasible(&failure_reason(&failure, &bounds), warnings)
+                .with_infeasible_bounds(bounds);
+            failed.undetermined = undetermined;
+            failed
         }
-        // 以下两处不可行不带 infeasible_bounds: LP 本身有解 (result 就是 LP 的解),
-        // 卡住的是 LP 之后的岩相精确复核. 逐项诊断的推理以"LP 无解"为前提, 这里前提
-        // 不成立, 跑了也只会全部落空 —— 真凶已由 reason 与 warnings 指名为岩相.
-        if needs_refinement {
-            result.warnings.push(format!(
-                "岩相精确值 σ={sigma:.3} 未达到内部保护区间，启发式修复 {iteration} 轮后停止"
-            ));
-            if petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard) {
-                return BlendResult::infeasible(
-                    "岩相精确 Hard 复核未找到可行配方",
-                    result.warnings,
-                );
-            }
-        }
-        if petro_outcome.status == EvaluationStatus::Fail
-            && petro_spec.is_some_and(|spec| spec.enforcement == Enforcement::Hard)
-        {
-            result
-                .warnings
-                .push(format!("岩相精确值 σ={sigma:.3} 未通过合同 Hard 判定"));
-            return BlendResult::infeasible("岩相精确 Hard 复核未找到可行配方", result.warnings);
-        }
-        finalize_quality_status(&mut result, &active_specs);
-        return result;
     }
 }
 
-fn build_formulas(coals: &[&Coal], models: &EvaluatorSet) -> HashMap<String, MetricFormula> {
+/// 各指标的线性公式 (按配比加权). 煤池里有煤缺某项指标时, 那一项没有公式.
+fn build_formulas(coals: &[&Coal]) -> HashMap<String, MetricFormula> {
     let mut formulas = HashMap::new();
     for indicator in INDICATORS {
         if let Some(formula) = formula_for(indicator, coals) {
             formulas.insert(indicator.into(), formula);
         }
     }
-
-    if let (Some(model), Some(base)) = (models.g.as_ref(), formulas.get("G").cloned()) {
-        let coefficients: Vec<f64> = base
-            .proxy_coefficients
-            .iter()
-            .map(|value| model.predictor.slope * value)
-            .collect();
-        formulas.insert(
-            "G".into(),
-            MetricFormula {
-                proxy_coefficients: base.proxy_coefficients,
-                numerators: coefficients,
-                denominators: vec![1.0; coals.len()],
-                intercept: model.predictor.intercept,
-                method: EvaluationMethod::AffineCalibration,
-                verified: true,
-                uncertainty: Some(model.p90_abs_error),
-                model: Some(model.summary(true)),
-            },
-        );
-    }
-
-    if let Some(model) = &models.csr {
-        let predictor = &model.predictor;
-        let evaluated_coefficients: Option<Vec<f64>> = coals
-            .iter()
-            .map(|coal| {
-                Some(
-                    predictor.beta_s * coal.get("S")?
-                        + predictor.beta_a * coal.get("A")?
-                        + predictor.beta_v * coal.get("V")?
-                        + predictor.beta_g * coal.get("G")?
-                        + predictor.beta_y * coal.get("Y")?
-                        + predictor.beta_m * coal.get("M")?,
-                )
-            })
-            .collect();
-        if let Some(evaluated_coefficients) = evaluated_coefficients {
-            let proxy_coefficients: Vec<f64> = coals
-                .iter()
-                .zip(&evaluated_coefficients)
-                .map(|(coal, evaluated)| coal.get("CSR").unwrap_or(*evaluated))
-                .collect();
-            formulas.insert(
-                "CSR".into(),
-                MetricFormula {
-                    proxy_coefficients,
-                    numerators: evaluated_coefficients,
-                    denominators: vec![1.0; coals.len()],
-                    intercept: predictor.intercept,
-                    method: EvaluationMethod::Regression,
-                    verified: true,
-                    uncertainty: Some(model.p90_abs_error),
-                    model: Some(model.summary(true)),
-                },
-            );
-        }
-    }
     formulas
-}
-
-fn expanded_domain(minimum: f64, maximum: f64, ratio: f64) -> (f64, f64) {
-    let width = (maximum - minimum).max(1e-9);
-    (minimum - width * ratio, maximum + width * ratio)
-}
-
-fn push_linear_domain(
-    coefficients: Vec<f64>,
-    intercept: f64,
-    minimum: f64,
-    maximum: f64,
-    inequalities: &mut Vec<Vec<f64>>,
-    bounds: &mut Vec<f64>,
-) {
-    inequalities.push(coefficients.clone());
-    bounds.push(maximum - intercept);
-    inequalities.push(coefficients.into_iter().map(|value| -value).collect());
-    bounds.push(intercept - minimum);
-}
-
-/// 已验证模型用于 Hard 约束时，训练域本身也必须进入 LP。这样求解器不能
-/// 通过选择便宜的域外配方来利用外推值“满足”合同。
-fn append_hard_model_domains(
-    coals: &[&Coal],
-    specs: &[&Spec],
-    models: &EvaluatorSet,
-    inequalities: &mut Vec<Vec<f64>>,
-    bounds: &mut Vec<f64>,
-) -> Option<()> {
-    let hard_g = specs
-        .iter()
-        .any(|spec| spec.indicator == "G" && spec.enforcement == Enforcement::Hard);
-    let hard_csr = specs
-        .iter()
-        .any(|spec| spec.indicator == "CSR" && spec.enforcement == Enforcement::Hard);
-
-    if hard_g && models.g.is_some() {
-        let model = models.g.as_ref()?;
-        let coefficients = coals
-            .iter()
-            .map(|coal| coal.get("G"))
-            .collect::<Option<Vec<_>>>()?;
-        let (minimum, maximum) = expanded_domain(
-            model.training_min,
-            model.training_max,
-            models.extrapolation_ratio,
-        );
-        push_linear_domain(coefficients, 0.0, minimum, maximum, inequalities, bounds);
-    }
-
-    if hard_csr {
-        if let Some(model) = &models.csr {
-            for (index, indicator) in ["S", "A", "V", "G", "Y", "M"].into_iter().enumerate() {
-                let coefficients = coals
-                    .iter()
-                    .map(|coal| coal.get(indicator))
-                    .collect::<Option<Vec<_>>>()?;
-                let (minimum, maximum) = expanded_domain(
-                    model.training_min[index],
-                    model.training_max[index],
-                    models.extrapolation_ratio,
-                );
-                push_linear_domain(coefficients, 0.0, minimum, maximum, inequalities, bounds);
-            }
-        }
-    }
-    Some(())
 }
 
 /// 一条计价约束在 LP 中占用的档位列区间.
@@ -615,9 +302,8 @@ struct PricedBlock {
     rates: Vec<f64>,
 }
 
-/// 为每条计价约束追加档位列与三类行, 返回各块的列区间.
-///
-/// 与 [`append_hard_model_domains`] 同一个接缝形状: 就地追加进 `costs`/`inequalities`/`bounds`.
+/// 为每条计价约束追加档位列与三类行, 返回各块的列区间. 就地追加进
+/// `costs`/`inequalities`/`bounds`.
 ///
 /// **调用方必须在本函数之前写完 `costs` 的配比段**——本函数只在尾部追加档位列的
 /// rate, 之后再覆写 `costs` 会把扣款率一起冲掉, 且能编译通过、只是算错钱.
@@ -662,6 +348,8 @@ fn append_priced_blocks(
         let margin = spec.margin.unwrap_or(0.0);
 
         // 合同界是精确的合同数字, 不加 margin; margin 只收紧拒收线.
+        // 拒收线与合同界按同一条判定规则折成执行界; 体检 ([`within_reject`]) 按同一条规则
+        // 判同一条线, 只是不带 margin.
         let (limit, reject) = match spec.direction {
             Direction::Upper => (
                 executed_upper(spec.max?, &rule, 0.0),
@@ -730,20 +418,14 @@ fn read_back_penalties(blocks: &[PricedBlock], solution: &[f64]) -> BTreeMap<Str
 /// 一条约束在 LP 里真正执行的界, 每项 = (方向, 合同界, LP 界).
 ///
 /// 合同界是合同白纸黑字那个数, 给人看; LP 界还折算了合同判定规则 (截断/四舍五入)
-/// 与安全余量 margin —— Upper 减 margin, Lower 加 margin. Range 拆成上下两条,
-/// petro 的 LP 界会被启发式代理覆盖.
+/// 与安全余量 margin —— Upper 减 margin, Lower 加 margin. Range 拆成上下两条.
 ///
 /// Hard 的硬界是合同 min/max; Priced 的合同界并不硬 (超了按档位折成扣款),
 /// 真正硬的是拒收线, 故返回拒收线 —— 与 [`append_priced_blocks`] 的悬崖行必须是
 /// 同一条线, 改一处必须改另一处.
 ///
 /// 建 Hard 行与不可行诊断共用本函数: 两处各写一遍, 符号或 margin 迟早漂移.
-fn enforced_bounds(
-    spec: &Spec,
-    request: &BlendRequest,
-    petro_proxy_lower: Option<f64>,
-    petro_proxy_upper: Option<f64>,
-) -> Vec<(Direction, f64, f64)> {
+fn enforced_bounds(spec: &Spec, request: &BlendRequest) -> Vec<(Direction, f64, f64)> {
     let (upper_source, lower_source) = match spec.enforcement {
         Enforcement::Hard => (
             matches!(spec.direction, Direction::Upper | Direction::Range)
@@ -771,20 +453,10 @@ fn enforced_bounds(
     let mut limits = Vec::new();
     if let Some(maximum) = upper_source {
         let enforced = executed_upper(maximum, &rule, margin);
-        let enforced = if spec.indicator == "petro" {
-            petro_proxy_upper.unwrap_or(enforced)
-        } else {
-            enforced
-        };
         limits.push((Direction::Upper, maximum, enforced));
     }
     if let Some(minimum) = lower_source {
         let enforced = executed_lower(minimum, &rule, margin);
-        let enforced = if spec.indicator == "petro" {
-            petro_proxy_lower.unwrap_or(enforced)
-        } else {
-            enforced
-        };
         limits.push((Direction::Lower, minimum, enforced));
     }
     limits
@@ -805,19 +477,17 @@ fn enforced_bounds(
 /// 实测过 A≤11.3 时解落在界外 1.05e-8, LP 认、复核不认, 整单被判不可行, relax_to
 /// 只好再让一档给到 11.4. 现在两边共用 `FEASIBILITY_TOLERANCE`, 那一档不再白丢.
 ///
-/// 口径统一了也仍要真解: 放宽这一项**未必**就够 (还有岩相精确复核那一关), 而
-/// "够不够"只有解出来才知道.
+/// 口径统一了也仍要真解: 最优点照旧落在新界上, 求解器给的解过不过约束复核与体检,
+/// 只有解出来才知道.
 ///
 /// 所以这里逐档往外试, 每档都跑一遍真流程 (`diagnose = false`, 防止试解里再诊断),
 /// 第一个真解得出配方的档位才是答案.
 ///
-/// 全都试不通就返回 `None` —— **不拿没试过的数充数**. 放宽这一项可能只是必要而不
-/// 充分: LP 通了却卡在岩相精确复核, 就是每一档都解不出来. 界面照着这个数承诺
+/// 全都试不通就返回 `None` —— **不拿没试过的数充数**. 界面照着这个数承诺
 /// "改成它就能解出配方", 给不出就得让界面说给不出.
 fn relax_target(
     spec: &Spec,
     request: &BlendRequest,
-    models: &EvaluatorSet,
     direction: Direction,
     achievable: f64,
 ) -> Option<f64> {
@@ -859,7 +529,6 @@ fn relax_target(
         }
         if solve_internal(
             &request_with_bound(request, spec, direction, candidate),
-            models,
             false,
         )
         .ok
@@ -868,6 +537,128 @@ fn relax_target(
         }
     }
     None
+}
+
+/// 逐项诊断里的放宽建议, 按用户实际走的那条流程再兑现一遍.
+///
+/// 诊断与 [`relax_target`] 的逐档试解都发生在最里层: 那里的请求已经被拿掉了煤阶交互
+/// ([`crate::rank_interaction::solve`] 先不计交互解一遍), 也不按整铲配 (整铲的分支定界
+/// 套在外面)。所以 "改成这个数就能解出" 只对那个简化问题成立 —— 计入煤阶交互后 CSR 更低,
+/// 凑成整铲后还可能顶破别的项, 照着建议改完重新求解仍然没有配方。
+///
+/// 这里在最外层把每条建议放回完整流程真解一次; 解不出就往外找, 找到真能解出的最小一档
+/// 才给, 找不到就给 None。两样都没开的请求, 里层试解走的已经是完整流程, 不重复验。
+fn confirm_relax_targets(request: &BlendRequest, result: &mut BlendResult) {
+    let rank_interaction = request
+        .rank_interaction
+        .as_ref()
+        .is_some_and(|setting| setting.k > 0.0);
+    if result.ok || !(rank_interaction || request.shovel_tons.is_some()) {
+        return;
+    }
+    // 每次试解都是一遍完整流程 (整铲的分支定界套煤阶交互的换中心), 线上规模的煤池一次要几十
+    // 毫秒。给整个请求一个试解次数的总预算: 用完了剩下的建议就说给不出。按次数而不按时间限,
+    // 是因为同一个请求的输出不能随机器快慢变。
+    let budget = std::cell::Cell::new(RELAX_CONFIRM_BUDGET);
+    let solves = |trial: &BlendRequest| -> Option<bool> {
+        budget.set(budget.get().checked_sub(1)?);
+        let plain = |inner: &BlendRequest, _diagnose: bool| solve_internal(inner, false);
+        Some(crate::shovel::solve(trial, &plain).ok)
+    };
+    for bound in &mut result.infeasible_bounds {
+        let Some(first) = bound.relax_to else {
+            continue;
+        };
+        bound.relax_to = request
+            .specs
+            .iter()
+            .find(|spec| spec.enabled && spec.indicator == bound.indicator)
+            .and_then(|spec| widen_until_solved(spec, request, bound.direction, first, &solves));
+    }
+}
+
+/// 一个请求里, 兑现放宽建议最多试解多少次 (所有问题项合计)。
+///
+/// 多数建议第一次试解就成立; 要往外找的, 两位小数的项探到头再二分收回约 20 次。
+const RELAX_CONFIRM_BUDGET: u32 = 48;
+
+/// 往外找放宽档位至少探多少格。
+const RELAX_WIDEN_MIN_CELLS: f64 = 256.0;
+
+/// 往外找放宽档位至少探多远 (占建议数自身量级的比例)。只按格数算的话, 小数位细的项探不了
+/// 多远 (三位小数的 256 格只有 0.256), 而煤阶交互一扣就是好几点 CSR。
+const RELAX_WIDEN_REACH: f64 = 0.2;
+
+/// 按原值判定的项没有格子: 往外找时按合同上常见的写法, 0.01 一步.
+const RAW_RELAX_SCALE: f64 = 100.0;
+
+/// 从 `first` 起往放宽的方向找第一个 "完整流程真解得出" 的档位。
+///
+/// 先试 `first` 本身 (多数建议本来就成立, 只多解这一次); 不成立就按格翻倍往外探, 探到
+/// 解得出的一档后二分收回, 给最小的那一档。返回的数一定是真解过的; 探到头都解不出、或试解
+/// 预算在探到之前用完, 给 None。`solves` 返回 None 表示预算用完。
+fn widen_until_solved(
+    spec: &Spec,
+    request: &BlendRequest,
+    direction: Direction,
+    first: f64,
+    solves: &impl Fn(&BlendRequest) -> Option<bool>,
+) -> Option<f64> {
+    let attempt = |bound: f64| solves(&request_with_bound(request, spec, direction, bound));
+    if attempt(first)? {
+        return Some(first);
+    }
+    let sign = match direction {
+        Direction::Upper => 1.0,
+        Direction::Lower => -1.0,
+        Direction::Range => return None,
+    };
+    let rule = acceptance_rule(spec, request.truncate_decimal);
+    // 档位用 "整数格 / 每单位格数" 算, 不用 first + 步长 × n: 后者会攒出浮点零头.
+    let (scale, base) = match rule.decimals.filter(|_| rule.mode != AcceptanceMode::Raw) {
+        // first 是 relax_target 在格线上取的.
+        Some(_) => {
+            let scale = (1.0 / quantum(&rule)).round();
+            (scale, (first * scale).round())
+        }
+        // 按原值: first 一般不在 0.01 的格上, 起点取它里侧最近的一格, 往外第一步就越过它.
+        None => {
+            let scaled = first * RAW_RELAX_SCALE;
+            let inner = if sign > 0.0 {
+                scaled.floor()
+            } else {
+                scaled.ceil()
+            };
+            (RAW_RELAX_SCALE, inner)
+        }
+    };
+    let candidate = |steps: f64| (base + sign * steps) / scale;
+    let farthest =
+        RELAX_WIDEN_MIN_CELLS.max((RELAX_WIDEN_REACH * first.abs().max(1.0) * scale).ceil());
+
+    // 翻倍往外探: 1, 2, 4, … 格, 最后一档正好落在最远处.
+    let (mut failed, mut steps) = (0.0, 1.0);
+    let mut solved = loop {
+        if attempt(candidate(steps))? {
+            break steps;
+        }
+        if steps >= farthest {
+            return None;
+        }
+        failed = steps;
+        steps = (steps * 2.0).min(farthest);
+    };
+    // 二分只在 "这一档解得出" 时才往里收, 所以留下的那一档一定真解过; 预算用完就停在已经
+    // 解出的那一档 (不是最小的, 但照着改确实解得出).
+    while solved - failed > 1.0 {
+        let middle = failed + ((solved - failed) / 2.0).floor();
+        match attempt(candidate(middle)) {
+            Some(true) => solved = middle,
+            Some(false) => failed = middle,
+            None => break,
+        }
+    }
+    Some(candidate(solved))
 }
 
 /// 放宽档位最多往外试几档. 判定规则本身最多差两档 (Round 最坏情况
@@ -906,24 +697,16 @@ fn request_with_bound(
     relaxed
 }
 
-/// 组装 LP: Hard 行 + 已验证模型训练域 + 计价档位块.
+/// 组装 LP: Hard 行 + 计价档位块 + 单煤配比下限.
 ///
-/// 不可行诊断复用它: `relaxed` 指定那条被松开的 spec 在 `specs` 里的下标, 得到的就是
-/// "少了这条界"的同一个问题, 不必另写一套建模代码.
-///
-/// **`relaxed` 只松开这条 spec 的界行 (Hard 的上下界行 / Priced 的整个档位块),
-/// 模型训练域行照旧保留.** 训练域是"已验证模型可以用于 Hard 约束"的前提, 不属于这条
-/// 界本身: 一并删掉等于一次放宽了两层, achievable 会偏乐观, "单独放宽这一项就能可行"
-/// 随之变成空话. 今天 solve_json 走默认评估器看不出来, CSR 回归一上线就会现形.
-#[allow(clippy::too_many_arguments)]
+/// 不可行诊断复用它: `relaxed` 指定那条被松开的 spec 在 `specs` 里的下标 (松开的是
+/// Hard 的上下界行 / Priced 的整个档位块), 得到的就是"少了这条界"的同一个问题, 不必
+/// 另写一套建模代码.
 fn build_lp(
     coals: &[&Coal],
     specs: &[&Spec],
     request: &BlendRequest,
     formulas: &HashMap<String, MetricFormula>,
-    models: &EvaluatorSet,
-    petro_proxy_lower: Option<f64>,
-    petro_proxy_upper: Option<f64>,
     relaxed: Option<usize>,
 ) -> Option<(LpProblem, Vec<PricedBlock>)> {
     let count = coals.len();
@@ -944,16 +727,14 @@ fn build_lp(
         .filter(|spec| spec.enforcement == Enforcement::Hard)
     {
         let formula = formulas.get(&spec.indicator)?;
-        for (direction, _, limit) in
-            enforced_bounds(spec, request, petro_proxy_lower, petro_proxy_upper)
-        {
+        for (direction, _, limit) in enforced_bounds(spec, request) {
             let (row, bound) = match direction {
                 Direction::Upper => formula.upper_constraint(limit),
                 Direction::Lower => formula.lower_constraint(limit),
                 Direction::Range => {
                     // enforced_bounds 只产出 Upper/Lower 两向, Range 在那里就拆开了.
-                    // 不 panic: 本 crate 自己的 release profile 与 wasm 包都是
-                    // panic = "abort", `blend` 命令行会整个进程中止, wasm 里是 trap.
+                    // 不 panic: 本 crate 的 release profile 是 panic = "abort",
+                    // `blend` 命令行会整个进程中止.
                     // (server 按它自己的 profile 编, 是 panic = "unwind", 求解跑在
                     // 阻塞线程里, 那里 panic 只失败这一次请求.)
                     debug_assert!(false, "enforced_bounds 不该产出 Range");
@@ -964,9 +745,6 @@ fn build_lp(
             bounds.push(bound);
         }
     }
-    // 训练域行用未过滤的 specs —— 见上面函数级注释.
-    append_hard_model_domains(coals, specs, models, &mut inequalities, &mut bounds)?;
-
     let blocks = append_priced_blocks(
         &bounded,
         formulas,
@@ -1024,14 +802,10 @@ fn diagnose_infeasible(
     specs: &[&Spec],
     request: &BlendRequest,
     formulas: &HashMap<String, MetricFormula>,
-    models: &EvaluatorSet,
 ) -> Vec<InfeasibleBound> {
-    // 岩相启发式代理只在修复迭代里存在, 而那条路不跑诊断 (见调用处), 故这里恒为 None:
-    // 诊断面对的永远是"按合同界建的那个 LP".
-    let (petro_proxy_lower, petro_proxy_upper) = (None, None);
     let mut culprits = Vec::new();
     for (index, spec) in specs.iter().enumerate() {
-        let limits = enforced_bounds(spec, request, petro_proxy_lower, petro_proxy_upper);
+        let limits = enforced_bounds(spec, request);
         if limits.is_empty() {
             continue;
         }
@@ -1039,16 +813,7 @@ fn diagnose_infeasible(
         let Some(formula) = formulas.get(&spec.indicator) else {
             continue;
         };
-        let Some((problem, _)) = build_lp(
-            coals,
-            specs,
-            request,
-            formulas,
-            models,
-            petro_proxy_lower,
-            petro_proxy_upper,
-            Some(index),
-        ) else {
+        let Some((problem, _)) = build_lp(coals, specs, request, formulas, Some(index)) else {
             continue;
         };
         for (direction, required, enforced) in limits {
@@ -1076,7 +841,7 @@ fn diagnose_infeasible(
                     enforced,
                     margin: spec.margin.unwrap_or(0.0),
                     achievable,
-                    relax_to: relax_target(spec, request, models, direction, achievable),
+                    relax_to: relax_target(spec, request, direction, achievable),
                 });
             }
         }
@@ -1084,30 +849,17 @@ fn diagnose_infeasible(
     culprits
 }
 
-#[allow(clippy::too_many_arguments)]
 fn solve_once(
     coals: &[&Coal],
     specs: &[&Spec],
     request: &BlendRequest,
     formulas: &HashMap<String, MetricFormula>,
-    models: &EvaluatorSet,
-    petro_proxy_lower: Option<f64>,
-    petro_proxy_upper: Option<f64>,
     warnings: Vec<String>,
     extras: &[&Coal],
-) -> Result<(BlendResult, Vec<f64>), LpFailure> {
+) -> Result<BlendResult, LpFailure> {
     let count = coals.len();
-    let (problem, blocks) = build_lp(
-        coals,
-        specs,
-        request,
-        formulas,
-        models,
-        petro_proxy_lower,
-        petro_proxy_upper,
-        None,
-    )
-    .ok_or(LpFailure::Infeasible)?;
+    let (problem, blocks) =
+        build_lp(coals, specs, request, formulas, None).ok_or(LpFailure::Infeasible)?;
     let (solution, objective, tightened) = problem.solve()?;
     let ratios = solution[..count].to_vec();
     // 输出配方的占比门槛: 截掉零头会让配方判不达标时, 把达标所需的零头煤留在配方里.
@@ -1125,13 +877,12 @@ fn solve_once(
         specs,
         request,
         formulas,
-        models,
         &ratios,
         grain,
         &penalty_by_indicator,
         warnings,
     );
-    // LP 给出的配方若在复算里越了 Hard 界, 视同本轮无解, 交上层 (岩相修复 / 报失败).
+    // LP 给出的配方若在复算里越了 Hard 界, 视同无解, 交上层报失败.
     // 这是"有解但解不过关", 不是"求解器证实不可行": 交 PostCheck, 由上层如实说
     // 没算出可靠结论. 验算不走这里: 用户给定的配方超标要逐项报出来, 不能吞掉.
     let hard_failed: Vec<String> = specs
@@ -1150,21 +901,9 @@ fn solve_once(
     // 配煤价值给煤价对比卡与价格稳健性 (挑离入选最近的煤) 用; 两者都不要时不多解一次 LP,
     // 结果与以前逐字节一致.
     if request.price_factor.is_some() || request.price_robustness.is_some() {
-        result.blend_values = blend_values(
-            &LpContext {
-                specs,
-                request,
-                models,
-                petro_proxy_lower,
-                petro_proxy_upper,
-            },
-            coals,
-            extras,
-            formulas,
-            objective,
-        );
+        result.blend_values = blend_values(specs, request, coals, extras, formulas, objective);
     }
-    Ok((result, ratios))
+    Ok(result)
 }
 
 /// 输出配方里留哪些煤的占比门槛 (占比 > 门槛的才进 `recipe` 与订单).
@@ -1234,34 +973,44 @@ fn output_recipe_fails(
             }
             // 计价项超合同界是预期行为 (已折算成扣款), 越过拒收线才算不达标; 与体检同一个口径.
             if spec.enforcement == Enforcement::Priced {
-                return !within_reject(spec, value);
+                return !within_reject(spec, value, request.truncate_decimal);
             }
             true
         })
 }
 
-/// 计价项的原值是否还在合同白纸黑字那条拒收线以内 (不折判定规则, 不带安全余量).
+/// 计价项是否还在拒收线以内. 输出配方复核与体检共用.
 ///
-/// 输出配方复核与体检共用. LP 的悬崖行用的是另一条线 (折了判定规则与安全余量的
-/// 执行界), 那是刻意的, 见 [`assemble_result`] 里的说明.
-fn within_reject(spec: &Spec, value: f64) -> bool {
-    spec.penalty.as_ref().is_some_and(|penalty| {
-        let slack = accept_slack(penalty.reject, penalty.reject);
-        match spec.direction {
-            Direction::Upper => value <= penalty.reject + slack,
-            Direction::Lower => value + slack >= penalty.reject,
-            Direction::Range => false,
-        }
-    })
-}
-
-/// 建 LP 需要的、与煤池无关的那几样输入.
-struct LpContext<'a> {
-    specs: &'a [&'a Spec],
-    request: &'a BlendRequest,
-    models: &'a EvaluatorSet,
-    petro_proxy_lower: Option<f64>,
-    petro_proxy_upper: Option<f64>,
+/// 拒收线和合同界一样是合同上的数字, 按同一条判定规则判: 判定值 (按这一项的规则截断 /
+/// 四舍五入后的值) 越过 `penalty.reject` 才算越线; 按原值判定的项就是原值比拒收线.
+/// 做法是把拒收线当成这一项的界, 走判一个值的同一个入口 [`check_value`] —— 取舍、放行量
+/// 都只在 `quality.rs` 里, 这里不另写一遍.
+///
+/// LP 的悬崖行 ([`append_priced_blocks`]) 是同一条线按同一条规则折成的执行界, 再减去
+/// 安全余量 `margin`. 余量是内部的保守量, 只留在 LP 那一侧: LP 比这里严可以, 反过来
+/// 不行 —— 那样求解给出的配方会被自己的体检判越线.
+fn within_reject(spec: &Spec, value: f64, legacy_truncate: bool) -> bool {
+    let Some(penalty) = &spec.penalty else {
+        return false;
+    };
+    let (min, max) = match spec.direction {
+        Direction::Upper => (None, Some(penalty.reject)),
+        Direction::Lower => (Some(penalty.reject), None),
+        // validate_request 已挡掉 Priced + Range.
+        Direction::Range => return false,
+    };
+    let line = Spec {
+        indicator: spec.indicator.clone(),
+        direction: spec.direction,
+        min,
+        max,
+        enabled: true,
+        margin: None,
+        acceptance: spec.acceptance.clone(),
+        enforcement: Enforcement::Hard,
+        penalty: None,
+    };
+    check_value(value, Some(&line), legacy_truncate, true).status != EvaluationStatus::Fail
 }
 
 /// 配煤价值 = 每种煤的盈亏平衡到厂价: 列 j 检验数为 0 时的成本 c_j* = −(z₀ + Σ a_rj·z_r).
@@ -1276,32 +1025,23 @@ struct LpContext<'a> {
 /// 这是**边际**价值 (少量掺入时成立), 买多了约束松开, 每吨价值会下降. 对偶退化时
 /// (如没有约束卡住, 所有煤都等于最便宜那种的价) 对偶解不唯一, 内点法给的是解集中部的一个.
 fn blend_values(
-    context: &LpContext,
+    specs: &[&Spec],
+    request: &BlendRequest,
     coals: &[&Coal],
     extras: &[&Coal],
     formulas: &HashMap<String, MetricFormula>,
     objective: f64,
 ) -> BTreeMap<String, f64> {
     let union: Vec<&Coal> = coals.iter().chain(extras).copied().collect();
-    let mut union_formulas = build_formulas(&union, context.models);
+    let mut union_formulas = build_formulas(&union);
     let count = coals.len();
     for (indicator, own) in formulas {
         if let Some(target) = union_formulas.get_mut(indicator) {
             target.numerators[..count].copy_from_slice(&own.numerators);
             target.denominators[..count].copy_from_slice(&own.denominators);
-            target.proxy_coefficients[..count].copy_from_slice(&own.proxy_coefficients);
         }
     }
-    let Some((mut problem, _)) = build_lp(
-        &union,
-        context.specs,
-        context.request,
-        &union_formulas,
-        context.models,
-        context.petro_proxy_lower,
-        context.petro_proxy_upper,
-        None,
-    ) else {
+    let Some((mut problem, _)) = build_lp(&union, specs, request, &union_formulas, None) else {
         return BTreeMap::new();
     };
     let priced_rows = problem.a_ub.len();
@@ -1343,12 +1083,11 @@ fn assemble_result(
     specs: &[&Spec],
     request: &BlendRequest,
     formulas: &HashMap<String, MetricFormula>,
-    models: &EvaluatorSet,
     ratios: &[f64],
     // 占比大于它的煤才进配方与订单; 见 output_grain.
     grain: f64,
     penalty_by_indicator: &BTreeMap<String, f64>,
-    mut warnings: Vec<String>,
+    warnings: Vec<String>,
 ) -> BlendResult {
     let penalty_per_ton: f64 = penalty_by_indicator.values().sum();
 
@@ -1441,7 +1180,7 @@ fn assemble_result(
         .iter()
         .any(|spec| !formulas.contains_key(&spec.indicator))
     {
-        build_formulas(&used_coals, models)
+        build_formulas(&used_coals)
     } else {
         HashMap::new()
     };
@@ -1494,48 +1233,21 @@ fn assemble_result(
             continue;
         };
         let proxy = formula.proxy_value(ratios);
-        let (mut verified, model_summary) =
-            runtime_model_state(indicator, formula, coals, ratios, models);
-        let invalid_model_output = model_summary.is_some()
-            && matches!(indicator, "G" | "CSR")
-            && !(0.0..=100.0).contains(&evaluated);
-        if invalid_model_output {
-            verified = false;
-            warnings.push(format!(
-                "{}模型输出 {evaluated:.3} 超出 0~100 物理范围",
-                label_zh(indicator)
-            ));
-        }
-        let mut outcome = check_value(evaluated, spec, request.truncate_decimal, verified);
-        if invalid_model_output {
-            outcome.status = EvaluationStatus::Fail;
-        }
+        let mut outcome = check_value(evaluated, spec, request.truncate_decimal, formula.verified);
         // 计价指标超合同界是预期行为(已折算成扣款), 只要未越拒收线就不判 Fail.
-        // 拒收线本身是 LP 硬约束, 但非线性评估器的复算值可能与 LP 代理不同, 故仍显式复核.
+        // 拒收线本身是 LP 硬约束; 验算走的是用户给的配比, 没有 LP 把关, 故这里显式复核.
         //
-        // 容限必须与 LP 拒收行同量级: LP 放行 FEASIBILITY_TOLERANCE*(1+magnitude),
-        // 这里若仍用绝对 SOLUTION_TOLERANCE, 就会把 LP 认可的解判成 Fail,
-        // 经 finalize_quality_status 变成 NeedsReview —— 正确配方被盖上"需要复核".
-        //
-        // 注意参照值不同, 这是刻意的: LP 悬崖行用 `executed_upper`/`executed_lower`
-        // 折过判定规则与安全余量的拒收线, 这里比的是原始 penalty.reject (合同白纸黑字那条线).
-        // 体检回答的是"是否越过合同拒收线", 不是"是否越过内部安全代理"; 不要把两者改成一致.
+        // 与 LP 悬崖行是同一条线、同一条判定规则 (见 [`within_reject`]): 判定值越过
+        // penalty.reject 才算越线, 放行量也与合同界共用 `check_value` 那一套 —— 否则
+        // LP 认可的解会被判成 Fail, 经 finalize_quality_status 变成 NeedsReview, 正确配方
+        // 被盖上"需要复核". 两边只差安全余量 margin: 它只收紧 LP, 体检按合同上的数字判.
         if let Some(spec) = spec {
             if spec.enforcement == Enforcement::Priced
                 && outcome.status == EvaluationStatus::Fail
-                && within_reject(spec, evaluated)
+                && within_reject(spec, evaluated, request.truncate_decimal)
             {
                 outcome.status = EvaluationStatus::TolerancePass;
             }
-        }
-        if model_summary
-            .as_ref()
-            .is_some_and(|summary| !summary.in_domain)
-        {
-            warnings.push(format!(
-                "{}模型超出训练域，本次只展示为未验证估算",
-                label_zh(indicator)
-            ));
         }
         indicator_check.push(IndicatorCheck {
             indicator: indicator.into(),
@@ -1548,10 +1260,10 @@ fn assemble_result(
             proxy_value: Some(proxy),
             evaluated_value: Some(evaluated),
             judged_value: Some(outcome.judged),
-            uncertainty: formula.uncertainty,
+            uncertainty: None,
             method: formula.method,
             status: outcome.status,
-            model: model_summary,
+            model: None,
             penalty_per_ton: penalty_by_indicator.get(indicator).copied(),
         });
     }
@@ -1565,7 +1277,6 @@ fn assemble_result(
         cost: Some(cost),
         orders,
         indicator_check,
-        petrography_check: None,
         warnings,
         quality_status: QualityStatus::Estimated,
         evaluation_iterations: 0,
@@ -1608,7 +1319,6 @@ fn evaluate_fixed(
     specs: &[&Spec],
     request: &BlendRequest,
     formulas: &HashMap<String, MetricFormula>,
-    evaluators: &EvaluatorSet,
     fixed: &BTreeMap<String, f64>,
     mut warnings: Vec<String>,
 ) -> BlendResult {
@@ -1691,19 +1401,11 @@ fn evaluate_fixed(
         }
     }
 
-    if kept
-        .iter()
-        .zip(&ratios)
-        .any(|(coal, ratio)| *ratio > 0.0 && coal.petrography.is_some())
-    {
-        warnings.push(FIXED_PETRO_NOTE.into());
-    }
     assemble_result(
         kept,
         specs,
         request,
         formulas,
-        evaluators,
         &ratios,
         OUTPUT_RATIO_TOLERANCE,
         &penalty_by_indicator,
@@ -1711,166 +1413,7 @@ fn evaluate_fixed(
     )
 }
 
-fn runtime_model_state(
-    indicator: &str,
-    formula: &MetricFormula,
-    coals: &[&Coal],
-    ratios: &[f64],
-    models: &EvaluatorSet,
-) -> (bool, Option<ModelSummary>) {
-    match indicator {
-        "G" => {
-            if let Some(model) = &models.g {
-                let in_domain =
-                    model.is_in_domain(formula.proxy_value(ratios), models.extrapolation_ratio);
-                return (
-                    formula.verified && in_domain,
-                    Some(model.summary(in_domain)),
-                );
-            }
-        }
-        "CSR" => {
-            if let Some(model) = &models.csr {
-                let features = mixed_csr_features(coals, ratios);
-                let in_domain = features
-                    .is_some_and(|values| model.is_in_domain(values, models.extrapolation_ratio));
-                return (
-                    formula.verified && in_domain,
-                    Some(model.summary(in_domain)),
-                );
-            }
-        }
-        _ => {}
-    }
-    (formula.verified, formula.model.clone())
-}
-
-fn mixed_csr_features(coals: &[&Coal], ratios: &[f64]) -> Option<[f64; 6]> {
-    let mixed = |indicator: &str| -> Option<f64> {
-        coals
-            .iter()
-            .zip(ratios)
-            .map(|(coal, ratio)| Some(coal.get(indicator)? * ratio))
-            .sum()
-    };
-    Some([
-        mixed("S")?,
-        mixed("A")?,
-        mixed("V")?,
-        mixed("G")?,
-        mixed("Y")?,
-        mixed("M")?,
-    ])
-}
-
-/// 岩相精确复核: 按真实配比混合煤岩 (μ/σ, 齐全时用直方图), 改写体检里的岩相项并挂上
-/// `petrography_check`, 返回 σ 与判定. 参配煤缺有效煤岩输入或 μ/σ 算不出时返回 None
-/// (按需加提示), 调用方照线性代理收尾. 求最优的岩相修复循环与按整铲验算 ([`crate::shovel`])
-/// 共用这一段 —— 两边判的是同一件事.
-pub(crate) fn review_petrography(
-    result: &mut BlendResult,
-    participating: &[(&Coal, f64)],
-    petro_spec: Option<&Spec>,
-    truncate: bool,
-    refine_iterations: usize,
-) -> Option<(f64, crate::quality::CheckOutcome)> {
-    let petro_parts: Vec<(&Petrography, f64)> = participating
-        .iter()
-        .filter_map(|(coal, ratio)| {
-            coal.petrography
-                .as_ref()
-                .filter(|data| data.is_valid())
-                .map(|data| (data, *ratio))
-        })
-        .collect();
-
-    if petro_parts.len() != participating.len() {
-        let any_petro_input = participating
-            .iter()
-            .any(|(coal, _)| coal.petrography.is_some());
-        if petro_spec.is_some() && any_petro_input {
-            let missing: Vec<&str> = participating
-                .iter()
-                .filter(|(coal, _)| !coal.petrography.as_ref().is_some_and(Petrography::is_valid))
-                .map(|(coal, _)| coal.name.as_str())
-                .collect();
-            result.warnings.push(format!(
-                "岩相精确复核跳过: {} 缺有效煤岩输入",
-                missing.join("/")
-            ));
-        }
-        return None;
-    }
-
-    let Some((mean, sigma)) = petrography::mix_mean_std(&petro_parts) else {
-        if petro_spec.is_some() {
-            result
-                .warnings
-                .push("岩相精确复核跳过: μ/σ 输入无法计算".into());
-        }
-        return None;
-    };
-
-    let all_histograms = petro_parts.iter().all(|(data, _)| data.has_histogram());
-    let mixed_histogram = all_histograms
-        .then(|| petrography::mix_histogram(&petro_parts))
-        .flatten();
-    let notch = mixed_histogram
-        .as_deref()
-        .and_then(|histogram| petrography::detect_notch(histogram, NOTCH_WINDOW.0, NOTCH_WINDOW.1));
-    if let Some(notch_data) = &notch {
-        result.warnings.push(format!(
-            "岩相: {:.1}~{:.1} 主焦区间存在凹口（谷深比 {:.2}）",
-            NOTCH_WINDOW.0, NOTCH_WINDOW.1, notch_data.depth_ratio
-        ));
-    }
-
-    let petro_outcome = check_value(sigma, petro_spec, truncate, true);
-    update_petro_check(
-        result,
-        sigma,
-        &petro_outcome,
-        if all_histograms {
-            EvaluationMethod::Histogram
-        } else {
-            EvaluationMethod::Moments
-        },
-    );
-    result.petrography_check = Some(PetrographyCheck {
-        mean,
-        sigma,
-        sigma_max: petro_spec.and_then(|spec| spec.max),
-        sigma_ok: petro_spec.map(|_| petro_outcome.status != EvaluationStatus::Fail),
-        notch,
-        refine_iterations,
-    });
-    Some((sigma, petro_outcome))
-}
-
-fn update_petro_check(
-    result: &mut BlendResult,
-    sigma: f64,
-    outcome: &crate::quality::CheckOutcome,
-    method: EvaluationMethod,
-) {
-    if let Some(check) = result
-        .indicator_check
-        .iter_mut()
-        .find(|check| check.indicator == "petro")
-    {
-        check.value = sigma;
-        check.evaluated_value = Some(sigma);
-        check.judged_value = Some(outcome.judged);
-        check.slack = outcome.slack;
-        check.binding = outcome.binding;
-        check.method = method;
-        check.status = outcome.status;
-        check.uncertainty = None;
-        check.model = None;
-    }
-}
-
-pub(crate) fn finalize_quality_status(result: &mut BlendResult, specs: &[&Spec]) {
+fn finalize_quality_status(result: &mut BlendResult, specs: &[&Spec]) {
     if !result.ok {
         result.quality_status = QualityStatus::NeedsReview;
         return;
@@ -2191,7 +1734,7 @@ mod tests {
     use super::*;
 
     /// 计价约束行的线性性依赖 den·x = Σx = 1.
-    /// 若将来引入非单位分母的 MetricFormula, 罚项行会静默失真 —— 用这条测试钉住.
+    /// 若引入非单位分母的 MetricFormula, 罚项行会静默失真 —— 用这条测试钉住.
     #[test]
     fn test_all_formulas_have_unit_denominators() {
         let coals = [
@@ -2224,27 +1767,7 @@ mod tests {
             }
         };
 
-        // 无评估器: 只走 formula_for 的 MetricFormula::linear 路径.
-        check(
-            "默认评估器",
-            &build_formulas(&refs, &EvaluatorSet::default()),
-        );
-
-        // 有评估器: 覆盖 build_formulas 里两处手写 MetricFormula —— G 仿射标定与
-        // CSR 回归. 这两处是最可能被引入非单位分母的地方, 默认评估器根本到不了.
-        let trained = trained_evaluators();
-        let formulas = build_formulas(&refs, &trained);
-        assert_eq!(
-            formulas["G"].method,
-            EvaluationMethod::AffineCalibration,
-            "应走到 G 仿射标定分支"
-        );
-        assert_eq!(
-            formulas["CSR"].method,
-            EvaluationMethod::Regression,
-            "应走到 CSR 回归分支"
-        );
-        check("已训练评估器", &formulas);
+        check("线性公式", &build_formulas(&refs));
     }
 
     /// 求解器状态分三类: 只有证实不可行才是"约束冲突", 迭代用尽/数值错误要如实说没算出结论.
@@ -2309,47 +1832,6 @@ mod tests {
         assert!(undetermined.contains("粘结"), "{undetermined}");
         assert!(undetermined.contains("无法判定"), "{undetermined}");
         assert!(!undetermined.contains("约束冲突"), "{undetermined}");
-    }
-
-    /// 直接构造两个已门控模型, 用于把 `build_formulas` 的手写 MetricFormula 分支走到.
-    /// 不用 `EvaluatorSet::train`: 那会把测试耦合到样本量门槛等训练策略上.
-    fn trained_evaluators() -> EvaluatorSet {
-        EvaluatorSet {
-            g: Some(crate::predict::ValidatedGModel {
-                predictor: crate::predict::GAffinePredictor {
-                    intercept: 5.0,
-                    slope: 0.9,
-                    sample_count: 30,
-                },
-                version: "test-g".into(),
-                cv_mae: 1.0,
-                p90_abs_error: 2.0,
-                bias: 0.0,
-                training_min: 60.0,
-                training_max: 100.0,
-            }),
-            csr: Some(crate::predict::ValidatedCsrModel {
-                predictor: crate::predict::CsrPredictor {
-                    intercept: 20.0,
-                    beta_s: -1.0,
-                    beta_a: -0.5,
-                    beta_v: -0.2,
-                    beta_g: 0.4,
-                    beta_y: 0.3,
-                    beta_m: -0.1,
-                    r_squared: 0.9,
-                    n_samples: 30,
-                },
-                version: "test-csr".into(),
-                cv_mae: 1.0,
-                p90_abs_error: 3.0,
-                bias: 0.0,
-                training_min: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                training_max: [10.0, 20.0, 40.0, 110.0, 30.0, 20.0],
-            }),
-            warnings: Vec::new(),
-            extrapolation_ratio: 0.1,
-        }
     }
 
     /// 档位列不得参与 Σx=1.
@@ -2428,7 +1910,6 @@ mod tests {
                 .collect(),
             fob,
             frt: 0.0,
-            petrography: None,
             purchase_terms: None,
             coal_type: None,
             form: None,
@@ -2628,114 +2109,6 @@ mod tests {
         );
     }
 
-    /// 子问题只松开被诊断那一条界, 模型训练域行必须留着.
-    ///
-    /// G 已验证模型: 评估值 = 5 + 0.9·原始G, 训练域 [60,100] 外扩 10% 后是 [56,104].
-    /// 合同要粘结 ≥100 ⇒ 原始G 需 ≥105.6, 越过训练域上限 104 ⇒ 不可行.
-    /// 诊断删掉粘结那条界后, 原始G 仍被训练域封在 104, 故最多做到 5+0.9×104 = 98.6.
-    ///
-    /// 若把训练域行跟着一起删掉 (append_hard_model_domains 是按 spec 挂的, 很容易
-    /// 顺手删掉), 原始G 就能顶到煤本身的 110 ⇒ 评估值 104 ≥ 100 ⇒ 复核认为没越界 ⇒
-    /// 这一项根本不会被报出来, 断言随之失败. 今天 solve_json 走默认评估器看不到这条路,
-    /// CSR/G 回归一上线就是生产路径.
-    #[test]
-    fn test_diagnosis_keeps_model_domain_rows() {
-        let request = request_of(
-            vec![
-                assay_coal("高粘结", (0.8, 9.0, 24.0, 110.0, 16.0, 10.0), 1200.0),
-                assay_coal("普通", (0.8, 9.0, 24.0, 90.0, 16.0, 10.0), 1000.0),
-            ],
-            vec![Spec::lower("G", 100.0)],
-        );
-        let request = BlendRequest {
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-            ..request
-        };
-        let result = solve_with_evaluators(&request, &trained_evaluators());
-
-        assert!(!result.ok, "原始G 被训练域封在 104, 评估值到不了 100");
-        assert_eq!(result.infeasible_bounds.len(), 1, "应指认粘结一项");
-        let bound = &result.infeasible_bounds[0];
-        assert_eq!(bound.indicator, "G");
-        assert_eq!(bound.direction, Direction::Lower);
-        assert_eq!(bound.required, 100.0);
-        assert!(
-            (bound.achievable - 98.6).abs() < 0.01,
-            "训练域上限 104 ⇒ 最多 98.6, 实得 {} (104 说明训练域行被一起删了)",
-            bound.achievable
-        );
-    }
-
-    /// 诊断前提的兜底: LP 可行、卡在解后 Hard 复核时, 一项都不许指认.
-    ///
-    /// 这里 G 模型输出 50+0.9×90 = 131, 超出 0~100 物理范围被判 Fail, solve_once
-    /// 因此返回 None —— 但 LP 本身有解. "整体不可行 ⇒ 子问题最优值必然越界"的推理
-    /// 在这种 None 上不成立, 全靠最后那道"确实越界"的复核兜住: 粘结最多能到 131,
-    /// 远在下限 85 之上, 复核落空, 于是交白卷.
-    #[test]
-    fn test_feasible_lp_failing_post_check_names_nobody() {
-        let mut models = trained_evaluators();
-        models
-            .g
-            .as_mut()
-            .expect("测试评估器应带 G 模型")
-            .predictor
-            .intercept = 50.0;
-        let request = request_of(
-            vec![
-                assay_coal("甲", (0.8, 9.0, 24.0, 90.0, 16.0, 10.0), 1000.0),
-                assay_coal("乙", (0.9, 9.5, 25.0, 88.0, 16.0, 10.0), 1100.0),
-            ],
-            vec![Spec::lower("G", 85.0)],
-        );
-        let result = solve_with_evaluators(&request, &models);
-
-        assert!(!result.ok, "模型输出越出物理范围, 不该给配方");
-        assert!(
-            result.infeasible_bounds.is_empty(),
-            "LP 可行, 没有哪条约束够不到, 不许指认: {:?}",
-            result.infeasible_bounds
-        );
-    }
-
-    /// LP 有解、卡在解后 Hard 复核, 诊断又指认不出哪条约束够不到时, 不能说成"约束冲突":
-    /// 合同与煤池并没有被证实冲突, 用户照着"冲突"去放宽合同是白费劲. 要如实说没算出
-    /// 可靠结论, 并置 `undetermined`.
-    #[test]
-    fn test_post_check_failure_is_reported_as_undetermined() {
-        let mut models = trained_evaluators();
-        models
-            .g
-            .as_mut()
-            .expect("测试评估器应带 G 模型")
-            .predictor
-            .intercept = 50.0;
-        let request = request_of(
-            vec![
-                assay_coal("甲", (0.8, 9.0, 24.0, 90.0, 16.0, 10.0), 1000.0),
-                assay_coal("乙", (0.9, 9.5, 25.0, 88.0, 16.0, 10.0), 1100.0),
-            ],
-            vec![Spec::lower("G", 85.0)],
-        );
-        let result = solve_with_evaluators(&request, &models);
-
-        assert!(!result.ok, "模型输出越出物理范围, 不该给配方");
-        let reason = result.reason.as_deref().unwrap_or_default();
-        assert_ne!(reason, CONFLICT_REASON, "LP 有解, 不是约束冲突");
-        assert!(
-            reason.contains("解后复核") && reason.contains(label_zh("G")),
-            "要说清是哪一项没过解后复核: {reason}"
-        );
-        assert!(reason.contains("无法判定"), "{reason}");
-        assert!(result.undetermined, "合同可行与否未经证实");
-        assert!(result.infeasible_bounds.is_empty());
-    }
     /// 有安全余量时, 合同界与真正卡住这一单的执行界不是同一条线, 两条都要报.
     ///
     /// 合同 灰 ≤9、余量 1.0 ⇒ LP 按 ≤8 执行; 煤池最低只能做到 9.0.
@@ -2776,6 +2149,34 @@ mod tests {
 
     /// 按诊断给的"放宽到"改合同, 再解一次.
     ///
+    /// 反解放宽目标的本意: 逐档真解, 全都试不通就给 None —— 不拿没试过的数充数.
+    ///
+    /// 灰 ≤8 与粘结 ≥99 在这个煤池里各自都够不到 (灰最低 8.5, 粘结最高 86)。只放宽灰分,
+    /// 粘结仍然挡着, 哪一档都解不出, 所以说不出灰分该填几。对照: 只有灰分一项时, 同样的
+    /// 反解给得出数, 而且照着改真能解出。
+    #[test]
+    fn test_relax_target_is_none_when_another_spec_still_blocks() {
+        let ash = Spec::upper("A", 8.0);
+        let lowest_ash = 8.5;
+
+        let blocked = request_of(real_case_coals(), vec![ash.clone(), Spec::lower("G", 99.0)]);
+        assert_eq!(
+            relax_target(&ash, &blocked, Direction::Upper, lowest_ash),
+            None,
+            "粘结还挡着, 灰分放宽到多少都解不出, 不该给数"
+        );
+
+        let alone = request_of(real_case_coals(), vec![ash.clone()]);
+        let relax_to = relax_target(&ash, &alone, Direction::Upper, lowest_ash)
+            .expect("只有灰分一项时应试得出可填的数");
+        assert!(
+            (relax_to - lowest_ash).abs() < 1e-9,
+            "应给灰分最低能做到的 8.5, 实得 {relax_to}"
+        );
+        let relaxed = request_of(real_case_coals(), vec![Spec::upper("A", relax_to)]);
+        assert!(solve(&relaxed).ok, "改成 {relax_to} 之后必须真的解得出配方");
+    }
+
     /// relax_to 宣称的是"合同上这个数改成它就能求出配方" —— 唯一说得过去的验收就是
     /// 真改真解. 前两版分别用"差 achievable−合同界"和"差 achievable−执行界"推,
     /// 都没有真解一遍, 于是两种推法各自的反例都溜了过去.
@@ -3166,7 +2567,7 @@ mod tests {
 /// ```
 ///
 /// 为什么要能复跑, 而不是注释里记个数就算: 两个常量都是安全关键的, 余量却很薄
-/// (`FEASIBILITY_TOLERANCE` 只有 1.0005 倍), 煤池变宽、合同变紧、Clarabel 升级,
+/// (`FEASIBILITY_TOLERANCE` 只有 1.03 倍), 煤池变宽、合同变紧、Clarabel 升级,
 /// 任何一样都可能把它吃掉. 一段没法复跑的"实测"在被推翻之前与编造无法区分.
 ///
 /// # 这个模块自己栽过三次, 都是同一个形状
@@ -3192,7 +2593,6 @@ mod tests {
 #[cfg(test)]
 mod measurements {
     use super::*;
-    use crate::predict::{CsrObservation, EvaluatorSet};
     use crate::quality::ACCEPT_TOLERANCE;
 
     /// 极值累加器. **不允许用可能与真实结果混淆的哨兵初始化** —— 这是上一版的教训:
@@ -3280,12 +2680,11 @@ mod measurements {
             .collect()
     }
 
-    /// 用**真正进 LP 的那一行**算量级, 不做手推近似: 线性 / 仿射 / 回归三种公式
-    /// 都经由 `upper_constraint`/`lower_constraint` 编译成同一形式.
+    /// 用**真正进 LP 的那一行**算量级, 不做手推近似: 公式经由
+    /// `upper_constraint`/`lower_constraint` 编译成 LP 行.
     fn measure_row(
         result: &BlendResult,
         coals: &[Coal],
-        models: &EvaluatorSet,
         spec: &Spec,
         truncate: bool,
     ) -> Option<RowMeasurement> {
@@ -3330,7 +2729,7 @@ mod measurements {
         };
 
         let borrowed: Vec<&Coal> = coals.iter().collect();
-        let formulas = build_formulas(&borrowed, models);
+        let formulas = build_formulas(&borrowed);
         let formula = formulas.get(indicator)?;
         let (row, bound) = if upper {
             formula.upper_constraint(executed)
@@ -3494,12 +2893,10 @@ mod measurements {
         ]
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn sweep(
         tag: &'static str,
         coals: &[Coal],
         base: &[Spec],
-        models: &EvaluatorSet,
         step: f64,
         span: i32,
         into: &mut Accumulators,
@@ -3560,7 +2957,7 @@ mod measurements {
                             shovel_tons: None,
                             min_ratios: Default::default(),
                         };
-                        let result = solve_with_evaluators(&request, models);
+                        let result = solve(&request);
                         if !result.ok {
                             continue;
                         }
@@ -3568,7 +2965,7 @@ mod measurements {
                             .iter()
                             .filter(|spec| spec.enabled && spec.enforcement == Enforcement::Hard)
                         {
-                            if let Some(row) = measure_row(&result, coals, models, spec, truncate) {
+                            if let Some(row) = measure_row(&result, coals, spec, truncate) {
                                 into.absorb(&format!("{tag}·{label}"), &spec.indicator, &row);
                             }
                         }
@@ -3576,51 +2973,6 @@ mod measurements {
                 }
             }
         }
-    }
-
-    /// 训练一组能过门控的 G 仿射 + CSR 回归评估器, 把 `AffineCalibration` /
-    /// `Regression` 那条路也拉进测量 —— 它今天不在产品路径上 (`solve` 用空评估器),
-    /// 但 `solve_with_evaluators` 是公开 API, `predict.rs` 就是为接上它写的.
-    fn trained_evaluators() -> EvaluatorSet {
-        let g_observations: Vec<GObservation> = (0..40)
-            .map(|index| {
-                let g_linear = 60.0 + f64::from(index) * 0.8;
-                GObservation {
-                    g_linear,
-                    g_measured: 0.9 * g_linear + 4.0,
-                }
-            })
-            .collect();
-        let csr_observations: Vec<CsrObservation> = (0..40)
-            .map(|index| {
-                let t = f64::from(index);
-                let s = 0.5 + (t * 0.7).sin().abs() * 3.0;
-                let a = 6.0 + (t * 1.3).cos().abs() * 8.0;
-                let v = 18.0 + (t * 0.5 + 1.0).sin().abs() * 16.0;
-                let g = 65.0 + (t * 0.9).cos().abs() * 28.0;
-                let y = 9.0 + (t * 1.7).sin().abs() * 11.0;
-                let m = 8.0 + (t * 0.3 + 0.5).cos().abs() * 16.0;
-                CsrObservation {
-                    s,
-                    a,
-                    v,
-                    g,
-                    y,
-                    m,
-                    csr_measured: 30.0 + s + 0.5 * a + 0.8 * v + 0.3 * g + 0.6 * y + 0.4 * m,
-                }
-            })
-            .collect();
-        let policy = ModelPolicy {
-            min_g_samples: 8,
-            min_csr_samples: 8,
-            max_g_cv_mae: 5.0,
-            max_csr_cv_mae: 5.0,
-            extrapolation_ratio: 1.0,
-            ..ModelPolicy::default()
-        };
-        EvaluatorSet::train(&g_observations, &csr_observations, &policy)
-            .expect("测量用评估器应能训练")
     }
 
     #[test]
@@ -3644,81 +2996,33 @@ mod measurements {
             Spec::lower("G", 85.0),
         ];
 
-        // —— 线性行: 今天产品路径上的全部 Hard 行 (空评估器).
-        let plain = EvaluatorSet::default();
+        // 线性行: 产品路径上的全部 Hard 行.
         let mut linear = Accumulators::new();
-        sweep(
-            "verified4",
-            &verified,
-            &contract,
-            &plain,
-            0.01,
-            200,
-            &mut linear,
-        );
-        sweep(
-            "real4",
-            &real,
-            &real_contract,
-            &plain,
-            0.01,
-            200,
-            &mut linear,
-        );
-        sweep("wide", &wide, &contract, &plain, 0.03, 120, &mut linear);
-        linear.report("【线性行】formula_for 的加权平均 —— 今天 solve() 走的就是这条");
-
-        // —— 仿射 / 回归行: G 的 AffineCalibration 与 CSR 的 Regression.
-        let models = trained_evaluators();
-        println!(
-            "\n评估器状态: G 校准 {}, CSR 回归 {}",
-            if models.g.is_some() {
-                "已启用"
-            } else {
-                "未启用"
-            },
-            if models.csr.is_some() {
-                "已启用"
-            } else {
-                "未启用"
-            },
-        );
-        let mut modelled = Accumulators::new();
-        sweep(
-            "verified4",
-            &verified,
-            &contract,
-            &models,
-            0.01,
-            200,
-            &mut modelled,
-        );
-        sweep("wide", &wide, &contract, &models, 0.03, 120, &mut modelled);
-        modelled.report("【仿射/回归行】solve_with_evaluators —— predict.rs 接上后即产品路径");
+        sweep("verified4", &verified, &contract, 0.01, 200, &mut linear);
+        sweep("real4", &real, &real_contract, 0.01, 200, &mut linear);
+        sweep("wide", &wide, &contract, 0.03, 120, &mut linear);
+        linear.report("【线性行】formula_for 的加权平均 —— solve() 走的就是这条");
 
         println!("\n对照: 放行量 / 化验 0.01 —— 这个比值越小越安全, 它是合同界被放宽的真实幅度.");
 
-        // 断言只管"测量确实跑到了", 不断言任何 master 内容.
-        // **每条路径都要断言**: 只盯线性那一条的话, 仿射/回归全 ⚠ 零样本时测试照样绿,
-        // 而零样本正是最该让人停下来的情形.
-        for (label, accumulators) in [("线性行", &linear), ("仿射/回归行", &modelled)] {
-            for (metric, extremum) in [
-                ("residual/(1+复核量级)", &accumulators.accept_ratio),
-                ("复核量级/LP 行量级", &accumulators.magnitude_ratio),
-                (
-                    "顶界行的复核量级/LP 行量级",
-                    &accumulators.magnitude_ratio_binding,
-                ),
-                ("residual/(1+LP 行量级)", &accumulators.lp_ratio),
-                ("绝对残差", &accumulators.residual_abs),
-                ("复核侧放行量", &accumulators.allowance),
-                ("LP 侧放行量", &accumulators.lp_allowance),
-            ] {
-                assert!(
-                    extremum.best.is_some(),
-                    "{label} 的 {metric} 0 样本: 测量没跑到, 不是测出来是 0"
-                );
-            }
+        // 断言只管"测量确实跑到了", 不断言任何 master 内容: 全 ⚠ 零样本时测试照样绿的话,
+        // 最该让人停下来的情形就漏过去了.
+        for (metric, extremum) in [
+            ("residual/(1+复核量级)", &linear.accept_ratio),
+            ("复核量级/LP 行量级", &linear.magnitude_ratio),
+            (
+                "顶界行的复核量级/LP 行量级",
+                &linear.magnitude_ratio_binding,
+            ),
+            ("residual/(1+LP 行量级)", &linear.lp_ratio),
+            ("绝对残差", &linear.residual_abs),
+            ("复核侧放行量", &linear.allowance),
+            ("LP 侧放行量", &linear.lp_allowance),
+        ] {
+            assert!(
+                extremum.best.is_some(),
+                "线性行的 {metric} 0 样本: 测量没跑到, 不是测出来是 0"
+            );
         }
     }
 }

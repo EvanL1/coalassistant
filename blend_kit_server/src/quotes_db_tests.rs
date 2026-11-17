@@ -257,7 +257,6 @@ fn mcp_context() -> crate::mcp::Context {
             user_coals: json!([]),
             shovel_tons: None,
         },
-        market_price: None,
         benchmarks: vec![
             json!({"name": "焦煤基准", "coal_type": "焦煤", "props": {"S": 1.3},
                                 "price": 2000.0, "date": "2026-11-01"}),

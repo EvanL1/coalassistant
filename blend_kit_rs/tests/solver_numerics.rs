@@ -184,3 +184,55 @@ fn test_numerical_failure_with_diagnosis_reports_conflict() {
         );
     }
 }
+
+/// LP 有解、那个解却没过解后的合同复核, 逐项诊断又指认不出哪条约束够不到: 合同与煤池
+/// 并没有被证实冲突, 不能说成"约束冲突" —— 用户照着"冲突"去放宽合同是白费劲. 要如实说
+/// 没算出可靠结论, 置 `undetermined`, 一项都不指认.
+///
+/// fixture 是一份有配方达标的合同 (界就是照 煤1:煤2:煤4 = 12:1:7 定的), 焦炭强度按 6 位
+/// 小数四舍五入判定: 格子细到与求解器残差同量级, 放行量被封在 1/16 格, 比 LP 自己那一行
+/// 的放行量紧, LP 认下的解过不了体检. 现状是如实报没算出结论; 哪天求解器能把它解出来,
+/// 这条测试照样通过.
+#[test]
+fn test_postcheck_failure_is_undetermined_and_names_nobody() {
+    let request = load(include_str!("fixtures/postcheck_fine_grid.json"));
+    let mut planted = request.clone();
+    planted.fixed_ratios = Some(
+        [("煤1", 12.0), ("煤2", 1.0), ("煤4", 7.0)]
+            .into_iter()
+            .map(|(name, share)| (name.to_string(), share))
+            .collect(),
+    );
+    let review = solve(&planted);
+    assert!(review.ok, "{:?}", review.reason);
+    assert!(
+        review
+            .indicator_check
+            .iter()
+            .all(|check| check.status != EvaluationStatus::Fail),
+        "fixture 的预埋配方应按合同达标"
+    );
+
+    let result = solve(&request);
+    assert_ne!(
+        result.reason.as_deref(),
+        Some(CONFLICT),
+        "有配方达标的合同不许说成约束冲突"
+    );
+    if result.ok {
+        assert_recipe_passes_review(&request, &result);
+        return;
+    }
+    assert!(result.undetermined, "合同可行与否未经证实");
+    assert!(
+        result.infeasible_bounds.is_empty(),
+        "没有哪条约束够不到, 不许指认: {:?}",
+        result.infeasible_bounds
+    );
+    let reason = result.reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("无法判定"), "{reason}");
+    // 卡在解后复核时, 要说清是哪一项没过.
+    if reason.contains("解后复核") {
+        assert!(reason.contains(label_zh("CSR")), "{reason}");
+    }
+}

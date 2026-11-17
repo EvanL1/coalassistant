@@ -53,10 +53,6 @@ pub struct Coal {
     pub fob: f64,
     /// 运费 (FRT), 元/吨.
     pub frt: f64,
-    /// 可选煤岩数据 (MT/T 507 化验单: 反射率直方图 + 镜质组含量).
-    /// 提供时: 混煤 σ 走直方图精确计算; props 缺 petro 标量时自动用直方图 σ 补齐.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub petrography: Option<crate::petrography::Petrography>,
     /// 该煤采购合同条款. None = 按报价原值, 不做买入侧修正.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purchase_terms: Option<PurchaseTerms>,
@@ -139,6 +135,10 @@ pub struct PenaltyTier {
 pub struct Penalty {
     pub tiers: Vec<PenaltyTier>,
     /// 拒收线: 越过即硬不可行. Upper 向是上限, Lower 向是下限.
+    ///
+    /// 卖出侧 (`Spec`) 的拒收线与合同界按同一条判定规则判: 判定值 (按该项规则截断 /
+    /// 四舍五入后的值) 越过它才算越线, 求解与体检是同一条线. 买入侧 (`PurchaseClause`)
+    /// 没有判定规则, 拿煤的化验原值直接比.
     pub reject: f64,
 }
 
@@ -286,34 +286,16 @@ impl Spec {
     }
 }
 
-/// 一次混煤的线性 G 代理与实测 G 对照.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GObservation {
-    pub g_linear: f64,
-    pub g_measured: f64,
-}
-
-/// 可选评估器的启用门槛. 样本数只是底线，最终门控使用交叉验证误差.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+/// 实测 CSR 回归的样本门槛: 样本数到了, 后台「CSR 模型」状态页才去拟合、显示拟合优度.
+#[derive(Debug, Clone)]
 pub struct ModelPolicy {
-    pub min_g_samples: usize,
     pub min_csr_samples: usize,
-    pub max_g_cv_mae: f64,
-    pub max_csr_cv_mae: f64,
-    pub extrapolation_ratio: f64,
-    pub ridge_lambda: f64,
 }
 
 impl Default for ModelPolicy {
     fn default() -> Self {
         Self {
-            min_g_samples: 20,
             min_csr_samples: 30,
-            max_g_cv_mae: 4.0,
-            max_csr_cv_mae: 5.0,
-            extrapolation_ratio: 0.1,
-            ridge_lambda: 1e-3,
         }
     }
 }
@@ -374,7 +356,7 @@ fn default_swing_range() -> f64 {
 
 /// 煤阶交互: CSR配 = Σxᵢ·CSRᵢ − k·D, D = 配比加权的煤阶 (镜质组反射率 Ro) 方差.
 /// 两种煤煤阶差得越远、比例越接近对半, D 越大 —— 表达"单做各 65、双做降到 60".
-/// Ro 优先取煤岩数据的均值, 没有时由挥发换算 (见 `rank_interaction` 模块).
+/// Ro 由挥发换算 (见 `rank_interaction` 模块).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RankInteraction {
     /// 交互强度 (CSR / %²). 须 ≥ 0; 文献无现成值, 要用本厂实测标定.
@@ -743,23 +725,29 @@ pub struct IndicatorCheck {
     /// 是否 binding (顶格): slack 接近 0 且非负.
     /// binding 集合是谈判方向的逆向归因依据.
     pub binding: bool,
-    /// LP 使用的线性代理值.
+    /// 简单加权值 Σxᵢ·vᵢ. 与 `value` 是同一个量, 只差"除以 Σ配比"那一步的浮点末位;
+    /// 保留是为了不改输出形状.
     pub proxy_value: Option<f64>,
-    /// 经可选评估器修正后的值. `value` 保留为同值以兼容旧调用方.
+    /// 与 `value` 同值 (算不出时为 None); 保留是为了不改输出形状.
     pub evaluated_value: Option<f64>,
     /// 按合同截断/四舍五入规则得到的判定值.
     pub judged_value: Option<f64>,
-    /// 模型的 P90 绝对误差；无已验证模型时为 None.
+    /// 恒为 None; 保留是为了不改输出形状.
     pub uncertainty: Option<f64>,
+    /// 现在只会是 `Linear` (硫/灰/水分, 可精确复算)、`ProvisionalLinear` (其余, 线性估算)
+    /// 或 `Unavailable` (算不出).
     #[serde(default)]
     pub method: EvaluationMethod,
     #[serde(default)]
     pub status: EvaluationStatus,
+    /// 恒为 None; 保留是为了不改输出形状.
     pub model: Option<ModelSummary>,
     /// 本项卖出侧扣款, 元/吨. 非计价指标为 None.
     pub penalty_per_ton: Option<f64>,
 }
 
+/// 体检行的算法. `AffineCalibration` / `Histogram` / `Moments` / `Regression` 现在不会再
+/// 产出 (对应的评估器与精确岩相已删), 留着是为了读得回以前存下的结果.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EvaluationMethod {
     #[default]
@@ -789,12 +777,14 @@ pub enum QualityStatus {
     NeedsReview,
 }
 
+/// 现在不会再产出 ([`IndicatorCheck::model`] 恒为 None), 留着是为了读得回以前存下的结果.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ModelKind {
     GAffine,
     CsrRidge,
 }
 
+/// 现在不会再产出 ([`IndicatorCheck::model`] 恒为 None), 留着是为了读得回以前存下的结果.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSummary {
     pub version: String,
@@ -804,25 +794,6 @@ pub struct ModelSummary {
     pub p90_abs_error: f64,
     pub bias: f64,
     pub in_domain: bool,
-}
-
-/// 岩相校验 (视图 C 补充): 按直方图或 μ/σ 计算的混煤反射率分布指标.
-/// 只有参配煤全部带有效煤岩输入时才产出；与 indicator_check 里的线性代理值
-/// (Σx·σ_j) 不同，这里的 sigma 含 μ 离散贡献 (全方差定律).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PetrographyCheck {
-    /// 混煤反射率均值.
-    pub mean: f64,
-    /// 混煤反射率标准差 (精确值).
-    pub sigma: f64,
-    /// 合同 σ 上限 (petro spec 的 max). 无约束时 None.
-    pub sigma_max: Option<f64>,
-    /// σ 是否满足上限. 无约束时 None.
-    pub sigma_ok: Option<bool>,
-    /// 主焦区间 (1.2~1.5) 凹口. None = 无凹口.
-    pub notch: Option<crate::petrography::Notch>,
-    /// 线性代理收紧迭代次数 (0 = 一次通过).
-    pub refine_iterations: usize,
 }
 
 /// 不可行时的逐项诊断: 其余约束都成立的前提下, 该指标最好能做到多少.
@@ -867,10 +838,12 @@ pub struct InfeasibleBound {
     /// 认不认就取决于 LP 相对容限与解后复核绝对容限谁松谁紧 —— 实测同一单 11.3 不认、
     /// 11.4 认. 所以 core 逐档真解一遍, 这里给的是**真解得出配方**的那一档.
     ///
+    /// 三, 真解要按用户实际走的那条流程: 开了煤阶交互、按整铲配的请求, 给的数是带着这两样
+    /// 解得出的 (`optimizer::confirm_relax_targets`), 不是在拿掉它们之后的简化问题上解得出的.
+    ///
     /// 换言之它回答的是"我该往合同里填几", 不是"数学下限是几"; 两者可能差一档.
     ///
-    /// `None` = 逐档试下来没有一个档位真能解出配方 (放宽这一项是必要的, 但不够 ——
-    /// 譬如 LP 通了却卡在岩相精确复核). **宁可给 None, 也不给一个没试过的数**:
+    /// `None` = 逐档试下来没有一个档位真能解出配方. **宁可给 None, 也不给一个没试过的数**:
     /// 界面照着它承诺"改成这个数就能解出来", 给不出就得说给不出.
     #[serde(default)]
     pub relax_to: Option<f64>,
@@ -899,15 +872,12 @@ pub struct BlendResult {
     pub orders: Vec<OrderItem>,
     /// 视图 C (按 INDICATORS 顺序).
     pub indicator_check: Vec<IndicatorCheck>,
-    /// 岩相精确校验. 参配煤缺煤岩数据时为 None.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub petrography_check: Option<PetrographyCheck>,
     /// 容错过程中的警告.
     pub warnings: Vec<String>,
     /// 求解成功与质量可信度分离: ok=true 仍可能是 Estimated/NeedsReview.
     #[serde(default)]
     pub quality_status: QualityStatus,
-    /// 求解后评估和修复的重算次数.
+    /// 恒为 0; 保留是为了不改输出形状.
     #[serde(default)]
     pub evaluation_iterations: usize,
     /// 捣固炼焦 CSR 估算 ([`crate::predict::csr_stamp_charging`]), 由本结果体检里的
@@ -952,7 +922,6 @@ impl BlendResult {
             cost: None,
             orders: Vec::new(),
             indicator_check: Vec::new(),
-            petrography_check: None,
             warnings,
             quality_status: QualityStatus::NeedsReview,
             evaluation_iterations: 0,

@@ -226,6 +226,8 @@ struct PlantedSlot {
     rule: Rule,
     slack_low: u8,
     slack_high: u8,
+    /// 允许偏差 (只对单独写了截断 / 四舍五入规则的单侧项生效).
+    tolerance: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -240,14 +242,24 @@ struct PlantedCase {
 fn planted_slot(max_slack: u8) -> impl Strategy<Value = PlantedSlot> {
     // 一半顶格: 顶格的合同才考得到判定边缘.
     let slack = move || prop_oneof![1 => Just(0u8), 1 => 0..=max_slack];
-    (prop::bool::weighted(0.6), rule(), slack(), slack()).prop_map(
-        |(on, rule, slack_low, slack_high)| PlantedSlot {
+    // 一半带 "允许偏差": 界 ± 偏差算出来常带浮点零头 (0.7 + 0.1 = 0.7999999999999999),
+    // 求解与判定必须对这条线有同一个读法.
+    let tolerance =
+        || prop_oneof![3 => Just(0.0), 1 => Just(0.01), 1 => Just(0.05), 1 => Just(0.1)];
+    (
+        prop::bool::weighted(0.6),
+        rule(),
+        slack(),
+        slack(),
+        tolerance(),
+    )
+        .prop_map(|(on, rule, slack_low, slack_high, tolerance)| PlantedSlot {
             on,
             rule,
             slack_low,
             slack_high,
-        },
-    )
+            tolerance,
+        })
 }
 
 fn planted_case(max_slack: u8) -> impl Strategy<Value = PlantedCase> {
@@ -319,6 +331,7 @@ fn plant(case: &PlantedCase) -> Planted {
         let value = mixed(indicator);
         let (mode, decimals) = slot.rule.resolve(case.truncate_decimal);
         let (low, high) = (f64::from(slot.slack_low), f64::from(slot.slack_high));
+        let mut tolerance = 0.0;
         let (minimum, maximum) = if mode == AcceptanceMode::Raw {
             // 按原值判定没有格子: 界就是混合值本身, 松动按 0.01 一步.
             (value - low * 0.01, value + high * 0.01)
@@ -333,14 +346,25 @@ fn plant(case: &PlantedCase) -> Planted {
             if *direction != Direction::Lower && value >= line - BUFFER_CELLS / scale {
                 buffered.push(*indicator);
             }
-            ((cell - low) / scale, (cell + high) / scale)
+            // 带允许偏差时把界往里挪一个偏差: 合同认可的最后一格不变 (仍是预埋解所在的那一格再加松动),
+            // 预埋解照样顶在判定边缘上. 区间项不带偏差 —— 上下限各挪一个偏差可能交叉.
+            let shift = if slot.rule.acceptance().is_some() && *direction != Direction::Range {
+                slot.tolerance
+            } else {
+                0.0
+            };
+            tolerance = shift;
+            ((cell - low) / scale + shift, (cell + high) / scale - shift)
         };
         let mut spec = match direction {
             Direction::Upper => Spec::upper(indicator, maximum),
             Direction::Lower => Spec::lower(indicator, minimum),
             Direction::Range => Spec::range(indicator, minimum, maximum),
         };
-        spec.acceptance = slot.rule.acceptance();
+        spec.acceptance = slot
+            .rule
+            .acceptance()
+            .map(|rule| AcceptanceRule { tolerance, ..rule });
         specs.push(spec);
     }
 
@@ -639,6 +663,7 @@ fn test_sliver_thin_contract_is_never_called_conflict() {
         rule,
         slack_low: 0,
         slack_high: 0,
+        tolerance: 0.0,
     };
     let planted = plant(&PlantedCase {
         pool,
@@ -1232,4 +1257,264 @@ fn p7_reported_conflict_has_no_feasible_ratios() {
         probes.get()
     );
     assert!(cases < 100 || conflicts.get() > 0, "应有报冲突的例子");
+}
+
+/// P8 的输入: 煤池 + 一条计价项, 可选安全余量 / 采购量与一铲吨数.
+#[derive(Debug, Clone)]
+struct PricedCase {
+    pool: Vec<Assay>,
+    truncate_decimal: bool,
+    /// 计价的是 `PRICED_SLOTS` 的第几项.
+    slot: usize,
+    rule: Rule,
+    /// 合同界落在煤池该指标最小值到最大值之间的百分之几.
+    position: u32,
+    /// 拒收线在合同界外多远 (百分之一).
+    gap: i32,
+    /// 超合同界每单位扣多少 (元/吨).
+    rate: f64,
+    margin: Option<f64>,
+    /// 采购量 (百吨) 与一铲吨数.
+    shovel: Option<(u32, f64)>,
+}
+
+/// 可以计价的五项 (区间型的挥发分不支持计价).
+const PRICED_SLOTS: [(&str, Direction); 5] = [
+    ("S", Direction::Upper),
+    ("A", Direction::Upper),
+    ("G", Direction::Lower),
+    ("Y", Direction::Lower),
+    ("CSR", Direction::Lower),
+];
+
+fn priced_case() -> impl Strategy<Value = PricedCase> {
+    (
+        pool(),
+        prop::bool::weighted(0.7),
+        0..PRICED_SLOTS.len(),
+        rule(),
+        0..=100u32,
+        0..=300i32,
+        // 扣款率低, 便宜的差煤才划算, 配方才会顶到拒收线上.
+        1..=60u32,
+        prop::option::weighted(0.3, hundredths(0, 30)),
+        prop::option::weighted(0.3, (1..=50u32, shovel_size())),
+    )
+        .prop_map(
+            |(pool, truncate_decimal, slot, rule, position, gap, rate, margin, shovel)| {
+                PricedCase {
+                    pool,
+                    truncate_decimal,
+                    slot,
+                    rule,
+                    position,
+                    gap,
+                    rate: f64::from(rate),
+                    margin,
+                    shovel,
+                }
+            },
+        )
+}
+
+/// 合同界取在煤池里, 拒收线在界外 `gap`. 两个数都是"整数百分之一再除回去" ——
+/// 合同上的数字是十进制小数, 用浮点加减凑出来的界会带末位误差, 那不是合同上会有的数.
+fn priced_request(case: &PricedCase) -> (BlendRequest, &'static str, f64) {
+    let (indicator, direction) = PRICED_SLOTS[case.slot];
+    let coals = coals_of(&case.pool);
+    let values = || coals.iter().map(|coal| coal.props[indicator]);
+    let (low, high) = (
+        values().fold(f64::INFINITY, f64::min),
+        values().fold(f64::NEG_INFINITY, f64::max),
+    );
+    let bound = ((low + (high - low) * f64::from(case.position) / 100.0) * 100.0).round() as i32;
+    let reject = match direction {
+        Direction::Lower => (bound - case.gap).max(0),
+        _ => bound + case.gap,
+    };
+    let (bound, reject) = (f64::from(bound) / 100.0, f64::from(reject) / 100.0);
+    let mut spec = match direction {
+        Direction::Lower => Spec::lower(indicator, bound),
+        _ => Spec::upper(indicator, bound),
+    };
+    spec.enforcement = Enforcement::Priced;
+    spec.penalty = Some(Penalty {
+        tiers: vec![PenaltyTier {
+            width: None,
+            rate: case.rate,
+        }],
+        reject,
+    });
+    spec.acceptance = case.rule.acceptance();
+    spec.margin = case.margin;
+    let mut request = plain_request(coals, vec![spec], case.truncate_decimal);
+    if let Some((hundreds, tons)) = case.shovel {
+        request.total_quantity = Some(f64::from(hundreds) * 100.0);
+        request.shovel_tons = Some(tons);
+    }
+    (request, indicator, reject)
+}
+
+/// P8 计价项: 求解给出的配方, 自己的体检不判越过拒收线; 当验算配比回放, 也不判越线.
+///
+/// 拒收线和合同界一样按合同的判定规则判 (判定值越过才算越线). 求解的悬崖行与体检用的
+/// 不是同一条线时, 求解会给出体检不认的配方: 默认的截断规则下配方顶在拒收线那一格里,
+/// 原值高出拒收线不到一格, 体检若拿原值比就判越线, 正确的配方被盖上"需要复核".
+#[test]
+fn p8_priced_recipe_stays_within_the_reject_line_on_replay() {
+    let (solved, in_reject_cell) = (Cell::new(0u32), Cell::new(0u32));
+    let cases = run(CASES_REPLAY, &priced_case(), |case| {
+        let (request, indicator, reject) = priced_request(&case);
+        let result = solve(&request);
+        if !result.ok {
+            return Ok(());
+        }
+        solved.set(solved.get() + 1);
+        let status = |result: &BlendResult| {
+            result
+                .indicator_check
+                .iter()
+                .find(|check| check.indicator == indicator)
+                .map(|check| (check.status, check.value, check.judged_value))
+        };
+        let Some((verdict, value, judged)) = status(&result) else {
+            return Err(TestCaseError::fail("体检应包含计价指标"));
+        };
+        prop_assert!(
+            verdict != EvaluationStatus::Fail,
+            "求解给出的配方被自己的体检判越过拒收线 {reject}: 原值 {value} 判定值 {judged:?}\n{}",
+            to_json(&request)
+        );
+        prop_assert!(
+            result.quality_status != QualityStatus::NeedsReview,
+            "求解给出的配方被盖上需要复核\n{}",
+            to_json(&request)
+        );
+        // 原值在拒收线外、判定值在线内: 这些例子才考得到"两边是不是同一条线".
+        let beyond_raw = match PRICED_SLOTS[case.slot].1 {
+            Direction::Lower => value < reject - 1e-6,
+            _ => value > reject + 1e-6,
+        };
+        if beyond_raw {
+            in_reject_cell.set(in_reject_cell.get() + 1);
+        }
+
+        let replayed = evaluate(&request, result.recipe.clone());
+        prop_assert!(
+            replayed.ok,
+            "回放出错: {:?}\n{}",
+            replayed.reason,
+            to_json(&request)
+        );
+        let Some((replayed_verdict, replayed_value, replayed_judged)) = status(&replayed) else {
+            return Err(TestCaseError::fail("回放的体检应包含计价指标"));
+        };
+        prop_assert!(
+            replayed_verdict != EvaluationStatus::Fail,
+            "照输出的配方 {:?} 回放, 判越过拒收线 {reject}: 原值 {replayed_value} 判定值 {replayed_judged:?}\n{}",
+            result.recipe,
+            to_json(&request)
+        );
+        // 不要求两边的总体结论逐字相同: 输出配方截掉了求解残差那点零头, 顶在合同界上的
+        // 计价项回放后可能刚好落到界外一丝 (多出几厘扣款), 状态从"界内"变成"计价带内".
+        // 那不是越线; 这里只钉不许变成需要复核.
+        prop_assert!(
+            replayed.quality_status != QualityStatus::NeedsReview,
+            "照输出的配方回放, 被盖上需要复核\n{}",
+            to_json(&request)
+        );
+        let (cost, replayed_cost) = (net_cost(&result), net_cost(&replayed));
+        prop_assert!(
+            (cost - replayed_cost).abs() <= 1e-3 * (1.0 + cost.abs()),
+            "回放成本 {replayed_cost} 与求解成本 {cost} 对不上\n{}",
+            to_json(&request)
+        );
+        Ok(())
+    });
+    eprintln!(
+        "P8: {cases} 例, 解出并回放 {} 例, 其中原值在拒收线外而判定值在线内 {} 例",
+        solved.get(),
+        in_reject_cell.get()
+    );
+    assert!(cases < 100 || solved.get() * 2 > cases, "解出的例子太少");
+    assert!(
+        cases < 1000 || in_reject_cell.get() > 0,
+        "应有配方顶在拒收线那一格里的例子"
+    );
+}
+
+/// P9 每例: 一次求解, 报出放宽建议时每条建议再解一次.
+const CASES_RELAX: u32 = 1500;
+
+/// P9 给出的放宽建议照着改, 必须真的解得出配方.
+///
+/// 不可行时逐项诊断里的 `relax_to` 是在对用户说 "合同上这一项改成这个数就能配出来"。
+/// 这句话要按用户实际走的那条流程兑现: 开了煤阶交互、按整铲配的请求, 照着改完重新求解
+/// 也得有配方 —— 不能只在拿掉这两样之后的简化问题上成立。说不出该填几就给 None, 不给假数。
+#[test]
+fn p9_relax_to_solves_when_applied() {
+    let (advised, with_rank, with_shovel) = (Cell::new(0u32), Cell::new(0u32), Cell::new(0u32));
+    let strategy = (
+        random_case(),
+        prop::sample::select(vec![0.0, 0.0, 10.0, 30.0, 66.0]),
+        prop::option::weighted(0.3, (1..=50u32, shovel_size())),
+    );
+    let cases = run(CASES_RELAX, &strategy, |(case, k, shovel)| {
+        let mut request = random_request(&case);
+        if k > 0.0 {
+            request.rank_interaction = Some(RankInteraction { k });
+        }
+        if let Some((hundreds, tons)) = shovel {
+            request.total_quantity = Some(f64::from(hundreds) * 100.0);
+            request.shovel_tons = Some(tons);
+        }
+        let result = solve(&request);
+        if result.ok {
+            return Ok(());
+        }
+        for bound in &result.infeasible_bounds {
+            let Some(relax_to) = bound.relax_to else {
+                continue;
+            };
+            advised.set(advised.get() + 1);
+            if k > 0.0 {
+                with_rank.set(with_rank.get() + 1);
+            }
+            if shovel.is_some() {
+                with_shovel.set(with_shovel.get() + 1);
+            }
+            let mut relaxed = request.clone();
+            for spec in relaxed
+                .specs
+                .iter_mut()
+                .filter(|spec| spec.enabled && spec.indicator == bound.indicator)
+            {
+                match bound.direction {
+                    Direction::Upper => spec.max = Some(relax_to),
+                    Direction::Lower => spec.min = Some(relax_to),
+                    Direction::Range => {}
+                }
+            }
+            let after = solve(&relaxed);
+            prop_assert!(
+                after.ok,
+                "建议把{}改成 {relax_to}, 照着改了仍解不出: {:?}\n{}",
+                bound.label_zh,
+                after.reason,
+                to_json(&request)
+            );
+        }
+        Ok(())
+    });
+    eprintln!(
+        "P9: {cases} 例, 给出放宽建议 {} 条, 其中开了煤阶交互 {} 条, 按整铲配 {} 条",
+        advised.get(),
+        with_rank.get(),
+        with_shovel.get()
+    );
+    assert!(cases < 100 || advised.get() > 0, "应有给出放宽建议的例子");
+    assert!(
+        cases < 1000 || (with_rank.get() > 0 && with_shovel.get() > 0),
+        "煤阶交互与整铲两条路都应覆盖到"
+    );
 }

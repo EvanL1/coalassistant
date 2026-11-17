@@ -3,13 +3,12 @@ import { currentContract, estimateRequest, loadPriceFactorWithStatus, quoteReque
 import { resolveCoal, toEstimateCoal } from "./resolvedCoal";
 import type { MasterPriceFactor } from "../types";
 
-const mocks = vi.hoisted(() => ({ benchmarks: vi.fn(), index: vi.fn() }));
+const mocks = vi.hoisted(() => ({ benchmarks: vi.fn() }));
 vi.mock("../benchmarks", async (original) => ({ ...(await original<typeof import("../benchmarks")>()), fetchBenchmarks: mocks.benchmarks }));
-vi.mock("../coal_index", () => ({ fetchLatestCoalIndex: mocks.index }));
 const resolvedA = resolveCoal({ name: "A", status: "verified", props: { S: 0.6 }, ...({ fob: 9999, frt: 999 } as object) }, null, "master");
 const resolvedB = resolveCoal({ name: "B", status: "verified", props: { S: 0.8 } }, null, "master");
 const base: BlendBase = { specs: [], totalQuantity: 900, shovelTons: 3, priceFactor: { adjusts: [] } };
-beforeEach(() => { vi.resetAllMocks(); mocks.benchmarks.mockResolvedValue([]); mocks.index.mockResolvedValue(1800); });
+beforeEach(() => { vi.resetAllMocks(); mocks.benchmarks.mockResolvedValue([]); });
 
 describe("请求拼装", () => {
   it("今日估价请求: 煤全在 extra_coals, 打开 estimate_unpriced", () => {
@@ -54,14 +53,16 @@ describe("请求拼装", () => {
     const { priceFactor: factor } = await loadPriceFactorWithStatus({ adjusts: [], description: "说明" } as MasterPriceFactor);
     expect(factor.benchmarks?.[0].current_price).toBe(2100);
     expect(factor).not.toHaveProperty("description");
-    expect(mocks.index).not.toHaveBeenCalled();
+    expect(factor).not.toHaveProperty("market_price");
   });
 
-  it("取不到当前基准用 master, 都没有才用指数", async () => {
+  it("取不到当前基准用 master; 都没有就不另找市场价, 只带 master 自己配的", async () => {
     const benchmark = { name: "默认", props: { S: 0.6 }, price: 2000, date: "2026-10-30" };
     expect((await loadPriceFactorWithStatus({ adjusts: [], benchmarks: [benchmark] })).priceFactor.benchmarks).toEqual([benchmark]);
-    expect(mocks.index).not.toHaveBeenCalled();
-    expect((await loadPriceFactorWithStatus({ adjusts: [] })).priceFactor.market_price).toBe(1800);
+    const bare = (await loadPriceFactorWithStatus({ adjusts: [] })).priceFactor;
+    expect(bare).not.toHaveProperty("benchmarks");
+    expect(bare).not.toHaveProperty("market_price");
+    expect((await loadPriceFactorWithStatus({ adjusts: [], market_price: 1800 })).priceFactor.market_price).toBe(1800);
   });
 
   it("基准报价取不到时退回内置基准并标出来, 取到了 (哪怕为空) 不标", async () => {

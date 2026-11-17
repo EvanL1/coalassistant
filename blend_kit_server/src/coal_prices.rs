@@ -18,9 +18,8 @@ use super::{
     bad_request, benchmarks, database_error, mcci, merged_master_json_from_pool, require_database,
     AppState,
 };
-use crate::coal_index::IndexPoint;
 use crate::forecast::{self, Forecast};
-use crate::mcci::beijing_day;
+use crate::mcci::{beijing_day, IndexPoint};
 use crate::today;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -162,14 +161,13 @@ fn project(
     benchmarks::BenchmarkInputs {
         stored: inputs.stored.clone(),
         history,
-        ccp: inputs.ccp.clone(),
     }
 }
 
 /// 每种煤一周后的估价 (预测的那天, 煤名 → 价): 指数各序列换成预测值, 按那天重新定基准 (旧报价
 /// 也随对应的指数推算过去), 再把全部煤重估一遍 —— 与今天的估价同一套口径, 只是指数往前走了一周.
 /// 当基准的序列只要有一条没有预测 (历史不够长、停更) 就整体不给: 不能一半基准在今天、一半在下周.
-/// 只能按 CCP 推算的旧报价 (指标没写全、又没有同煤种的序列) 没有预测可跟, 留在今天的水平.
+/// 没有序列能推算的旧报价 (指标没写全、又没有同煤种的序列) 本来就按原值, 一周后也还是原值.
 fn forecast_prices(
     master: &Value,
     inputs: &benchmarks::BenchmarkInputs,
@@ -300,7 +298,6 @@ fn latest_index(inputs: &benchmarks::BenchmarkInputs) -> Option<NaiveDate> {
         .max()
 }
 
-/// CCP 只用来推算涨跌, 单独定不出价, 不算输入.
 fn earliest_input(master: &Value, inputs: &benchmarks::BenchmarkInputs) -> Option<NaiveDate> {
     let quotes = master["price_factor"]["benchmarks"]
         .as_array()
@@ -372,7 +369,7 @@ fn backfill_rows(
 
 /// 输入齐全时的实时快照.
 const LIVE: &str = "live";
-/// 输入不全 (CCP 取不到、某条指数序列还没历史) 时的临时快照: 不覆盖当天已有的完整快照,
+/// 输入不全 (某条当基准的指数序列还没历史) 时的临时快照: 不覆盖当天已有的完整快照,
 /// 自己可被之后的实时快照或补算覆盖, 不会因过了零点就定格.
 const PARTIAL: &str = "partial";
 
@@ -477,12 +474,9 @@ async fn refresh(pool: &PgPool) -> Result<RefreshReport, String> {
     Ok(RefreshReport { gap, written })
 }
 
-/// 定价输入缺了什么: CCP 取不到 (空也算), 或某条当基准的指数序列 (`index_series`) 还没有历史.
+/// 定价输入缺了什么: 某条当基准的指数序列 (`index_series`) 还没有历史.
 /// 首次启动时指数逐条入库, 查询成功也可能还缺序列. None = 齐全.
 fn input_gap(master: &Value, inputs: &benchmarks::BenchmarkInputs) -> Option<String> {
-    if inputs.ccp.as_ref().is_none_or(Vec::is_empty) {
-        return Some("CCP 指数取不到, 推算缺一层".into());
-    }
     benchmark_series(master)
         .into_iter()
         .find(|code| inputs.history.get(*code).is_none_or(Vec::is_empty))
@@ -594,7 +588,7 @@ async fn insert_backfill(
     Ok(inserted)
 }
 
-/// 补齐 today 以前缺的 (日期, 煤). 输入读不全 (库表/指数读失败、CCP 取不到) 整轮不写:
+/// 补齐 today 以前缺的 (日期, 煤). 输入读不全 (库表/指数读失败、当基准的序列还没历史) 整轮不写:
 /// 补下去就定格了, 不能拿缺料的结果填.
 pub(crate) async fn backfill(pool: &PgPool, today: NaiveDate) -> Result<BackfillReport, String> {
     let master: Value = serde_json::from_str(&merged_master_json_from_pool(Some(pool)).await?)
@@ -805,7 +799,7 @@ mod db_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coal_index::IndexPoint;
+    use crate::mcci::IndexPoint;
     use serde_json::json;
 
     fn at(value: &str) -> DateTime<Utc> {
@@ -1013,13 +1007,11 @@ mod tests {
                     vec![point("2026-10-01"), point("2026-10-28")],
                 ),
             ]),
-            ccp: None,
         };
         assert_eq!(latest_index(&inputs), Some(d("2026-10-28")));
         let empty = benchmarks::BenchmarkInputs {
             stored: vec![],
             history: HashMap::new(),
-            ccp: None,
         };
         assert_eq!(latest_index(&empty), None);
     }
@@ -1045,7 +1037,6 @@ mod tests {
                     vec![point("2025-01-01"), point("2026-10-28")],
                 ),
             ]),
-            ccp: Some(vec![point("2026-10-01")]),
         };
         let kept = require_backfill_inputs(&master, inputs, None).unwrap();
         assert_eq!(kept.history.keys().collect::<Vec<_>>(), ["LJM_QM"]);
@@ -1055,7 +1046,6 @@ mod tests {
         let without_composite = benchmarks::BenchmarkInputs {
             stored: vec![],
             history: HashMap::from([("LJM_QM".to_string(), vec![point("2026-10-20")])]),
-            ccp: Some(vec![point("2026-10-01")]),
         };
         assert!(require_backfill_inputs(&master, without_composite, None).is_ok());
     }
@@ -1072,17 +1062,11 @@ mod tests {
                     price: 1.0,
                 }],
             )]),
-            ccp: Some(vec![IndexPoint {
-                date: "2024-01-01".into(),
-                price: 1.0,
-            }]),
         };
-        // CCP 单独定不出价, 不算输入.
         assert_eq!(earliest_input(&master, &inputs), Some(d("2025-10-27")));
         let empty = benchmarks::BenchmarkInputs {
             stored: vec![],
             history: HashMap::new(),
-            ccp: None,
         };
         assert_eq!(earliest_input(&json!({}), &empty), None);
     }
@@ -1121,7 +1105,6 @@ mod tests {
                                 "price": 2000.0, "date": "2026-10-03", "origin": "stored"}),
             ],
             history: HashMap::new(),
-            ccp: None,
         };
         let plan = vec![
             (d("2026-10-01"), BTreeSet::from(["主力".to_string()])), // 一个基准都没有: 跳过
@@ -1158,7 +1141,6 @@ mod tests {
             stored: vec![json!({"name": "基准", "props": {"Y": 20.0},
                                "price": 2000.0, "date": "2026-10-02"})],
             history: HashMap::new(),
-            ccp: None,
         };
         let plan = vec![
             (d("2026-10-01"), BTreeSet::from(["主力".to_string()])),
@@ -1175,28 +1157,20 @@ mod tests {
 
     #[test]
     fn test_backfill_requires_all_inputs_before_writing() {
-        let make_inputs = |ccp| benchmarks::BenchmarkInputs {
+        let inputs = || benchmarks::BenchmarkInputs {
             stored: vec![],
             history: HashMap::new(),
-            ccp,
-        };
-        let ccp = || {
-            Some(vec![IndexPoint {
-                date: "2026-10-01".into(),
-                price: 1900.0,
-            }])
         };
         for error in ["报价读取失败", "指数读取失败"] {
             assert_eq!(
-                require_backfill_inputs(&json!({}), make_inputs(ccp()), Some(error.into()))
+                require_backfill_inputs(&json!({}), inputs(), Some(error.into()))
                     .err()
                     .as_deref(),
                 Some(error)
             );
         }
-        assert!(require_backfill_inputs(&json!({}), make_inputs(None), None).is_err());
-        assert!(require_backfill_inputs(&json!({}), make_inputs(Some(vec![])), None).is_err());
-        assert!(require_backfill_inputs(&json!({}), make_inputs(ccp()), None).is_ok());
+        // 没配当基准的序列: 读库成功就算齐全 (只剩报价, 按原值补算).
+        assert!(require_backfill_inputs(&json!({}), inputs(), None).is_ok());
     }
 
     #[test]
@@ -1248,10 +1222,6 @@ mod tests {
                     }],
                 ),
             ]),
-            ccp: Some(vec![IndexPoint {
-                date: "2026-10-08".into(),
-                price: 1900.0,
-            }]),
         };
         (master, inputs)
     }
@@ -1286,15 +1256,10 @@ mod tests {
         assert_eq!(snapshot_source(None), LIVE);
 
         let (master, mut inputs) = backfill_index_fixture();
-        inputs.ccp = None;
-        let gap = input_gap(&master, &inputs).unwrap();
-        assert!(gap.contains("CCP"), "{gap}");
-        assert_eq!(snapshot_source(Some(&gap)), PARTIAL);
-
-        let (master, mut inputs) = backfill_index_fixture();
         inputs.history.remove("LJM_FM");
         let gap = input_gap(&master, &inputs).unwrap();
         assert!(gap.contains("LJM_FM"), "{gap}");
+        assert_eq!(snapshot_source(Some(&gap)), PARTIAL);
     }
 
     /// 一条当基准的指数 (规格与 "主力" 相同) + 一条只展示的综合指数, 最新一期 10-27.
@@ -1318,7 +1283,6 @@ mod tests {
                 ),
                 ("ZH".to_string(), vec![point("2026-10-27", 1500.0)]),
             ]),
-            ccp: None,
         };
         (master, inputs)
     }

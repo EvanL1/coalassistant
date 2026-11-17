@@ -8,7 +8,8 @@ fn master() -> Value {
         "default_contract": {"name": "默认合同", "specs": [
             {"indicator": "S", "direction": "Upper", "max": 2.0}
         ]},
-        "price_factor": {"description": "出处", "adjusts": []},
+        // 没有基准报价, 估价按煤库自带的市场价.
+        "price_factor": {"description": "出处", "adjusts": [], "market_price": 1907.0},
         "coals": [
             {"name": "甲", "status": "verified", "coal_type": "焦煤", "props": {"S": 1.0}},
             {"name": "乙", "status": "verified", "props": {"S": 0.5}},
@@ -47,10 +48,7 @@ fn saved_contract() -> Value {
 }
 
 fn market() -> Market {
-    Market {
-        benchmarks: Vec::new(),
-        market_price: Some(1907.0),
-    }
+    Market::default()
 }
 
 fn run(storage: &UserStorage, options: TodayOptions) -> Result<TodayRequest, String> {

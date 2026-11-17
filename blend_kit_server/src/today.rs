@@ -95,10 +95,8 @@ pub struct QuotedCoal {
 /// 估价用的市场数据.
 #[derive(Debug, Default)]
 pub struct Market {
-    /// 当前生效的基准报价 (分煤种, 带日期). 有就按它估价.
+    /// 当前生效的基准报价 (分煤种, 带日期). 有就按它估价; 没有就只剩煤库自带的 `market_price` (若配了).
     pub benchmarks: Vec<Value>,
-    /// 退路: 没有任何基准时的标准品价 (现货指数点位, 只当相对尺度).
-    pub market_price: Option<f64>,
 }
 
 /// 单煤在煤池里的状态, 与网页 `CoalReadiness` 一一对应.
@@ -601,9 +599,8 @@ pub fn build(
     }
     if !market.benchmarks.is_empty() {
         factor.insert("benchmarks".into(), json!(market.benchmarks));
-    } else if let Some(price) = market.market_price {
-        factor.insert("market_price".into(), json!(price));
     }
+    let has_market_price = factor.get("market_price").is_some_and(Value::is_number);
     let quoted = overrides::price_by_quotes(&pool, options, &mut request, &mut factor, &mut notes);
     if quoted.is_none() {
         factor.insert("extra_coals".into(), Value::Array(estimated));
@@ -632,8 +629,8 @@ pub fn build(
         notes.push("采购扣款模板只存在浏览器, 本次未计买入侧扣款".into());
     }
     // 询价精算按报价算, 首行已写明 "这次不比估算价", 不再重复说估不出.
-    if quoted.is_none() && market.benchmarks.is_empty() && market.market_price.is_none() {
-        notes.push("没有基准报价, 现货指数也取不到, 估不出煤价".into());
+    if quoted.is_none() && market.benchmarks.is_empty() && !has_market_price {
+        notes.push("没有基准报价, 估不出煤价".into());
     }
     let only = match (picked, &options.quotes) {
         (Some(keys), None) => overrides::candidate_names(&pool, keys, &excluded_keys),
@@ -727,10 +724,12 @@ mod tests {
         }
     }
 
-    fn index_only(price: f64) -> Market {
+    /// 只有一条基准报价 (标准品, 不分煤种) 的市场数据.
+    fn one_benchmark(price: f64) -> Market {
         Market {
-            benchmarks: Vec::new(),
-            market_price: Some(price),
+            benchmarks: vec![
+                json!({"name": "标准品", "props": {}, "price": price, "date": "2026-10-16"}),
+            ],
         }
     }
 
@@ -748,7 +747,7 @@ mod tests {
         let built = build(
             &master(),
             &storage(prefs),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &TodayOptions::default(),
         )
         .unwrap();
@@ -767,7 +766,8 @@ mod tests {
         // 与网页一致: 不做价格稳健性分析
         assert!(req.get("price_robustness").is_none());
         assert_eq!(req["price_factor"]["estimate_unpriced"], true);
-        assert_eq!(req["price_factor"]["market_price"], 1907.0);
+        assert_eq!(req["price_factor"]["benchmarks"][0]["price"], 1907.0);
+        assert!(req["price_factor"].get("market_price").is_none());
         assert!(req["price_factor"].get("description").is_none());
         assert_eq!(req["total_quantity"], 3700.0);
         // 没设过一铲吨数: 按默认 3 吨.
@@ -790,7 +790,7 @@ mod tests {
             let built = build(
                 &master,
                 &storage,
-                &index_only(1907.0),
+                &one_benchmark(1907.0),
                 &TodayOptions::default(),
             )
             .unwrap();
@@ -838,7 +838,7 @@ mod tests {
         assert_eq!(extra[0]["frt"], 0.0);
         assert_eq!(extra[0]["props"]["S"], 1.2);
         assert_eq!(built.request["total_quantity"], 100.0);
-        assert!(built.notes.iter().any(|n| n.contains("现货指数")));
+        assert!(built.notes.iter().any(|n| n.contains("估不出煤价")));
 
         let excluded = build(
             &master(),
@@ -859,7 +859,7 @@ mod tests {
         let built = build(
             &m,
             &storage(json!({})),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &TodayOptions::default(),
         );
         assert!(built.unwrap_err().contains("估价参数"));
@@ -875,7 +875,7 @@ mod tests {
         let built = build(
             &m,
             &storage(prefs),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &TodayOptions::default(),
         );
         // 有价与"有价 "重名整组排除, 无价覆盖的化验值非法 → 无煤可解
@@ -883,11 +883,10 @@ mod tests {
     }
 
     #[test]
-    fn test_benchmarks_replace_index_price() {
+    fn test_benchmarks_go_into_request() {
         let prefs = json!({"无价": {"enabled": true}});
         let market = Market {
             benchmarks: vec![json!({"name": "晋中中硫主焦", "price": 2050.0})],
-            market_price: Some(1907.0),
         };
         let built = build(
             &master(),
@@ -898,11 +897,35 @@ mod tests {
         .unwrap();
         let factor = &built.request["price_factor"];
         assert_eq!(factor["benchmarks"][0]["name"], "晋中中硫主焦");
-        assert!(
-            factor.get("market_price").is_none(),
-            "有基准就不用指数点当价"
-        );
-        assert!(built.notes.iter().all(|n| !n.contains("现货指数")));
+        assert!(factor.get("market_price").is_none(), "不另塞市场价");
+        assert!(built.notes.iter().all(|n| !n.contains("估不出煤价")));
+    }
+
+    /// 没有基准报价时只剩煤库自己配的 market_price: 照带给核心, 不报估不出价; 没配才报.
+    #[test]
+    fn test_master_market_price_is_the_only_fallback() {
+        let prefs = json!({"无价": {"enabled": true}});
+        let mut priced = master();
+        priced["price_factor"]["market_price"] = json!(1800.0);
+        let built = build(
+            &priced,
+            &storage(prefs.clone()),
+            &Market::default(),
+            &TodayOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(built.request["price_factor"]["market_price"], 1800.0);
+        assert!(built.notes.iter().all(|n| !n.contains("估不出煤价")));
+
+        let bare = build(
+            &master(),
+            &storage(prefs),
+            &Market::default(),
+            &TodayOptions::default(),
+        )
+        .unwrap();
+        assert!(bare.request["price_factor"].get("market_price").is_none());
+        assert!(bare.notes.iter().any(|n| n == "没有基准报价, 估不出煤价"));
     }
 
     #[test]
@@ -914,7 +937,7 @@ mod tests {
         let built = build(
             &master(),
             &s,
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &TodayOptions {
                 fixed_ratios: Some(ratios),
                 ..Default::default()
@@ -938,7 +961,7 @@ mod tests {
         let err = build(
             &m,
             &storage(json!({})),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &TodayOptions {
                 exclude: vec!["甲矿".into()],
                 ..Default::default()
@@ -955,7 +978,7 @@ mod tests {
         let err = build(
             &m,
             &storage(json!({})),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &TodayOptions {
                 exclude: vec!["有价".into(), "乙矿".into()],
                 ..Default::default()
@@ -977,7 +1000,7 @@ mod tests {
         let built = build(
             &m,
             &storage(json!({})),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &TodayOptions {
                 // 归一化后比较: 大小写、全角空格、首尾空格不算差别.
                 exclude: vec!["　有价 ".into(), "没启用".into()],
@@ -1006,7 +1029,7 @@ mod tests {
         let err = build(
             &master(),
             &storage(json!({})),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &TodayOptions {
                 fixed_ratios: Some(ratios),
                 ..Default::default()
@@ -1023,7 +1046,7 @@ mod tests {
         let err = build(
             &master(),
             &storage(json!({})),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &TodayOptions {
                 fixed_ratios: Some(ratios),
                 ..Default::default()
@@ -1055,7 +1078,7 @@ mod tests {
         let built = build(
             &m,
             &storage(json!({})),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &ratios_of(&[("abc ", 2.0), ("　有价", 1.0)]),
         )
         .unwrap();
@@ -1067,7 +1090,7 @@ mod tests {
         let err = build(
             &m,
             &storage(json!({})),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &ratios_of(&[("ABC", 1.0), ("abc", 1.0)]),
         )
         .unwrap_err();
@@ -1085,7 +1108,7 @@ mod tests {
         let err = build(
             &m,
             &storage(prefs),
-            &index_only(1907.0),
+            &one_benchmark(1907.0),
             &ratios_of(&[("停了", 1.0), ("无价", 1.0), ("有价", 1.0), ("没启用", 1.0)]),
         )
         .unwrap_err();
@@ -1155,7 +1178,12 @@ mod tests {
                 .filter(|(_, readiness)| readiness == "ready")
                 .map(|(name, _)| name.as_str())
                 .collect();
-            let built = build(&master, &s, &index_only(1907.0), &TodayOptions::default());
+            let built = build(
+                &master,
+                &s,
+                &one_benchmark(1907.0),
+                &TodayOptions::default(),
+            );
             if ready.is_empty() {
                 assert!(built.is_err(), "{label}: 没有可参与的煤应报错");
                 continue;

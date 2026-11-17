@@ -148,33 +148,6 @@ fn test_shovel_bigger_than_purchase_is_ignored_with_warning() {
 }
 
 #[test]
-fn test_rounding_rechecks_exact_petrography() {
-    // 7 铲. LP 解里 P2 占 21.7%, σ 0.192; 凑成 2 铲 (28.6%) 后真实 σ ≈ 0.214 越过 Hard 0.2
-    // (线性代理 Σxσ 看不出来). 必须按真实配比复核, 挪成 1 铲.
-    let req: BlendRequest = serde_json::from_value(serde_json::json!({
-        "coals": [
-            {"name": "P1", "props": {"S": 0.5, "A": 10, "V": 25, "G": 80, "Y": 18, "CSR": 65, "M": 9},
-             "fob": 1300, "frt": 0, "petrography": {"vitrinite_pct": 60, "mean": 1.0, "std_dev": 0.05}},
-            {"name": "P2", "props": {"S": 0.5, "A": 10, "V": 25, "G": 80, "Y": 18, "CSR": 65, "M": 9},
-             "fob": 1000, "frt": 0, "petrography": {"vitrinite_pct": 60, "mean": 1.3, "std_dev": 0.3}}
-        ],
-        "specs": [{"indicator": "petro", "direction": "Upper", "min": null, "max": 0.2}],
-        "total_quantity": 100,
-        "truncate_decimal": false,
-        "shovel_tons": 14.2857
-    }))
-    .unwrap();
-    let result = solve(&req);
-    assert!(result.ok, "{:?}", result.reason);
-    assert_eq!(shovels_of(&result, "P2"), Some(1));
-    assert_eq!(shovels_of(&result, "P1"), Some(6));
-    let petro = result.petrography_check.as_ref().expect("要有岩相精确复核");
-    assert!(petro.sigma <= 0.2, "σ {}", petro.sigma);
-    assert_eq!(petro.sigma_ok, Some(true));
-    assert!(result.warnings.iter().all(|w| !w.contains("验算模式")));
-}
-
-#[test]
 fn test_zero_min_ratio_does_not_block_dropping() {
     // min_ratios 里给 0 = 不限; 分支定界去掉这种煤时不能因为键还在而校验失败.
     let mut coals = tiny_fixer();

@@ -205,7 +205,6 @@ fn probe(benchmark: &Benchmark) -> Coal {
         props: benchmark.props.clone(),
         fob: 0.0,
         frt: 0.0,
-        petrography: None,
         purchase_terms: None,
         coal_type: benchmark.coal_type.clone(),
         form: benchmark.form.clone(),

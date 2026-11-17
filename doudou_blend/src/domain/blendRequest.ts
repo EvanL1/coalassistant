@@ -1,5 +1,4 @@
 import { fetchBenchmarks, solverPriceFactor, toRequestBenchmark } from "../benchmarks";
-import { fetchLatestCoalIndex } from "../coal_index";
 import type { Benchmark, BlendRequest, Coal, CoalMaster, IndicatorKey, MasterPriceFactor, PriceFactor, PurchaseTerms, Spec } from "../types";
 import { withoutUnusedBound } from "./contract";
 import { toEstimateCoal, type ResolvedCoal } from "./resolvedCoal";
@@ -34,8 +33,9 @@ export interface LoadedPriceFactor {
 }
 
 /**
- * 估价按基准报价 (分煤种、带报价日, 服务端已按现货指数推算到今天); 取不到就用 master 自带的
- * 默认基准. 两样都没有才退回现货指数点位当标准品价 (只是相对尺度). 系数表来自 master (数据不是代码).
+ * 估价按基准报价 (分煤种、带报价日; 旧报价服务端已按钢铁网指数推算到今天, 推算不了的按原值);
+ * 取不到就用 master 自带的默认基准. 两样都没有就只剩 master 价格因子自带的 market_price (若配了),
+ * 否则估不出价. 系数表来自 master (数据不是代码).
  */
 export async function loadPriceFactorWithStatus(
   priceFactor: MasterPriceFactor,
@@ -48,12 +48,10 @@ export async function loadPriceFactorWithStatus(
     benchmarksStale = true;
   }
   const benchmarks = fetched.length > 0 ? fetched : (priceFactor.benchmarks ?? []);
-  const marketPrice = benchmarks.length === 0 ? await fetchLatestCoalIndex() : null;
   return {
     priceFactor: {
       ...solverPriceFactor(priceFactor),
       ...(benchmarks.length > 0 ? { benchmarks } : {}),
-      ...(marketPrice != null ? { market_price: marketPrice } : {}),
     },
     benchmarksStale,
   };

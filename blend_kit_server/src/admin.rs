@@ -231,7 +231,6 @@ fn master_ranks(master_json: &str) -> HashMap<String, Option<f64>> {
                 props: entry.props,
                 fob: 0.0,
                 frt: 0.0,
-                petrography: None,
                 purchase_terms: None,
                 coal_type: entry.coal_type,
                 form: None,
@@ -270,7 +269,7 @@ fn calibration_point(
         }
         let rank = match ranks.get(name) {
             None => return Err(format!("煤库里找不到 {name}")),
-            Some(None) => return Err(format!("{name} 缺挥发和煤岩数据, 算不出煤阶")),
+            Some(None) => return Err(format!("{name} 缺挥发, 算不出煤阶")),
             Some(Some(rank)) => *rank,
         };
         parts.push((ratio, rank));

@@ -6,12 +6,12 @@
 //! 1. **最小量** (半连续变量): LP 解里不到一铲的煤, 要么去掉、要么提到一铲, 二选一.
 //!    分支定界: 子节点在父节点上去掉这种煤, 或给它加"至少一铲"的配比下限
 //!    (`min_ratios`) 再解. 先试去掉 (多数时候更便宜, 也最快找到一个可行解);
-//!    节点成本不低于已知最好解就剪掉. 纯 LP 下这是精确的 (子节点只会更受限); 开了岩相修复
-//!    或煤阶交互时重解带启发式迭代, 子节点成本不保证单调, 剪枝可能错过更便宜的组合.
+//!    节点成本不低于已知最好解就剪掉. 纯 LP 下这是精确的 (子节点只会更受限); 开了煤阶
+//!    交互时重解带启发式迭代, 子节点成本不保证单调, 剪枝可能错过更便宜的组合.
 //!    节点数有上限, 到了就用已找到的最好解.
-//! 2. **整铲**: 各煤铲数按最大余数法凑成合计 N (入选的煤至少 1 铲), 再按铲数验算, 岩相
-//!    按真实配比做精确复核. 凑整让某项超标或低于配比下限 (`min_ratios`) 时, 试着在两种煤
-//!    之间挪一铲, 取不超标里最便宜的.
+//! 2. **整铲**: 各煤铲数按最大余数法凑成合计 N (入选的煤至少 1 铲), 再按铲数验算.
+//!    凑整让某项超标或低于配比下限 (`min_ratios`) 时, 试着在两种煤之间挪一铲, 取不超标里
+//!    最便宜的.
 //! 3. **留余量重配**: 还是凑不成, 多半是配方顶在合同界上、一点余地都没有, 挪一铲就破.
 //!    给被凑整顶破的那几项留一点安全余量 (`Spec::margin`) 重新走 1、2 两步, 逐级加大,
 //!    新顶破的项也加进来; 凑整后的验算仍按原合同. 成功就如实说为此贵了多少;
@@ -22,9 +22,7 @@
 //! 会留在 recipe 里 (见 `optimizer::output_grain`), 在第 1 步被当成不到一铲的煤: 去掉或提到一铲.
 
 use crate::model::*;
-use crate::optimizer::{
-    finalize_quality_status, review_petrography, FIXED_PETRO_NOTE, MIN_RATIO_TOLERANCE,
-};
+use crate::optimizer::MIN_RATIO_TOLERANCE;
 use crate::quality::{acceptance_rule, quantum};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -281,13 +279,11 @@ fn failed(result: &BlendResult) -> HashSet<&str> {
         .collect()
 }
 
-/// 按铲数验算: 走验算路径出成本与体检, 再按真实配比做岩相精确复核 (验算路径只算线性代理,
-/// 而铲数少时一铲就是一大截, 不能沿用凑整前的复核).
+/// 按铲数验算: 走验算路径出成本与体检.
 fn evaluate(
     node: &BlendRequest,
     names: &[&String],
     counts: &[u32],
-    refine_iterations: usize,
     resolve: &Resolve,
 ) -> BlendResult {
     let shares: BTreeMap<String, f64> = names
@@ -315,29 +311,11 @@ fn evaluate(
     let mut trial = node.clone();
     trial.shovel_tons = None;
     trial.min_ratios.clear();
-    trial.fixed_ratios = Some(shares.clone());
+    trial.fixed_ratios = Some(shares);
     let mut result = resolve(&trial, false);
     if !result.ok {
         return result;
     }
-    result
-        .warnings
-        .retain(|warning| warning != FIXED_PETRO_NOTE);
-    let participating: Vec<(&Coal, f64)> = node
-        .coals
-        .iter()
-        .filter_map(|coal| Some((coal, shares.get(&coal.name)? / total)))
-        .collect();
-    let specs: Vec<&Spec> = node.specs.iter().filter(|spec| spec.enabled).collect();
-    let petro_spec = specs.iter().find(|spec| spec.indicator == "petro").copied();
-    review_petrography(
-        &mut result,
-        &participating,
-        petro_spec,
-        node.truncate_decimal,
-        refine_iterations,
-    );
-    finalize_quality_status(&mut result, &specs);
     for order in &mut result.orders {
         order.shovels = names
             .iter()
@@ -363,7 +341,7 @@ fn whole_shovels(node: &BlendRequest, lp: BlendResult, total: u32, resolve: &Res
     let mut names: Vec<&String> = lp.recipe.keys().collect();
     names.sort();
     let ratios: Vec<f64> = names.iter().map(|name| lp.recipe[*name]).collect();
-    let run = |counts: &[u32]| evaluate(node, &names, counts, lp.evaluation_iterations, resolve);
+    let run = |counts: &[u32]| evaluate(node, &names, counts, resolve);
     let allowed = failed(&lp);
     let acceptable = |result: &BlendResult| result.ok && failed(result).is_subset(&allowed);
 

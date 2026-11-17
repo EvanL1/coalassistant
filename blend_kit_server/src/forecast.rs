@@ -21,8 +21,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 
-use crate::coal_index::IndexPoint;
-use crate::mcci;
+use crate::mcci::{self, IndexPoint};
 
 /// 预测多远: 5 个交易日, 即一周.
 const HORIZON: usize = 5;
