@@ -97,7 +97,6 @@ const STORAGE_ALLOWED = new Set([
   "doudou_blend/src/cloudStorage.ts",
   "doudou_blend/src/penaltyStorage.ts",
   "doudou_blend/src/localAccount.ts",
-  "doudou_blend/src/coal_index.ts",
   "doudou_blend/src/domain/quoteDraft.ts",
 ]);
 const QUOTE_FILES = new Set([

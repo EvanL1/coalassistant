@@ -17,7 +17,6 @@ vi.mock("../master_loader", () => ({ loadMaster: mocks.master }));
 vi.mock("../backend", () => ({ getBackend: async () => ({ solveJson: mocks.solve, saveHistory: mocks.save }) }));
 vi.mock("../quotes", () => ({ archiveQuotes: mocks.archive, fetchLatestQuotes: mocks.latest }));
 vi.mock("../benchmarks", async (original) => ({ ...(await original<typeof import("../benchmarks")>()), fetchBenchmarks: mocks.benchmarks }));
-vi.mock("../coal_index", () => ({ fetchLatestCoalIndex: async () => null }));
 vi.mock("../storage", async (original) => {
   const real = await original<typeof import("../storage")>();
   return {

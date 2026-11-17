@@ -36,7 +36,7 @@ pub(super) fn tool(quantity: &Value, specs: &Value) -> (&'static str, Value) {
 pub(super) fn quote_blend(args: &Map<String, Value>, context: &Context) -> Result<String, String> {
     let built = build(args, context)?;
     let result = solve(&built, context)?;
-    Ok(format_result(&built, &result, context.market_price))
+    Ok(format_result(&built, &result))
 }
 
 /// 一条 `tools/call quote_blend` 消息要存档的那批报价 (同网页询价精算发给 `POST /api/quotes`

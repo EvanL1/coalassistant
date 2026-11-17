@@ -29,8 +29,16 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
 use super::{database_error, AppState};
-use crate::coal_index::IndexPoint;
 use crate::forecast::{self, Forecast};
+
+/// 指数序列的一期.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub(crate) struct IndexPoint {
+    /// 发布日 YYYY-MM-DD
+    pub date: String,
+    /// 指数值 (元/湿吨)
+    pub price: f64,
+}
 
 const BASE_URL: &str = "https://index.mysteel.com";
 const REPORT_PATH: &str = "/zs/newxpic/getReport.ms";

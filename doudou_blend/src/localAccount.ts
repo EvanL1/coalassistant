@@ -16,6 +16,21 @@ const KEY_OWNER = "doudou_blend.owner.v1";
  */
 const KEPT_ON_LOGOUT = new Set([KEY_OWNER, PENALTY_TEMPLATE_KEY, KEY_HISTORY]);
 
+/**
+ * 已下线的功能留在浏览器里的缓存键, 现在没有代码读写: 登录时顺手清掉 (登出按前缀清, 本来就带走).
+ * - coal_index: 焦煤现货指数的本地缓存, 该指数已不再使用.
+ */
+const RETIRED_KEYS = ["doudou_blend.coal_index.v1"];
+
+function removeRetiredKeys(): void {
+  try {
+    const store = localStore();
+    for (const key of RETIRED_KEYS) store?.removeItem(key);
+  } catch {
+    // 存储不可用时没有可清的
+  }
+}
+
 function appKeys(store: Storage): string[] {
   const keys: string[] = [];
   for (let i = 0; i < store.length; i += 1) {
@@ -78,6 +93,7 @@ export function clearLocalAppData(): void {
 export function claimLocalData(username: string): void {
   const name = username.trim();
   if (!name) return;
+  removeRetiredKeys();
   const owner = getLocalOwner();
   if (owner != null && owner !== name) {
     removeAppKeys(localStore(), new Set());

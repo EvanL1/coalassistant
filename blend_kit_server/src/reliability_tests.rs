@@ -358,7 +358,6 @@ async fn test_mcp_market_skips_the_solver_but_quote_blend_waits() {
             user_coals: json!([]),
             shovel_tons: None,
         },
-        market_price: None,
         benchmarks: Vec::new(),
         rank_k: None,
         coal_prices: None,
@@ -456,7 +455,6 @@ fn quote_context() -> mcp::Context {
             user_coals: json!([]),
             shovel_tons: None,
         },
-        market_price: None,
         benchmarks: vec![
             json!({"name": "焦煤基准", "coal_type": "焦煤", "props": {"S": 1.3},
                                 "price": 2050.0, "date": "2026-10-10"}),

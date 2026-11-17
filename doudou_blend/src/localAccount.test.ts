@@ -45,6 +45,16 @@ describe("本机数据归属", () => {
     expect(localStorage.getItem("别的应用")).toBe("留着");
   });
 
+  it("登录时清掉已下线功能留下的缓存键, 不动别的", () => {
+    claimLocalData("张三");
+    seed();
+    localStorage.setItem("doudou_blend.coal_index.v1", '{"points":[]}');
+    claimLocalData("张三");
+    expect(localStorage.getItem("doudou_blend.coal_index.v1")).toBeNull();
+    expect(localStorage.getItem("doudou_blend.coal_prefs.v1")).not.toBeNull();
+    expect(localStorage.getItem("别的应用")).toBe("留着");
+  });
+
   it("空账号名不认领", () => {
     seed();
     claimLocalData("  ");

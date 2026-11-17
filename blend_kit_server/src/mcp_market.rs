@@ -149,7 +149,6 @@ mod tests {
                 user_coals: json!([]),
                 shovel_tons: None,
             },
-            market_price: None,
             benchmarks: Vec::new(),
             rank_k: None,
             coal_prices: None,

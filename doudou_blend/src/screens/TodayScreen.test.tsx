@@ -20,16 +20,11 @@ const mocks = vi.hoisted(() => ({
   loadMaster: vi.fn(),
   setQuantity: vi.fn(),
   writeText: vi.fn(),
-  fetchLatestCoalIndex: vi.fn(),
   fetchBenchmarks: vi.fn(),
   fetchMcci: vi.fn(),
   quantity: { value: 3_700 },
   coalPrefs: { value: {} as CoalPrefs },
   userContract: { value: null as import("../types").Spec[] | null },
-}));
-
-vi.mock("../coal_index", () => ({
-  fetchLatestCoalIndex: mocks.fetchLatestCoalIndex,
 }));
 
 vi.mock("../benchmarks", async (importOriginal) => ({
@@ -153,8 +148,6 @@ beforeEach(() => {
   });
   mocks.loadMaster.mockResolvedValue(master);
   mocks.writeText.mockResolvedValue(undefined);
-  mocks.fetchLatestCoalIndex.mockReset();
-  mocks.fetchLatestCoalIndex.mockResolvedValue(null);
   mocks.fetchBenchmarks.mockReset();
   mocks.fetchBenchmarks.mockResolvedValue([]);
   Object.defineProperty(navigator, "clipboard", {
@@ -965,8 +958,7 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     expect(sent.price_factor.adjusts).toEqual(priceFactor.adjusts);
   });
 
-  it("全池无报价也求解: 打开 estimate_unpriced, 市场价取现货指数最新值", async () => {
-    mocks.fetchLatestCoalIndex.mockResolvedValue(1907);
+  it("全池无报价也求解: 打开 estimate_unpriced; 没有基准报价时不另找市场价", async () => {
     // active 煤默认不启用; 线上用户是在煤池里逐个启用的.
     mocks.coalPrefs.value = { 无价煤: { enabled: true } };
     mocks.loadMaster.mockResolvedValue({
@@ -986,14 +978,14 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
     const sent = JSON.parse(backend.solveJson.mock.calls[0][0] as string);
     expect(sent.coals).toEqual([]);
     expect(sent.price_factor.estimate_unpriced).toBe(true);
-    expect(sent.price_factor.market_price).toBe(1907);
+    expect("market_price" in sent.price_factor).toBe(false);
+    expect("benchmarks" in sent.price_factor).toBe(false);
     expect(sent.price_factor.extra_coals.map((c: { name: string }) => c.name)).toEqual([
       "无价煤",
     ]);
   });
 
-  it("有基准报价时按基准估价, 不再拿现货指数点位当价", async () => {
-    mocks.fetchLatestCoalIndex.mockResolvedValue(1907);
+  it("有基准报价时按基准估价, 不带市场价", async () => {
     mocks.fetchBenchmarks.mockResolvedValue([
       {
         name: "晋中中硫主焦",
@@ -1036,7 +1028,6 @@ describe("TodayScreen 煤价对比 (价格因子)", () => {
       },
     ]);
     expect("market_price" in sent.price_factor).toBe(false);
-    expect(mocks.fetchLatestCoalIndex).not.toHaveBeenCalled();
     expect(sent.price_factor.extra_coals[0].coal_type).toBe("瘦煤");
   });
 

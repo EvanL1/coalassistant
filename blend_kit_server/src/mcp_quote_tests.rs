@@ -29,7 +29,6 @@ fn context() -> Context {
             user_coals: json!([]),
             shovel_tons: None,
         },
-        market_price: None,
         benchmarks: vec![
             json!({"name": "晋中中硫主焦", "coal_type": "焦煤", "props": {"S": 1.3},
                    "price": 2050.0, "date": "2026-10-10"}),
@@ -197,7 +196,8 @@ fn test_gap_text_rounds_first_and_needs_a_benchmark() {
 fn test_quote_without_benchmarks_does_not_compare() {
     let mut context = context();
     context.benchmarks.clear();
-    context.market_price = Some(2000.0);
+    // 煤库自带市场价也一样: 没有基准报价就不比.
+    context.master["price_factor"]["market_price"] = json!(2000.0);
     let (text, is_error) = call_with(&context, two_quotes());
     assert!(!is_error, "{text}");
     assert!(

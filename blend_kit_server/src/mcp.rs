@@ -53,7 +53,6 @@ const RAW_TOLERANCE: f64 = 1e-8;
 pub struct Context {
     pub master: Value,
     pub storage: UserStorage,
-    pub market_price: Option<f64>,
     /// 当前生效的基准报价 (分煤种, 带日期).
     pub benchmarks: Vec<Value>,
     pub rank_k: Option<f64>,
@@ -457,7 +456,7 @@ fn blend(args: &Map<String, Value>, context: &Context, fixed: bool) -> Result<St
     };
     let built = assemble(context, &options)?;
     let result = solve(&built, context)?;
-    Ok(format_result(&built, &result, context.market_price))
+    Ok(format_result(&built, &result))
 }
 
 /// 可选的 `specs`: 指标 → 含 min / max 的对象或 null; 内容由 [`today::build`] 校验. 空对象等同没传.
@@ -495,7 +494,6 @@ fn only_arg(args: &Map<String, Value>) -> Result<Option<Vec<String>>, String> {
 fn assemble(context: &Context, options: &TodayOptions) -> Result<today::TodayRequest, String> {
     let market = Market {
         benchmarks: context.benchmarks.clone(),
-        market_price: context.market_price,
     };
     today::build(&context.master, &context.storage, &market, options)
 }
@@ -532,7 +530,7 @@ fn unrounded_shovels_note(request: &Value, result: &BlendResult) -> Option<Strin
     (by_shovel && unrounded).then(|| format!("凑不成整铲 (一铲 {tons} 吨): 显示的是未凑整的配方"))
 }
 
-fn format_result(built: &today::TodayRequest, result: &BlendResult, market: Option<f64>) -> String {
+fn format_result(built: &today::TodayRequest, result: &BlendResult) -> String {
     let request = &built.request;
     let quantity = request["total_quantity"].as_f64().unwrap_or(0.0);
     let mut out = Vec::new();
@@ -552,9 +550,10 @@ fn format_result(built: &today::TodayRequest, result: &BlendResult, market: Opti
                 .unwrap_or("");
             format!("按 {} 条分煤种基准报价估价, 最新 {latest}", list.len())
         }
+        // 没有基准报价: 只剩煤库自带的市场价 (若配了); 结果里没带 (验算、无解) 就看请求里的.
         _ => result
             .market_price
-            .or(market)
+            .or_else(|| request["price_factor"]["market_price"].as_f64())
             .map(|m| format!("标准品 1000 点 = {m:.0} 元/吨"))
             .unwrap_or_else(|| "无市场价".into()),
     };
@@ -1041,9 +1040,6 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
                 .iter()
                 .filter_map(|b| serde_json::from_value(b.clone()).ok())
                 .collect();
-            if f.benchmarks.is_empty() {
-                f.market_price = context.market_price.or(f.market_price);
-            }
             f
         });
     let mut out = Vec::new();
@@ -1176,12 +1172,15 @@ fn contract_text(context: &Context) -> String {
         out.push(line);
     }
     if context.benchmarks.is_empty() {
-        out.push(match context.market_price {
-            Some(m) => format!(
-                "估价市场价: 标准品 1000 点 = {m:.0} (焦煤现货指数点位, 无基准报价时的退路)"
-            ),
-            None => "估价市场价: 没有基准报价, 现货指数也取不到".into(),
-        });
+        // 没有基准报价时只剩煤库自带的市场价 (若配了).
+        out.push(
+            match context.master["price_factor"]["market_price"].as_f64() {
+                Some(m) => format!(
+                    "估价市场价: 没有基准报价, 按煤库自带的市场价, 标准品 1000 点 = {m:.0} 元/吨"
+                ),
+                None => "估价市场价: 没有基准报价, 估不出煤价".into(),
+            },
+        );
     } else {
         out.push("估价基准报价 (按指标距离对最接近的几条加权换算):".into());
         for benchmark in &context.benchmarks {
@@ -1221,7 +1220,8 @@ mod tests {
                 "default_contract": {"name": "默认合同", "specs": [
                     {"indicator": "S", "direction": "Upper", "max": 1.5, "enabled": true}
                 ]},
-                "price_factor": {"description": "x", "adjusts": [
+                // 支架里没有基准报价, 估价按煤库自带的市场价 (标准品 1000 点 = 2000).
+                "price_factor": {"description": "x", "market_price": 2000.0, "adjusts": [
                     {"indicator": "S", "direction": "Upper", "base": 1.3, "premium_rate": 75, "discount_rate": 125}
                 ]},
                 "coals": [
@@ -1238,13 +1238,20 @@ mod tests {
                 user_coals: json!([]),
                 shovel_tons: None,
             },
-            market_price: Some(2000.0),
             benchmarks: Vec::new(),
             rank_k: None,
             coal_prices: None,
             market: None,
             today: "2026-11-14".parse().unwrap(),
         }
+    }
+
+    /// 去掉支架煤库自带的市场价: 只按基准报价估价.
+    fn without_market_price(context: &mut Context) {
+        context.master["price_factor"]
+            .as_object_mut()
+            .unwrap()
+            .remove("market_price");
     }
 
     fn call(name: &str, arguments: Value) -> (String, bool) {
@@ -1378,7 +1385,7 @@ mod tests {
     #[test]
     fn test_benchmarks_drive_estimates_in_every_tool() {
         let mut context = context();
-        context.market_price = None;
+        without_market_price(&mut context);
         context.benchmarks = vec![
             json!({"name": "晋中中硫主焦", "coal_type": "焦煤", "props": {"S": 1.3},
                    "price": 2050.0, "date": "2026-10-10"}),
@@ -1405,12 +1412,37 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("按指数推算到今天 1840"), "{text}");
+        // 没推算过的那条 (没有 current_price) 不带这句.
+        assert_eq!(text.matches("按指数推算到今天").count(), 1, "{text}");
+    }
+
+    /// 没有基准报价: 只剩煤库自带的市场价; 也没配就如实说估不出, 配方首行同样不编一个价.
+    #[test]
+    fn test_without_benchmarks_only_master_market_price_is_left() {
+        let (text, _) = call("get_contract", json!({}));
+        assert!(
+            text.ends_with(
+                "估价市场价: 没有基准报价, 按煤库自带的市场价, 标准品 1000 点 = 2000 元/吨"
+            ),
+            "{text}"
+        );
+
+        let mut context = context();
+        without_market_price(&mut context);
+        let (text, _) = call_with(&context, "get_contract", json!({}));
+        assert!(
+            text.ends_with("估价市场价: 没有基准报价, 估不出煤价"),
+            "{text}"
+        );
+        let (text, _) = call_with(&context, "today_blend", json!({}));
+        assert!(!text.contains("标准品 1000 点"), "{text}");
+        assert!(text.contains("没有基准报价, 估不出煤价"), "{text}");
     }
 
     #[test]
     fn test_find_coal_estimates_by_type_and_form() {
         let mut context = context();
-        context.market_price = None;
+        without_market_price(&mut context);
         context.master["coals"][1]["form"] = json!("筛选精煤");
         context.master["coals"][1]["province"] = json!("山西省");
         context.master["coals"][1]["city"] = json!("临汾市");
@@ -1555,7 +1587,7 @@ mod tests {
             check("Y", 16.0, 16.0, "Unverified", "ProvisionalLinear"),
             csr,
         ]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         let beyond = "界内 (估算值; 原值超出合同数, 按合同判定规则算界内)";
         assert!(
             text.contains(&format!("- 挥发 V 28.30 (合同 ≤28): {beyond}")),
@@ -1600,7 +1632,7 @@ mod tests {
         let built = fabricated(json!([{"indicator": "M", "direction": "Upper", "max": 8.0}]));
         let result = json!({"ok": true, "recipe": {}, "warnings": [], "indicator_check": [
             check("M", 7.9999995, 7.9, "Pass", "Linear")]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(
             text.contains("- 水分 M 7.999999, 按合同规则记 7.9 (合同 ≤8): 达标"),
             "{text}"
@@ -1609,7 +1641,7 @@ mod tests {
         // 求解器残差让原值略过 8, 核心按放行量仍记 7.9: 显示值也要落在 7.9 那一格.
         let result = json!({"ok": true, "recipe": {}, "warnings": [], "indicator_check": [
             check("M", 8.0000002, 7.9, "TolerancePass", "Linear")]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(
             text.contains("- 水分 M 7.999999, 按合同规则记 7.9"),
             "{text}"
@@ -1643,7 +1675,7 @@ mod tests {
         let result = json!({"ok": false, "undetermined": true, "warnings": [],
             "reason": "求解器没有算出可靠结论 (迭代次数用尽), 无法判定合同是否可行",
             "infeasible_bounds": []});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(text.contains("这次没算出结论"), "{text}");
         assert!(text.contains("这不等于合同配不出来"), "{text}");
         assert!(!text.contains("无解"), "{text}");
@@ -1665,7 +1697,7 @@ mod tests {
             "infeasible_bounds": [{"achievable": 1.2565290557686786, "direction": "Upper",
                 "enforced": 1.09999, "indicator": "S", "label_zh": "硫", "margin": 0.0,
                 "relax_to": 1.2, "required": 1.0}]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(
             text.contains(
                 "- 硫 S: 合同要求 ≤1, 其余要求都满足时这批煤最好只能做到 1.26; \
@@ -1681,7 +1713,7 @@ mod tests {
                 "indicator": "CSR", "label_zh": "CSR", "margin": 0.5, "relax_to": null,
                 "required": 68.0}]});
         let built = fabricated(json!([{"indicator": "CSR", "direction": "Lower", "min": 68.0}]));
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(
             text.contains("合同要求 ≥68, 其余要求都满足时这批煤最好只能做到 66.2"),
             "{text}"
@@ -1696,7 +1728,7 @@ mod tests {
             "infeasible_bounds": [{"achievable": 10.8, "direction": "Upper", "enforced": 10.5,
                 "indicator": "M", "label_zh": "水分", "margin": 0.0, "relax_to": 10.3,
                 "required": 10.0}]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(
             text.contains(
                 "- 水分 M: 合同要求 ≤10, 其余要求都满足时这批煤最好只能做到 10.8; \
@@ -1714,7 +1746,7 @@ mod tests {
             "infeasible_bounds": [{"achievable": 1.45, "direction": "Upper", "enforced": 1.39999,
                 "indicator": "S", "label_zh": "硫", "margin": 0.0, "relax_to": 1.4,
                 "required": 1.3}]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(
             text.contains(
                 "- 硫 S: 拒收线 ≤1.3, 其余要求都满足时这批煤最好只能做到 1.45; \
@@ -1787,7 +1819,7 @@ mod tests {
             check("G", 80.0, 80.0, "Unverified", "ProvisionalLinear"),
             check("M", 8.0, 8.0, "Pass", "Linear"),
         ]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(
             text.contains("- 灰 A 10.0999, 按合同规则记 10.0 (合同 ≤10): 达标 (原值超出合同数, 按合同判定规则算达标)"),
             "{text}"
@@ -1806,7 +1838,7 @@ mod tests {
 
         let result = json!({"ok": true, "recipe": {}, "warnings": [], "indicator_check": [
             check("A", 10.1001, 10.1, "Fail", "Linear")]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(
             text.contains("- 灰 A 10.10, 按合同规则记 10.1 (合同 ≤10): 不达标"),
             "{text}"
@@ -1836,7 +1868,7 @@ mod tests {
         let result = json!({"ok": true, "recipe": {}, "warnings": [], "indicator_check": [
             {"indicator": "Y", "label_zh": "胶质", "value": 0.0, "binding": false,
              "status": "Unverified", "method": "Unavailable"}]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(
             text.contains("- 胶质 Y (合同 ≥15): 无法判定 (有参配煤缺这项数据)"),
             "{text}"
@@ -1849,7 +1881,7 @@ mod tests {
         let result = json!({"ok": true, "recipe": {}, "warnings": [],
             "csr_stamp_estimate": 62.3,
             "indicator_check": [check("CSR", 68.0, 68.0, "Unverified", "ProvisionalLinear")]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(text.contains("捣固炼焦 CSR 估算 62.3"), "{text}");
         assert!(text.contains("不参与达标判定"), "{text}");
         assert!(
@@ -1859,7 +1891,7 @@ mod tests {
         assert!(text.contains("低于合同下限 68"), "{text}");
 
         let built = fabricated(json!([]));
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         assert!(text.contains("合同没有 CSR 要求"), "{text}");
         assert!(!text.contains("低于合同下限"), "{text}");
     }
@@ -1874,7 +1906,7 @@ mod tests {
             "orders": [{"coal": "甲", "ratio": 0.6}, {"coal": "乙", "ratio": 0.4}],
             "cost": {"cif_per_ton": 1500.0}, "indicator_check": [],
             "warnings": ["剔除 丙: 缺指标 G", "凑不成整铲 (一铲 3 吨): 显示的是未凑整的配方"]});
-        let text = format_result(&built, &typed_result(&result), None);
+        let text = format_result(&built, &typed_result(&result));
         let warning = text
             .find("注意: 凑不成整铲 (一铲 3 吨): 显示的是未凑整的配方。下面的吨数没有按整铲取整, 不能直接照此装车")
             .unwrap_or_else(|| panic!("{text}"));
@@ -1904,11 +1936,7 @@ mod tests {
                            {"coal": "乙", "ratio": 0.4, "shovels": 120}]);
 
         // 核心换了措辞: 配方上方那句照样在 (提示里多一条意思相近的, 不丢).
-        let text = format_result(
-            &by_shovel(),
-            &result(bare.clone(), json!(["整铲没凑成"])),
-            None,
-        );
+        let text = format_result(&by_shovel(), &result(bare.clone(), json!(["整铲没凑成"])));
         assert!(
             text.find(CAUTION).unwrap() < text.find("配方:").unwrap(),
             "{text}"
@@ -1916,11 +1944,7 @@ mod tests {
         assert!(text.contains("提示:\n- 整铲没凑成"), "{text}");
 
         // 凑成了 (订单带铲数): 不提, 哪怕警告里碰巧有这几个字.
-        let text = format_result(
-            &by_shovel(),
-            &result(whole, json!(["凑不成整铲 (旧文)"])),
-            None,
-        );
+        let text = format_result(&by_shovel(), &result(whole, json!(["凑不成整铲 (旧文)"])));
         assert!(!text.contains("注意:"), "{text}");
         assert!(text.contains("- 甲 60.0% (540 吨 · 180 铲)"), "{text}");
         assert!(text.contains("提示:\n- 凑不成整铲 (旧文)"), "{text}");
@@ -1931,13 +1955,13 @@ mod tests {
         let mut too_small = by_shovel();
         too_small.request["total_quantity"] = json!(2.0);
         for built in [fixed, fabricated(json!([])), too_small] {
-            let text = format_result(&built, &result(bare.clone(), json!([])), None);
+            let text = format_result(&built, &result(bare.clone(), json!([])));
             assert!(!text.contains("注意:"), "{text}");
         }
 
         // 没算成: 没有配方可提醒.
         let failed = typed_result(&json!({"ok": false, "reason": "约束冲突", "orders": bare}));
-        assert!(!format_result(&by_shovel(), &failed, None).contains("注意:"));
+        assert!(!format_result(&by_shovel(), &failed).contains("注意:"));
     }
 
     #[test]

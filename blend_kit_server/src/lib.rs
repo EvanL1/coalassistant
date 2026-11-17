@@ -27,7 +27,6 @@ use tower_http::{
 mod admin;
 mod api_key;
 mod benchmarks;
-mod coal_index;
 mod coal_prices;
 mod database;
 mod forecast;
@@ -441,7 +440,6 @@ fn routes() -> Vec<RouteDef> {
     use Verb::{Delete, Get, Patch, Post, Put};
     vec![
         route(Public, Get, "/api/health", health),
-        route(Public, Get, "/api/coal-index", coal_index_handler),
         route(Public, Get, "/api/auth/session", auth_session),
         route(Public, Post, "/api/auth/login", login),
         route(Public, Post, "/api/auth/logout", logout),
@@ -684,19 +682,6 @@ struct LoginRequest {
 struct AuthStatus {
     authenticated: bool,
     admin: bool,
-}
-
-/// 焦煤现货指数序列, 供今日屏参考估算. 公开(不敏感, 与 health 同级).
-async fn coal_index_handler() -> Response {
-    match coal_index::get_spot_series().await {
-        Some(points) => Json(points).into_response(),
-        None => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::CONTENT_TYPE, TEXT_CONTENT_TYPE)],
-            "coal index unavailable",
-        )
-            .into_response(),
-    }
 }
 
 async fn auth_session(State(state): State<AppState>, headers: HeaderMap) -> Json<AuthStatus> {
@@ -1657,7 +1642,7 @@ fn mcp_internal_errors(ids: Vec<serde_json::Value>, message: &str) -> Vec<serde_
         .collect()
 }
 
-/// 求解要用的线上数据: 合并后的煤库、网页账号保存的合同与煤池、现货指数最新值、煤阶交互 k.
+/// 求解要用的线上数据: 合并后的煤库、网页账号保存的合同与煤池、当前生效的基准报价、煤阶交互 k.
 /// 估价快照与行情只在这批消息里有工具用得着时才读; 读不到不算错, 工具照旧输出或如实说取不到.
 async fn load_mcp_context(
     state: &AppState,
@@ -1688,18 +1673,9 @@ async fn load_mcp_context(
         serde_json::from_str(&merged_master_json(state).await).unwrap_or_default();
     let storage = database::load_storage(pool, &state.auth.username).await?;
     let benchmarks = benchmarks::current(state, &master).await;
-    // 没有任何基准报价时才退回现货指数 (那是指数点, 只能当相对尺度用).
-    let market_price = if benchmarks.is_empty() {
-        coal_index::get_spot_series()
-            .await
-            .and_then(|points| points.last().map(|point| point.price))
-    } else {
-        None
-    };
     Ok(mcp::Context {
         master,
         storage,
-        market_price,
         benchmarks,
         rank_k: state.rank_k(),
         coal_prices,
@@ -2620,9 +2596,8 @@ mod tests {
     }
 
     /// 明确公开的路由. 往这里加一条要有理由: 不在这里的路由, 不带凭据一律 401.
-    const PUBLIC_ROUTES: [(Verb, &str); 7] = [
+    const PUBLIC_ROUTES: [(Verb, &str); 6] = [
         (Verb::Get, "/api/health"),
-        (Verb::Get, "/api/coal-index"),
         (Verb::Get, "/api/auth/session"),
         (Verb::Post, "/api/auth/login"),
         (Verb::Post, "/api/auth/logout"),
