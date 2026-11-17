@@ -16,6 +16,7 @@ import { coalTag } from "../domain/coalTypes";
 import { parseNumberInput } from "../domain/numberInput";
 import { placeFields, placeLabel } from "../domain/place";
 import type { Place } from "../domain/place";
+import { errorMessage } from "../http";
 import { PlaceSelect } from "../PlaceSelect";
 import type { Benchmark, BenchmarkEntry } from "../types";
 
@@ -125,7 +126,7 @@ export function BenchmarkCard() {
       setDraft(emptyDraft());
       await refresh();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -138,7 +139,7 @@ export function BenchmarkCard() {
       await deleteBenchmark(row.id);
       await refresh();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 

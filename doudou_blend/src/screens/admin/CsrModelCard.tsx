@@ -5,7 +5,8 @@
  */
 import { useEffect, useState } from "react";
 import { getCsrModel, type CsrModelStatus } from "../../admin";
-import { errorMessage, errorText, hintText } from "./styles";
+import { errorMessage } from "../../http";
+import { errorText, hintText } from "./styles";
 
 export function CsrModelCard() {
   const [model, setModel] = useState<CsrModelStatus | null>(null);

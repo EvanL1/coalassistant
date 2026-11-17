@@ -2,9 +2,9 @@
  * 屏 1 - 今日（首页）
  *
  * 数据源:
- *   - 煤池: master + user_coal_prefs (启用 + 价格 + 化验值 override)
- *   - 合同: user_contract ?? master.default_contract
- *   - 默认: master verified 的 4 主力煤启用, 其他停用
+ *   - 煤池: master + 用户偏好 (启用/隐藏 + 化验值覆盖); 煤价一律按质量估算, 不录价
+ *   - 合同: 用户保存的合同, 没有就用 master.default_contract
+ *   - 默认: master 里 verified 的煤启用, 其他停用
  *
  * 求解后展示成本、配方、8 项指标, 并支持保存到历史.
  */
@@ -28,11 +28,9 @@ import {
   type SolveSnapshot,
 } from "../domain/solveSession";
 import { loadMaster } from "../master_loader";
-import { getPenaltyTemplate, PENALTY_TEMPLATE_EVENT } from "../penaltyStorage";
-import type {
-  BlendResult,
-  Spec,
-} from "../types";
+import { getPenaltyTemplate } from "../penaltyStorage";
+import { listen, USER_STORAGE_EVENTS, type AppEvent } from "../events";
+import type { BlendResult } from "../types";
 import type { TabId } from "../TabBar";
 import {
   getCoalPrefs,
@@ -42,8 +40,9 @@ import {
   getUserCoals,
   setQuantity,
 } from "../storage";
-import { estimateRequest, loadPriceFactorWithStatus } from "../domain/blendRequest";
+import { currentContract, estimateRequest, loadPriceFactorWithStatus } from "../domain/blendRequest";
 import {
+  failureKind,
   friendlySolverText,
   shovelRoundingMissed,
   shovelRoundingNotice,
@@ -150,6 +149,15 @@ type SolveState =
   | { status: "ok"; snapshot: SolveSnapshot }
   | { status: "error"; error: string };
 
+/**
+ * 这些变了就重算: 会进求解请求的用户数据, 加上只存本机的扣款模板.
+ * 吨数不在其中 —— 它只在本屏改, commitQty 自己重算; 云端快照落地时其余事件会一起派发.
+ */
+const RESOLVE_EVENTS: readonly AppEvent[] = [
+  ...USER_STORAGE_EVENTS.filter((name) => name !== "quantity_changed"),
+  "penalty_template_changed",
+];
+
 export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   // 询价精算开着时记下进入那一刻的估价结果: 后台重算 (同步、改煤池) 失败或重算中都不能把精算页
   // 卸掉, 否则用户当场填的报价就丢了. 切走页签再回来时从草稿接着开精算页.
@@ -175,20 +183,11 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   useEffect(() => {
     mountedRef.current = true;
     void runSolve(true);
-    // 监听 prefs/contract/user_coals/一铲吨数/扣款模板 变化, 自动重算 (inline, 不整页 loading)
-    const refresh = () => void runSolve(false);
-    window.addEventListener("doudou:prefs_changed", refresh);
-    window.addEventListener("doudou:contract_changed", refresh);
-    window.addEventListener("doudou:user_coals_changed", refresh);
-    window.addEventListener("doudou:shovel_changed", refresh);
-    window.addEventListener(PENALTY_TEMPLATE_EVENT, refresh);
+    // 输入变了自动重算 (inline, 不整页 loading)
+    const stopListening = listen(RESOLVE_EVENTS, () => void runSolve(false));
     return () => {
       mountedRef.current = false;
-      window.removeEventListener("doudou:prefs_changed", refresh);
-      window.removeEventListener("doudou:contract_changed", refresh);
-      window.removeEventListener("doudou:user_coals_changed", refresh);
-      window.removeEventListener("doudou:shovel_changed", refresh);
-      window.removeEventListener(PENALTY_TEMPLATE_EVENT, refresh);
+      stopListening();
       requestTrackerRef.current.invalidate();
       if (recomputeTimerRef.current != null) {
         window.clearTimeout(recomputeTimerRef.current);
@@ -266,10 +265,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
         return;
       }
 
-      const specs: Spec[] = userContract ?? master.default_contract.specs;
-      const contractName = userContract
-        ? "用户自定义合同"
-        : master.default_contract.name;
+      const { specs, name: contractName } = currentContract(userContract, master);
 
       const { priceFactor, benchmarksStale } = await loadPriceFactorWithStatus(
         master.price_factor,
@@ -494,8 +490,10 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
   // 不可行不再提前 return: 页头、输入摘要这些上下文与求解成败无关,
   // 而恰恰是用户排查不可行时唯一的抓手 —— 只把结果区换成诊断面板.
   // 合同完不完整直接拿发给核心的那份 specs 校验, 不匹配核心报错的中文句子.
-  const contractIncomplete = !result.ok && isContractIncomplete(snapshot.request.specs);
+  const contractIncomplete = isContractIncomplete(snapshot.request.specs);
   const cost = result.ok ? result.cost ?? null : null;
+  // 没出配方属于哪一类: 下面的指引与诊断面板用同一个判定.
+  const failure = cost ? null : failureKind(result, contractIncomplete);
   // 总额展示优先 total_net (真实应付合计); 没算扣款条款前两者相等.
   const totalCost = cost ? cost.total_net ?? cost.total_cif : null;
   const contractChecks = result.indicator_check.filter(isContractIndicator);
@@ -650,17 +648,16 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
               ))}
             </div>
           )}
-          {/* 只在真·不可行时给这条建议: ok 却没有成本结构是结果不完整, 放宽合同
-              解决不了, 那时这句是错的指路. */}
-          {contractIncomplete && (
+          {failure === "contract" && (
             <p style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}>
               <button onClick={() => onNavigate("contract")} style={summaryLink}>
                 去「合同」补全
               </button>
             </p>
           )}
-          {/* 合同本身没填完整时放宽、加煤都没用, 不给这条建议. */}
-          {!result.ok && !contractIncomplete && (
+          {/* 只在真·不可行时给这条建议. 结果不完整、合同没填完整时放宽和加煤都没用;
+              求解器没算出结论时合同也许本来配得出 —— 那几种情况下这句是错的指路. */}
+          {failure === "infeasible" && (
             <p style={{ fontSize: 12, color: "var(--c-text-3)", marginTop: 12 }}>
               建议: 去「合同」放宽某项约束, 或去「煤池」启用更多煤源.
             </p>
@@ -680,7 +677,7 @@ export function TodayScreen({ onNavigate }: { onNavigate: (tab: TabId) => void }
           询价精算
         </button>
         {/* 合同没填完整时重算多少遍都一样, 不给点了没用的「重试」, 只留去合同页的入口. */}
-        {(result.ok || !contractIncomplete) && (
+        {failure !== "contract" && (
           <button
             className="btn btn-secondary"
             onClick={() => runSolve(false)}

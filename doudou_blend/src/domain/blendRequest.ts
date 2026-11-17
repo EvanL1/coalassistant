@@ -1,6 +1,6 @@
 import { fetchBenchmarks, solverPriceFactor, toRequestBenchmark } from "../benchmarks";
 import { fetchLatestCoalIndex } from "../coal_index";
-import type { Benchmark, BlendRequest, Coal, IndicatorKey, MasterPriceFactor, PriceFactor, PurchaseTerms, Spec } from "../types";
+import type { Benchmark, BlendRequest, Coal, CoalMaster, IndicatorKey, MasterPriceFactor, PriceFactor, PurchaseTerms, Spec } from "../types";
 import { withoutUnusedBound } from "./contract";
 import { toEstimateCoal, type ResolvedCoal } from "./resolvedCoal";
 
@@ -17,12 +17,14 @@ export interface BlendBase {
   priceFactor: PriceFactor;
 }
 
-/**
- * 估价按基准报价 (分煤种、带报价日, 服务端已按现货指数推算到今天); 取不到就用 master 自带的
- * 默认基准. 两样都没有才退回现货指数点位当标准品价 (只是相对尺度). 系数表来自 master (数据不是代码).
- */
-export async function loadPriceFactor(priceFactor: MasterPriceFactor): Promise<PriceFactor> {
-  return (await loadPriceFactorWithStatus(priceFactor)).priceFactor;
+/** 当前合同: 用户改过就用用户的, 否则用 master 默认合同. */
+export function currentContract(
+  userContract: Spec[] | null,
+  master: Pick<CoalMaster, "default_contract">,
+): { specs: Spec[]; name: string } {
+  return userContract
+    ? { specs: userContract, name: "用户自定义合同" }
+    : { specs: master.default_contract.specs, name: master.default_contract.name };
 }
 
 export interface LoadedPriceFactor {
@@ -31,6 +33,10 @@ export interface LoadedPriceFactor {
   benchmarksStale: boolean;
 }
 
+/**
+ * 估价按基准报价 (分煤种、带报价日, 服务端已按现货指数推算到今天); 取不到就用 master 自带的
+ * 默认基准. 两样都没有才退回现货指数点位当标准品价 (只是相对尺度). 系数表来自 master (数据不是代码).
+ */
 export async function loadPriceFactorWithStatus(
   priceFactor: MasterPriceFactor,
 ): Promise<LoadedPriceFactor> {

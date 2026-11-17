@@ -4,8 +4,9 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { deleteQuote, fetchQuoteComparison } from "../../admin";
+import { errorMessage } from "../../http";
 import type { QuoteComparisonResponse, QuoteRecord } from "../../types";
-import { cellStyle, errorMessage, errorText, smallButton } from "./styles";
+import { cellStyle, errorText, smallButton } from "./styles";
 
 const SUMMARY_COLUMNS = ["煤种", "条数", "报价/估价中位", "差额中位"];
 const DETAIL_COLUMNS = [

@@ -204,6 +204,23 @@ export function resolveCoalPool(
 }
 
 /**
+ * 煤池里的一种煤 → 请求里的 Coal 形状: 指标、煤种、形态、产地照搬, 不带报价 (fob/frt 记 0);
+ * 没有的字段不带键, 不发 null. 求解、卡片现算估价、询价存档都从这里起步, 各自再补价格或条款.
+ */
+export function toWireCoal(coal: ResolvedCoal) {
+  return {
+    name: coal.name,
+    props: { ...coal.props },
+    fob: 0,
+    frt: 0,
+    coal_type: coal.coal_type ?? undefined,
+    form: coal.form ?? undefined,
+    region: coal.region ?? undefined,
+    ...placeFields(coal),
+  } satisfies Coal;
+}
+
+/**
  * 求解用的煤: 一律不带报价 (fob/frt 记 0), 放进价格因子 extra_coals, 由核心按估算价
  * 并入煤池 (estimate_unpriced). 只有启用且数据有效的煤参与.
  *
@@ -216,15 +233,5 @@ export function toEstimateCoal(
   purchaseTerms?: PurchaseTerms | null,
 ): Coal | null {
   if (coal.readiness !== "ready") return null;
-  return {
-    name: coal.name,
-    props: { ...coal.props },
-    fob: 0,
-    frt: 0,
-    purchase_terms: purchaseTerms ?? undefined,
-    coal_type: coal.coal_type ?? undefined,
-    form: coal.form ?? undefined,
-    region: coal.region ?? undefined,
-    ...placeFields(coal),
-  };
+  return { ...toWireCoal(coal), purchase_terms: purchaseTerms ?? undefined };
 }

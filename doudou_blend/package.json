@@ -7,6 +7,7 @@
   "scripts": {
     "check:consistency": "node ../scripts/check_repository_consistency.mjs",
     "check:data": "node ../scripts/check_master_data.mjs",
+    "check:rules": "node ../scripts/check_frontend_rules.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",

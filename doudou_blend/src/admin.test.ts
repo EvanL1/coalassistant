@@ -11,6 +11,9 @@ import {
   setRankInteractionK,
 } from "./admin";
 
+const masterLoader = vi.hoisted(() => ({ invalidateMaster: vi.fn() }));
+vi.mock("./master_loader", () => ({ invalidateMaster: masterLoader.invalidateMaster }));
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -20,6 +23,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
+  masterLoader.invalidateMaster.mockReset();
 });
 
 describe("询价对比", () => {
@@ -169,5 +173,27 @@ describe("煤库覆盖层", () => {
       "/api/master/coals/%E5%B1%B1%E8%A5%BF%2F%E7%84%A6%20%E7%85%A4/CSR",
       { credentials: "same-origin", method: "DELETE" },
     );
+  });
+});
+
+describe("master 缓存失效", () => {
+  it("新增覆盖值成功后失效", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ ok: true, applied: 1 }));
+    await addOverrides([
+      { coal: "临北", field: "CSR", value: 62, source: "化验单 A1", confidence: "high" },
+    ]);
+    expect(masterLoader.invalidateMaster).toHaveBeenCalledTimes(1);
+  });
+
+  it("写失败也失效 (请求可能已到服务端)", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ ok: false, reason: "冲突" }, 500));
+    await expect(deleteOverride("临北", "CSR")).rejects.toThrow("冲突");
+    expect(masterLoader.invalidateMaster).toHaveBeenCalledTimes(1);
+  });
+
+  it("读接口不失效", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ ok: true }));
+    await listOverrides();
+    expect(masterLoader.invalidateMaster).not.toHaveBeenCalled();
   });
 });

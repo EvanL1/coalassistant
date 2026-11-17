@@ -9,7 +9,8 @@
  *   - 重置 = 清空 localStorage 对应 key
  */
 
-import type { Spec, MasterCoalEntry, BlendResult, MeasuredQuality } from "./types";
+import { COAL_STATUSES, type Spec, type MasterCoalEntry, type BlendResult } from "./types";
+import { emit, USER_STORAGE_EVENTS } from "./events";
 import { normalizeCoalName } from "./domain/coalName";
 import type { CoalPenaltyOverride } from "./penalty";
 
@@ -72,14 +73,6 @@ export interface UserStorageSnapshot {
   shovel_tons: number;
 }
 
-export const USER_STORAGE_EVENTS = [
-  "doudou:prefs_changed",
-  "doudou:contract_changed",
-  "doudou:quantity_changed",
-  "doudou:user_coals_changed",
-  "doudou:shovel_changed",
-] as const;
-
 // ============================================================
 // 煤偏好
 // ============================================================
@@ -112,8 +105,7 @@ export function setCoalPref(name: string, pref: Partial<CoalPref>): void {
   delete next.invalid_data;
   all[name] = next;
   localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(all));
-  // 派发自定义事件让其他组件订阅
-  window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
+  emit("prefs_changed");
 }
 
 /**
@@ -144,12 +136,12 @@ export function clearCoalPref(name: string): void {
   const all = getCoalPrefs();
   delete all[name];
   localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(all));
-  window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
+  emit("prefs_changed");
 }
 
 export function clearAllCoalPrefs(): void {
   localStorage.removeItem(KEY_COAL_PREFS);
-  window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
+  emit("prefs_changed");
 }
 
 export function enableAllCoals(names: string[]): void {
@@ -159,7 +151,7 @@ export function enableAllCoals(names: string[]): void {
     all[name] = { ...all[name], enabled: true, updated_at: now } as CoalPref;
   }
   localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(all));
-  window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
+  emit("prefs_changed");
 }
 
 // ============================================================
@@ -177,12 +169,12 @@ export function getUserContract(): Spec[] | null {
 
 export function setUserContract(specs: Spec[]): void {
   localStorage.setItem(KEY_CONTRACT, JSON.stringify(specs));
-  window.dispatchEvent(new CustomEvent("doudou:contract_changed"));
+  emit("contract_changed");
 }
 
 export function clearUserContract(): void {
   localStorage.removeItem(KEY_CONTRACT);
-  window.dispatchEvent(new CustomEvent("doudou:contract_changed"));
+  emit("contract_changed");
 }
 
 // ============================================================
@@ -206,7 +198,7 @@ export function getQuantity(): number {
 
 export function setQuantity(n: number): void {
   localStorage.setItem(KEY_QUANTITY, String(n));
-  window.dispatchEvent(new CustomEvent("doudou:quantity_changed"));
+  emit("quantity_changed");
 }
 
 // ============================================================
@@ -231,7 +223,7 @@ export function getShovelTons(): number {
 
 export function setShovelTons(n: number): void {
   localStorage.setItem(KEY_SHOVEL_TONS, String(n));
-  window.dispatchEvent(new CustomEvent("doudou:shovel_changed"));
+  emit("shovel_changed");
 }
 
 // ============================================================
@@ -247,44 +239,9 @@ export function getHistory(): HistoryEntry[] {
   }
 }
 
-export function appendHistory(entry: Omit<HistoryEntry, "id" | "occurred_at">): HistoryEntry {
-  const full: HistoryEntry = {
-    ...entry,
-    id: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
-    occurred_at: new Date().toISOString(),
-  };
-  const all = getHistory();
-  all.unshift(full); // 最新在前
-  // 保留最近 100 条避免无限增长
-  if (all.length > 100) all.length = 100;
-  localStorage.setItem(KEY_HISTORY, JSON.stringify(all));
-  window.dispatchEvent(new CustomEvent("doudou:history_changed"));
-  return full;
-}
-
 export function clearHistory(): void {
   localStorage.removeItem(KEY_HISTORY);
-  window.dispatchEvent(new CustomEvent("doudou:history_changed"));
-}
-
-/** 回填某条历史的混煤实测化验 (部分字段, 只更新提供的项). id 不存在则静默忽略. */
-export function setMeasuredQualityLocal(id: string, m: MeasuredQuality): void {
-  const all = getHistory();
-  if (!all.some((e) => e.id === id)) return;
-  const updated = all.map((e) => {
-    if (e.id !== id) return e;
-    const next = { ...e };
-    if (m.s != null) next.s_measured = m.s;
-    if (m.a != null) next.a_measured = m.a;
-    if (m.v != null) next.v_measured = m.v;
-    if (m.g != null) next.g_measured = m.g;
-    if (m.y != null) next.y_measured = m.y;
-    if (m.m != null) next.m_measured = m.m;
-    if (m.csr != null) next.csr_measured = m.csr;
-    return next;
-  });
-  localStorage.setItem(KEY_HISTORY, JSON.stringify(updated));
-  window.dispatchEvent(new CustomEvent("doudou:history_changed"));
+  emit("history_changed");
 }
 
 // ============================================================
@@ -293,7 +250,7 @@ export function setMeasuredQualityLocal(id: string, m: MeasuredQuality): void {
 //
 // Master 煤种是只读 (嵌入核心 crate), 用户新增的煤暂存这里.
 // 新增时仅录煤名/产地/煤类, 化验值后续在 CoalEditor 里补 (status=draft).
-// 补全价格并启用后, 与 Master 煤走同一套解析规则参与求解.
+// 补全化验值并启用后, 与 Master 煤走同一套解析规则参与求解.
 
 export function getUserCoals(): MasterCoalEntry[] {
   try {
@@ -312,7 +269,7 @@ export function addUserCoal(coal: MasterCoalEntry): void {
   const all = getUserCoals();
   all.push(coal);
   localStorage.setItem(KEY_USER_COALS, JSON.stringify(all));
-  window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
+  emit("user_coals_changed");
 }
 
 export function removeUserCoal(
@@ -324,28 +281,7 @@ export function removeUserCoal(
   if (!preservePref) {
     clearCoalPref(name);
   }
-  window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
-}
-
-export function clearUserCoals(masterCoalNames: readonly string[]): void {
-  const masterNames = new Set(masterCoalNames.map(normalizeCoalName));
-  const userNames = new Set(
-    getUserCoals()
-      .filter((coal) => !masterNames.has(normalizeCoalName(coal.name)))
-      .map((coal) => coal.name),
-  );
-  const prefs = getCoalPrefs();
-  for (const name of userNames) {
-    delete prefs[name];
-  }
-  localStorage.removeItem(KEY_USER_COALS);
-  if (Object.keys(prefs).length > 0) {
-    localStorage.setItem(KEY_COAL_PREFS, JSON.stringify(prefs));
-  } else {
-    localStorage.removeItem(KEY_COAL_PREFS);
-  }
-  window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
-  window.dispatchEvent(new CustomEvent("doudou:user_coals_changed"));
+  emit("user_coals_changed");
 }
 
 /** 读取当前本地缓存，供 Web 首次导入和持续同步使用。 */
@@ -411,9 +347,7 @@ export function replaceUserStorageSnapshot(snapshot: UserStorageSnapshot): void 
     localStorage.removeItem(KEY_USER_COALS);
   }
 
-  for (const eventName of USER_STORAGE_EVENTS) {
-    window.dispatchEvent(new CustomEvent(eventName));
-  }
+  for (const name of USER_STORAGE_EVENTS) emit(name);
 }
 
 /**
@@ -438,20 +372,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   );
 }
 
-const COAL_STATUSES = new Set([
-  "verified",
-  "active",
-  "draft",
-  "incomplete",
-  "archived",
-]);
-
 function isMasterCoalEntry(value: unknown): value is MasterCoalEntry {
   if (!isRecord(value)) return false;
   return (
     typeof value.name === "string" &&
     normalizeCoalName(value.name).length > 0 &&
-    COAL_STATUSES.has(String(value.status)) &&
+    (COAL_STATUSES as readonly string[]).includes(String(value.status)) &&
     isRecord(value.props)
   );
 }

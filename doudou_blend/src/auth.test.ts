@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { listen } from "./events";
 import { getSession, LoginRateLimitError, logout, tryLogin } from "./auth";
 
 /** 可清空的 localStorage 替身 (auth 认领/清空都走它). */
@@ -16,16 +17,6 @@ function stubLocalStorage(values: Map<string, string>) {
 beforeEach(() => {
   vi.stubGlobal("window", new EventTarget());
   vi.stubGlobal("fetch", vi.fn());
-  if (typeof CustomEvent === "undefined") {
-    vi.stubGlobal(
-      "CustomEvent",
-      class extends Event {
-        constructor(type: string) {
-          super(type);
-        }
-      },
-    );
-  }
 });
 
 afterEach(() => {
@@ -232,7 +223,7 @@ describe("服务端认证", () => {
   it("退出请求结束后统一通知界面刷新", async () => {
     vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 200 }));
     let changes = 0;
-    window.addEventListener("doudou:auth_changed", () => {
+    listen(["auth_changed"], () => {
       changes += 1;
     });
 

@@ -5,11 +5,27 @@ import {
   getHistory,
   getUserStorageSnapshot,
   replaceUserStorageSnapshot,
-  USER_STORAGE_EVENTS,
   type UserStorageSnapshot,
 } from "./storage";
-import { apiFetch, errorMessage, readOk } from "./http";
+import { emit, listen, USER_STORAGE_EVENTS } from "./events";
+import { apiJson, errorMessage } from "./http";
 
+/*
+ * 云端同步: 本机 localStorage 是同步缓存, 这里把它镜像到 PostgreSQL (GET/PUT /api/storage).
+ *
+ * "该推、该拉、还是算冲突" 的判断是下面三个纯函数 (decideInit / decidePersist / decideWrite),
+ * 只看传进来的值, 不读写任何东西; 读写 localStorage、发请求、派事件都在后面的外壳里.
+ *
+ * 已知没覆盖的情况 (现状, 本文件没有处理; 要彻底堵住得给服务端加版本号):
+ *   1. 写成功但回包丢了: 基线没推进. 之后本机再改一笔, 写前拉到的云端是上一笔自己写的内容,
+ *      既不等于这一笔也不等于基线 —— 会误报冲突 (见 decideWrite).
+ *   2. 两台设备同时首次登录: 两边拉到的都是"云端没初始化", 各自把本机整份推上去,
+ *      后到的覆盖先到的, 没有任何提示 (见 decideInit 的 seed_cloud).
+ *   3. 多标签页: 事件只在本窗口派发, 别的标签页改了数据这边的界面不会刷新;
+ *      在途写回的计数 (inFlight) 也是各标签页各记各的.
+ *   4. 重新初始化 (再次登录) 不取消上一轮已经排进队列的写回: 它们照样跑完,
+ *      之后还会改基线、未同步标记和同步状态.
+ */
 interface RemoteUserStorage extends UserStorageSnapshot {
   initialized: boolean;
 }
@@ -32,8 +48,96 @@ const KEY_SYNC_BASELINE = "doudou_blend.sync_baseline.v1";
 const KEEPALIVE_MAX_BYTES = 60 * 1024;
 
 export type SyncStatus = "idle" | "syncing" | "error" | "conflict";
-export const SYNC_STATUS_EVENT = "doudou:sync_status_changed";
 
+// ============================================================
+// 决策 (纯函数)
+// ============================================================
+
+/** 稳定序列化后的快照 (storage.canonicalUserSnapshot), 只用来比"是不是同一份". */
+type Canon = string;
+
+export type InitAction =
+  /** 云端还没初始化: 把本机整份推上去当第一份. */
+  | "seed_cloud"
+  /** 本机没有未同步的改动: 用云端覆盖本机. */
+  | "adopt_cloud"
+  /** 有未同步标记但本机与云端相同 (上次其实写成功了): 只清标记、记基线. */
+  | "already_in_sync"
+  /** 标记期间云端没人动过: 本机比云端新, 推上去. */
+  | "push_local"
+  /** 云端在标记期间被别人改过, 或没有基线可比: 不推也不覆盖, 等用户二选一. */
+  | "conflict";
+
+/** 登录后第一次对账: 本机与云端谁覆盖谁. */
+export function decideInit(input: {
+  /** 云端这一行写过没有. */
+  initialized: boolean;
+  /** 未同步标记: null = 没有; 其余 (有待写的改动 / 冲突没选完) 都算有. */
+  pending: string | null;
+  /** 上次确认与云端一致时的快照; null = 没记过 (升级前的客户端, 或存不进去). */
+  baseline: Canon | null;
+  local: Canon;
+  remote: Canon;
+}): InitAction {
+  if (!input.initialized) return "seed_cloud";
+  if (input.pending == null) return "adopt_cloud";
+  if (input.local === input.remote) return "already_in_sync";
+  if (input.baseline === input.remote) return "push_local";
+  return "conflict";
+}
+
+export type PersistAction =
+  /** 本标签页的冲突还没选完: 改动只留在本机. */
+  | "hold"
+  /** 同一浏览器的别的标签页标了冲突: 这边也进入冲突状态, 改动只留在本机. */
+  | "join_conflict"
+  /** 内容与基线一致、也没有写回在途: 没有要写的, 清标记. */
+  | "in_sync"
+  /** 排一笔写回. */
+  | "write";
+
+/** 本机数据变了 (或用户点重试): 要不要往云端写. */
+export function decidePersist(input: {
+  /** 本标签页是否处于冲突状态. */
+  conflict: boolean;
+  pending: string | null;
+  /** 还没结束的写回笔数. */
+  inFlight: number;
+  next: Canon;
+  baseline: Canon | null;
+}): PersistAction {
+  if (input.conflict) return "hold";
+  if (input.pending === CONFLICT) return "join_conflict";
+  // 有写回在途时不能算一致: 在途那笔成功后云端是它的内容, 本机得再写一次才一致.
+  if (input.inFlight === 0 && input.next === input.baseline) return "in_sync";
+  return "write";
+}
+
+export type WriteAction =
+  /** 云端已经是要写的内容: 不用发请求, 只推进基线. */
+  | "already_written"
+  /** 云端还停在基线上: 推上去. */
+  | "push"
+  /** 云端既不是要写的内容也不在基线上: 被别人改过, 不推. */
+  | "conflict";
+
+/**
+ * 轮到一笔写回时, 先拉一次云端再决定: 页面可能开了很久, 别人已经改过云端,
+ * 这时整份推上去会抹掉对方的改动. 没有服务端版本号, 拉与写之间仍有一次往返的窗口.
+ */
+export function decideWrite(input: {
+  remote: Canon;
+  next: Canon;
+  baseline: Canon | null;
+}): WriteAction {
+  if (input.remote === input.next) return "already_written";
+  if (input.remote === input.baseline) return "push";
+  return "conflict";
+}
+
+// ============================================================
+// 外壳: 读写 localStorage、发请求、派事件
+// ============================================================
 let syncStatus: SyncStatus = "idle";
 let syncError: string | null = null;
 let retryWrite: (() => void) | null = null;
@@ -49,7 +153,7 @@ export function getSyncState(): { status: SyncStatus; error: string | null } {
 function setSyncState(status: SyncStatus, error: string | null = null): void {
   syncStatus = status;
   syncError = error;
-  window.dispatchEvent(new CustomEvent(SYNC_STATUS_EVENT));
+  emit("sync_status_changed");
 }
 
 /** 登出、会话失效、重新初始化时调用: 同步状态回到与实际一致, 重试不再推旧快照. */
@@ -113,15 +217,6 @@ export function retrySync(): void {
   retryWrite?.();
 }
 
-async function request(path: string, init?: RequestInit): Promise<string> {
-  return readOk(
-    await apiFetch(`/api/${path}`, {
-      credentials: "same-origin",
-      ...init,
-    }),
-  );
-}
-
 function parseRemoteStorage(value: unknown): RemoteUserStorage {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("服务端用户状态格式无效");
@@ -157,7 +252,7 @@ function byteLength(text: string): number {
 
 async function saveRemoteStorage(snapshot: UserStorageSnapshot): Promise<void> {
   const body = JSON.stringify(snapshot);
-  await request("storage", {
+  await apiJson("/api/storage", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body,
@@ -169,7 +264,7 @@ async function saveRemoteStorage(snapshot: UserStorageSnapshot): Promise<void> {
 async function importLocalHistory(): Promise<void> {
   const entries = getHistory();
   if (entries.length === 0) return;
-  await request("history/import", {
+  await apiJson("/api/history/import", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ entries }),
@@ -183,7 +278,7 @@ async function fetchRemote(): Promise<{
   snapshot: UserStorageSnapshot;
   canon: string;
 }> {
-  const remote = parseRemoteStorage(JSON.parse(await request("storage", { cache: "no-store" })));
+  const remote = parseRemoteStorage(await apiJson<unknown>("/api/storage", { cache: "no-store" }));
   const snapshot: UserStorageSnapshot = {
     coal_prefs: remote.coal_prefs,
     contract: remote.contract ?? null,
@@ -201,20 +296,29 @@ async function fetchRemote(): Promise<{
 export async function initializeCloudStorage(): Promise<() => void> {
   resetSyncState();
   const remote = await fetchRemote();
-  if (!remote.initialized) {
-    const local = getUserStorageSnapshot();
-    await saveRemoteStorage(local);
-    setBaseline(canonicalUserSnapshot(local));
-    setPendingFlag(null);
-  } else if (hasUnsyncedChanges()) {
-    const local = getUserStorageSnapshot();
-    const localCanon = canonicalUserSnapshot(local);
-    if (localCanon === remote.canon) {
+  const local = getUserStorageSnapshot();
+  const localCanon = canonicalUserSnapshot(local);
+  switch (
+    decideInit({
+      initialized: remote.initialized,
+      pending: pendingFlag(),
+      baseline: getBaseline(),
+      local: localCanon,
+      remote: remote.canon,
+    })
+  ) {
+    case "seed_cloud":
+      await saveRemoteStorage(local);
+      setBaseline(localCanon);
+      setPendingFlag(null);
+      break;
+    case "already_in_sync":
       // 上次 PUT 其实写成功了, 只是成功回调没跑 (页面被系统杀掉): 标记白留了, 清掉即可.
       setPendingFlag(null);
       setBaseline(remote.canon);
-    } else if (getBaseline() === remote.canon) {
-      // 标记期间云端没人动过: 本机的改动比云端新, 自动推上去; 推不上去也不拿云端旧值覆盖本机.
+      break;
+    case "push_local":
+      // 推不上去也不拿云端旧值覆盖本机.
       try {
         await saveRemoteStorage(local);
         setPendingFlag(null);
@@ -222,15 +326,16 @@ export async function initializeCloudStorage(): Promise<() => void> {
       } catch (error) {
         setSyncState("error", errorMessage(error));
       }
-    } else {
-      // 云端在标记期间被别人改过 (或升级前留下的标记, 没有基线可比对, 按被别人改过处理):
-      // 不自动推也不覆盖本机, 等用户在横幅里二选一; 选之前一个字节都不往云端写.
+      break;
+    case "conflict":
+      // 选之前一个字节都不往云端写.
       enterConflict();
-    }
-  } else {
-    replaceUserStorageSnapshot(remote.snapshot);
-    setBaseline(remote.canon);
-    setPendingFlag(null);
+      break;
+    case "adopt_cloud":
+      replaceUserStorageSnapshot(remote.snapshot);
+      setBaseline(remote.canon);
+      setPendingFlag(null);
+      break;
   }
   try {
     await importLocalHistory();
@@ -243,16 +348,22 @@ export async function initializeCloudStorage(): Promise<() => void> {
   let latestWrite = 0;
   let inFlight = 0;
   const persist = () => {
-    // 冲突没选完之前 (本标签页或同一浏览器的别的标签页), 改动只留在本机.
-    if (conflict || pendingFlag() === CONFLICT) {
-      if (!conflict) enterConflict();
-      return;
-    }
     const snapshot = getUserStorageSnapshot();
     const canon = canonicalUserSnapshot(snapshot);
-    // 内容与云端一致、也没有写回在途 (例如冲突选「用云端」后的事件回波): 没有要写的.
-    // 有写回在途时不能走这条: 在途那笔成功后云端是它的内容, 本机得再写一次才一致.
-    if (inFlight === 0 && canon === getBaseline()) {
+    const action = decidePersist({
+      conflict,
+      pending: pendingFlag(),
+      inFlight,
+      next: canon,
+      baseline: getBaseline(),
+    });
+    if (action === "hold") return;
+    if (action === "join_conflict") {
+      enterConflict();
+      return;
+    }
+    if (action === "in_sync") {
+      // 例如冲突选「用云端」后的事件回波.
       setPendingFlag(null);
       setSyncState("idle");
       return;
@@ -265,16 +376,13 @@ export async function initializeCloudStorage(): Promise<() => void> {
       .catch(() => undefined)
       .then(async () => {
         if (conflict) return;
-        // 写之前先看云端还停不停在基线上: 页面可能开了很久, 别人已经改过云端,
-        // 这时整份推上去会抹掉对方的改动. 没有服务端版本号, 拉与写之间仍有一次往返的窗口.
         const remote = await fetchRemote();
-        if (remote.canon !== canon) {
-          if (remote.canon !== getBaseline()) {
-            enterConflict();
-            return;
-          }
-          await saveRemoteStorage(snapshot);
+        const step = decideWrite({ remote: remote.canon, next: canon, baseline: getBaseline() });
+        if (step === "conflict") {
+          enterConflict();
+          return;
         }
+        if (step === "push") await saveRemoteStorage(snapshot);
         // 每笔写成功都推进基线 (队列是串行的): 不然后一笔失败时基线落后于云端,
         // 下次初始化会把自己写的内容当成"别人改过".
         setBaseline(canon);
@@ -290,15 +398,11 @@ export async function initializeCloudStorage(): Promise<() => void> {
       });
   };
   retryWrite = persist;
-  for (const eventName of USER_STORAGE_EVENTS) {
-    window.addEventListener(eventName, persist);
-  }
+  const stopListening = listen(USER_STORAGE_EVENTS, persist);
 
   return () => {
     if (retryWrite === persist) retryWrite = null;
-    for (const eventName of USER_STORAGE_EVENTS) {
-      window.removeEventListener(eventName, persist);
-    }
+    stopListening();
   };
 }
 

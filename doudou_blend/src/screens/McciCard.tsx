@@ -6,11 +6,10 @@
  * 接口取不到时整张卡不显示.
  */
 import { useEffect, useState } from "react";
+import { ChangeText, STALE_AFTER_DAYS } from "../ChangeText";
 import { changeOver, fetchMcci, hasSpec, lastYear, NO_SPEC_TEXT, specText, staleDays } from "../mcci";
 import type { McciPoint, McciSeries } from "../types";
 
-/** 超过这么多个日历天没新值就提示 (周末 + 一天假期以内不算). */
-export const STALE_AFTER_DAYS = 4;
 const CHART_W = 120;
 const CHART_H = 28;
 /** 两端留白, 末端圆点与悬停圆点不被裁掉. */
@@ -22,21 +21,6 @@ const cell = { padding: "6px 6px 6px 0", verticalAlign: "top" as const };
 const numCell = { ...cell, textAlign: "right" as const, whiteSpace: "nowrap" as const };
 
 const shortDate = (date: string) => date.slice(5);
-
-/** 国内习惯: 红涨绿跌, 平盘中性. */
-export function ChangeText({ pct }: { pct: number | null }) {
-  if (pct == null) return <span style={small}>—</span>;
-  const rounded = Number(pct.toFixed(2));
-  const color =
-    rounded === 0 ? "var(--c-text-3)" : rounded > 0 ? "var(--c-danger)" : "var(--c-success)";
-  const arrow = rounded === 0 ? "" : rounded > 0 ? "▲+" : "▼";
-  return (
-    <span style={{ color, fontWeight: 600 }}>
-      {arrow}
-      {Math.abs(rounded).toFixed(2)}%
-    </span>
-  );
-}
 
 /** 一年走势小图: 悬停出十字线与当天的值. */
 function Trend({ label, points }: { label: string; points: McciPoint[] }) {

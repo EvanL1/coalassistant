@@ -1,9 +1,11 @@
 /**
  * 屏 3 - 合同约束
- * 8 项 spec 的 min/max 可编辑. 存 localStorage.
+ * 8 项 spec 的 min/max 可编辑. 存本机缓存并同步云端 (storage.ts / cloudStorage.ts).
  * "重置为默认" 恢复 master 自带的默认合同.
+ * 合同在别处变了 (同步横幅选了「用云端」等): 表单没动过就重载, 动过只提示.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useAppEvents } from "../events";
 import { loadMaster } from "../master_loader";
 import {
   getUserContract,
@@ -235,19 +237,42 @@ export function ContractScreen() {
   const markBlurred = (field: string) =>
     setBlurred((prev) => (prev.has(field) ? prev : new Set(prev).add(field)));
 
+  // 表单上次与哪一份已存合同、哪一份表单内容对齐 (载入、保存、重置时记下):
+  // 靠它分辨"合同在别处变了没有"和"表单动过没有".
+  const synced = useRef<{ contract: string; form: string } | null>(null);
+  // 表单改到一半时合同在别处 (同步横幅「用云端」、另一台设备) 变了: 不丢正在填的, 只提示.
+  const [changedElsewhere, setChangedElsewhere] = useState(false);
+
+  /** 把已存的合同 (没有就用默认合同) 摆进表单. */
+  function showStored(m: CoalMaster) {
+    const stored = getUserContract();
+    const next = (stored ?? m.default_contract.specs).map(specToForm);
+    synced.current = { contract: JSON.stringify(stored), form: JSON.stringify(next) };
+    setForm(next);
+    setChangedElsewhere(false);
+  }
+
   function load() {
     setLoadError(null);
     loadMaster()
       .then((m) => {
         setMaster(m);
-        const userOverride = getUserContract();
-        const specs = userOverride ?? m.default_contract.specs;
-        setForm(specs.map(specToForm));
+        showStored(m);
       })
       .catch((error: unknown) => setLoadError(errorMessage(error)));
   }
 
   useEffect(load, []);
+
+  useAppEvents(["contract_changed"], () => {
+    // 煤库还没加载完: 加载完成时读到的就是最新合同.
+    if (!master || !synced.current) return;
+    // 自己保存 / 重置的回波, 或云端整份替换时顺带发的事件: 合同没变, 表单不动.
+    if (JSON.stringify(getUserContract()) === synced.current.contract) return;
+    // 不重载的话表单还是旧合同, 再点保存就把别处刚放弃的那份推回去了.
+    if (JSON.stringify(form) === synced.current.form) showStored(master);
+    else setChangedElsewhere(true);
+  });
 
   if (loadError) {
     return (
@@ -310,6 +335,9 @@ export function ContractScreen() {
       return;
     }
     const specs = form.map((f, i) => formToSpec(f, penalties[i].penalty));
+    // 先记下表单已与这份合同对齐: 写入时派发的变更事件才认得出是自己写的.
+    synced.current = { contract: JSON.stringify(specs), form: JSON.stringify(form) };
+    setChangedElsewhere(false);
     setUserContract(specs);
     setSavedFlag(true);
     setTimeout(() => setSavedFlag(false), 2000);
@@ -317,8 +345,11 @@ export function ContractScreen() {
 
   function reset() {
     if (!confirm("重置合同为默认值?")) return;
+    const next = master!.default_contract.specs.map(specToForm);
+    synced.current = { contract: JSON.stringify(null), form: JSON.stringify(next) };
+    setChangedElsewhere(false);
     clearUserContract();
-    setForm(master!.default_contract.specs.map(specToForm));
+    setForm(next);
   }
 
   const isCustom = getUserContract() != null;
@@ -372,6 +403,23 @@ export function ContractScreen() {
           }}
         >
           有 {penaltyErrorCount} 项的计价条款还没填对，改好才能保存（也可以先关掉那项的计价开关）
+        </div>
+      )}
+
+      {changedElsewhere && (
+        <div
+          role="status"
+          style={{
+            marginTop: 12,
+            padding: "8px 10px",
+            borderRadius: 8,
+            background: "#fef3c7",
+            color: "#92400e",
+            fontSize: 12,
+          }}
+        >
+          合同已在别处更新 (云端或另一台设备)。这里是你还没保存的改动: 现在保存会覆盖更新后的合同;
+          不想覆盖就切到别的页面再回来, 会载入更新后的合同。
         </div>
       )}
 

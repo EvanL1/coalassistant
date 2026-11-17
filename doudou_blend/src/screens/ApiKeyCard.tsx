@@ -14,6 +14,8 @@ import {
   type ApiKey,
   type KeyScope,
 } from "../apiKeys";
+import { errorMessage } from "../http";
+import { formatDate } from "./admin/styles";
 
 const SCOPE_LABEL: Record<KeyScope, string> = {
   data: "写煤库",
@@ -39,7 +41,7 @@ export function ApiKeyCard() {
     listApiKeys()
       .then((rows) => alive && setKeys(rows))
       .catch((e: unknown) => {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
+        if (alive) setError(errorMessage(e));
       });
     return () => {
       alive = false;
@@ -50,7 +52,7 @@ export function ApiKeyCard() {
     try {
       setKeys(await listApiKeys());
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -66,7 +68,7 @@ export function ApiKeyCard() {
       setName("");
       await refresh();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     } finally {
       setCreating(false);
     }
@@ -79,7 +81,7 @@ export function ApiKeyCard() {
       await revokeApiKey(key.id);
       await refresh();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -295,9 +297,4 @@ function formatUsage(item: ApiKey): string {
   if (item.revoked_at) return `销毁于 ${formatDate(item.revoked_at)}`;
   if (!item.last_used_at) return "从未使用";
   return `最近使用 ${formatDate(item.last_used_at)}`;
-}
-
-function formatDate(iso: string): string {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString("zh-CN");
 }

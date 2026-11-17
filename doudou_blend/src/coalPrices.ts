@@ -1,7 +1,6 @@
-import type { ResolvedCoal } from "./domain/resolvedCoal";
+import { toWireCoal, type ResolvedCoal } from "./domain/resolvedCoal";
 import type { Coal, CoalPriceHistory, CoalPriceSnapshot, CoalValue, PriceResult } from "./types";
-import { apiFetch } from "./http";
-import { placeFields } from "./domain/place";
+import { apiJsonOrNull } from "./http";
 import { isAhead, type PriceForecast } from "./priceForecast";
 
 export type CardPrice =
@@ -12,35 +11,22 @@ export type CardPrice =
   | { kind: "unavailable" };
 
 export async function fetchCoalPrices(): Promise<CoalPriceSnapshot | null> {
-  try {
-    const response = await apiFetch("/api/coal-prices", {
-      credentials: "same-origin", cache: "no-store",
-    });
-    if (!response.ok) return null;
-    const result = (await response.json()) as CoalPriceSnapshot;
-    return result.ok && Array.isArray(result.prices) ? result : null;
-  } catch {
-    return null;
-  }
+  const result = await apiJsonOrNull<CoalPriceSnapshot>("/api/coal-prices", { cache: "no-store" });
+  return result?.ok && Array.isArray(result.prices) ? result : null;
 }
 
 export async function fetchCoalPriceHistory(name: string): Promise<CoalPriceHistory | null> {
-  try {
-    const response = await apiFetch(`/api/coal-prices/history?name=${encodeURIComponent(name)}`, {
-      credentials: "same-origin", cache: "no-store",
-    });
-    if (!response.ok) return null;
-    const result = (await response.json()) as CoalPriceHistory;
-    return result?.ok === true && result.name === name && Array.isArray(result.points)
-      && result.points.every((point) => point
-        && typeof point.day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(point.day)
-        && Number.isFinite(point.price)
-        && (point.benchmark === null || typeof point.benchmark === "string")
-        && (point.source === "live" || point.source === "backfill"))
-      ? result : null;
-  } catch {
-    return null;
-  }
+  const result = await apiJsonOrNull<CoalPriceHistory>(
+    `/api/coal-prices/history?name=${encodeURIComponent(name)}`,
+    { cache: "no-store" },
+  );
+  return result?.ok === true && result.name === name && Array.isArray(result.points)
+    && result.points.every((point) => point
+      && typeof point.day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(point.day)
+      && Number.isFinite(point.price)
+      && (point.benchmark === null || typeof point.benchmark === "string")
+      && (point.source === "live" || point.source === "backfill"))
+    ? result : null;
 }
 
 /** 历史按共享煤库记; 用户自己新增的煤 (哪怕同名) 没有自己的历史. */
@@ -50,18 +36,14 @@ export function hasPriceHistory(coal: ResolvedCoal, snapshot: CoalPriceSnapshot 
 
 export async function estimateLive(coals: Coal[]): Promise<Map<string, CoalValue> | null> {
   if (coals.length === 0) return new Map();
-  try {
-    const response = await apiFetch("/api/price", {
-      method: "POST", credentials: "same-origin",
-      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ coals }),
-    });
-    if (!response.ok) return null;
-    const result = (await response.json()) as PriceResult;
-    if (!result.ok || !Array.isArray(result.coal_values)) return null;
-    return new Map(result.coal_values.map((value) => [value.name, value]));
-  } catch {
+  const result = await apiJsonOrNull<PriceResult>("/api/price", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ coals }),
+  });
+  if (!result?.ok || !Array.isArray(result.coal_values) || result.coal_values.some((value) => value == null)) {
     return null;
   }
+  return new Map(result.coal_values.map((value) => [value.name, value]));
 }
 
 export function isModified(coal: ResolvedCoal): boolean {
@@ -76,14 +58,9 @@ function canEstimate(coal: ResolvedCoal): boolean {
   return !coal.invalidOverride && coal.readiness !== "duplicate_name";
 }
 
-/** 卡片给停用煤也估价, 不能复用只放行 ready 的 toEstimateCoal. */
+/** 卡片给停用煤也估价, 所以不走只放行 ready 的 toEstimateCoal; 煤的形状与它共用 toWireCoal. */
 export function coalsToEstimate(coals: ResolvedCoal[], snapshot: CoalPriceSnapshot | null): Coal[] {
-  return coals.filter((coal) => canEstimate(coal) && needsLive(coal, snapshot))
-    .map((coal) => ({
-      name: coal.name, props: { ...coal.props }, fob: 0, frt: 0,
-      coal_type: coal.coal_type, form: coal.form, region: coal.region,
-      ...placeFields(coal),
-    }));
+  return coals.filter((coal) => canEstimate(coal) && needsLive(coal, snapshot)).map(toWireCoal);
 }
 
 /** 这种煤一周后的预测价 (共享煤库口径). 没有预测、或预测的那天已经到了 (快照停更) 返回 null. */

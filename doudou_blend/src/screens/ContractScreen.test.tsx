@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -9,6 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { emit } from "../events";
 import type { CoalMaster, Spec } from "../types";
 import { ContractScreen } from "./ContractScreen";
 
@@ -317,6 +319,81 @@ describe("合同屏上下限校验", () => {
     const max = row("A").getByLabelText("≤") as HTMLInputElement;
     expect(max.type).toBe("text");
     expect(max.inputMode).toBe("decimal");
+  });
+});
+
+describe("合同屏跟随别处的合同变更", () => {
+  /** 别处 (同步横幅「用云端」、另一台设备) 存下的合同: 灰上限从 10 改成 12. */
+  const elsewhere: Spec[] = [{ ...specs[0], max: 12 }, specs[1], specs[2]];
+  const ashMax = () => (row("A").getByLabelText("≤") as HTMLInputElement).value;
+
+  function changeElsewhere(next: Spec[] | null) {
+    mocks.getUserContract.mockReturnValue(next);
+    act(() => emit("contract_changed"));
+  }
+
+  it("表单没动过: 合同在别处变了就重载, 再保存不会把旧合同推回去", async () => {
+    await renderScreen();
+    expect(ashMax()).toBe("10");
+
+    changeElsewhere(elsewhere);
+
+    expect(ashMax()).toBe("12");
+    expect(screen.queryByText(/合同已在别处更新/)).toBeNull();
+    fireEvent.click(screen.getByText("保存合同"));
+    expect(savedSpecs()[0].max).toBe(12);
+  });
+
+  it("表单改到一半: 不丢正在填的内容, 提示保存会覆盖; 保存后提示消失", async () => {
+    await renderScreen();
+    fireEvent.change(row("A").getByLabelText("≤"), { target: { value: "11" } });
+
+    changeElsewhere(elsewhere);
+
+    expect(ashMax()).toBe("11");
+    expect(screen.getByText(/合同已在别处更新/)).toBeTruthy();
+    fireEvent.click(screen.getByText("保存合同"));
+    expect(savedSpecs()[0].max).toBe(11);
+    expect(screen.queryByText(/合同已在别处更新/)).toBeNull();
+  });
+
+  it("事件来了但合同没变 (整份替换的回波): 不重载也不提示", async () => {
+    await renderScreen();
+    fireEvent.change(row("A").getByLabelText("≤"), { target: { value: "11" } });
+
+    changeElsewhere(null);
+
+    expect(ashMax()).toBe("11");
+    expect(screen.queryByText(/合同已在别处更新/)).toBeNull();
+  });
+
+  it("自己保存触发的变更不重载表单: 原样留着刚填的写法", async () => {
+    mocks.setUserContract.mockImplementation((saved: Spec[]) => {
+      mocks.getUserContract.mockReturnValue(saved);
+      emit("contract_changed");
+    });
+    await renderScreen();
+    fireEvent.change(row("A").getByLabelText("≤"), { target: { value: "１０,５" } });
+
+    fireEvent.click(screen.getByText("保存合同"));
+
+    expect(savedSpecs()[0].max).toBe(10.5);
+    expect(ashMax()).toBe("１０,５");
+    expect(screen.queryByText(/合同已在别处更新/)).toBeNull();
+  });
+
+  it("保存之后合同又在别处变了: 表单已与存下的一致, 直接重载", async () => {
+    mocks.setUserContract.mockImplementation((saved: Spec[]) => {
+      mocks.getUserContract.mockReturnValue(saved);
+    });
+    await renderScreen();
+    fireEvent.change(row("A").getByLabelText("≤"), { target: { value: "11" } });
+    fireEvent.click(screen.getByText("保存合同"));
+
+    changeElsewhere(elsewhere);
+
+    expect(ashMax()).toBe("12");
+    expect(screen.queryByText(/合同已在别处更新/)).toBeNull();
   });
 });
 

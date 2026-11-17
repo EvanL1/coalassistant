@@ -6,12 +6,7 @@
  */
 import type { Benchmark, BenchmarkEntry, MasterPriceFactor, PriceFactor } from "./types";
 import { placeFields } from "./domain/place";
-import { apiFetch, readOk } from "./http";
-
-async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const text = await readOk(await apiFetch(path, { credentials: "same-origin", ...init }));
-  return text ? JSON.parse(text) : null;
-}
+import { apiJson } from "./http";
 
 /**
  * 当前生效的基准报价. 取不到 (离线、服务异常) 默认返回空表, 由调用方退回旧口径;
@@ -19,9 +14,9 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
  */
 export async function fetchBenchmarks(options?: { strict?: boolean }): Promise<BenchmarkEntry[]> {
   try {
-    const result = (await request("/api/benchmarks", { cache: "no-store" })) as {
-      benchmarks?: BenchmarkEntry[];
-    };
+    const result = await apiJson<{ benchmarks?: BenchmarkEntry[] } | null>("/api/benchmarks", {
+      cache: "no-store",
+    });
     return result?.benchmarks ?? [];
   } catch (error) {
     if (options?.strict) throw error;
@@ -66,16 +61,16 @@ export function toRequestBenchmark(entry: BenchmarkEntry): Benchmark {
 }
 
 export async function createBenchmark(benchmark: Benchmark): Promise<string> {
-  const result = (await request("/api/admin/benchmarks", {
+  const result = await apiJson<{ id: string }>("/api/admin/benchmarks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(benchmark),
-  })) as { id: string };
+  });
   return result.id;
 }
 
 export async function deleteBenchmark(id: string): Promise<void> {
-  await request(`/api/admin/benchmarks/${encodeURIComponent(id)}`, {
+  await apiJson(`/api/admin/benchmarks/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }

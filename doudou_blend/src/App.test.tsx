@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { emit } from "./events";
 import App from "./App";
 
 const sync = vi.hoisted(() => ({
@@ -16,7 +17,6 @@ vi.mock("./cloudStorage", () => ({
   retrySync: sync.retry,
   resetSyncState: () => undefined,
   resolveSyncConflict: async () => undefined,
-  SYNC_STATUS_EVENT: "doudou:sync_status_changed",
 }));
 vi.mock("./screens/TodayScreen", () => ({ TodayScreen: () => <div>今日内容</div> }));
 vi.mock("./screens/CoalPoolScreen", () => ({ CoalPoolScreen: () => <div>煤池内容</div> }));
@@ -53,7 +53,7 @@ it("任一接口回 401 时回到登录页并提示登录已过期", async () =>
   render(<App />);
   await screen.findByText("今日内容");
   act(() => {
-    window.dispatchEvent(new CustomEvent("doudou:session_expired"));
+    emit("session_expired");
   });
   expect(await screen.findByText("登录已过期, 请重新登录")).toBeTruthy();
   expect(screen.getByRole("button", { name: "登录" })).toBeTruthy();
@@ -70,7 +70,7 @@ it("云端写回失败时常驻提示, 点重试再写一次", async () => {
 
   sync.state = { status: "idle", error: null };
   act(() => {
-    window.dispatchEvent(new CustomEvent("doudou:sync_status_changed"));
+    emit("sync_status_changed");
   });
   expect(screen.queryByText("有改动还没同步到云端")).toBeNull();
 });

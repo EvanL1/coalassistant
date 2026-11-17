@@ -295,12 +295,6 @@ export interface McciSeries extends DisplaySeries {
   forecast?: McciPoint;
 }
 
-/** 估价模块入口 (/api/price) 的输入. */
-export interface PriceRequest {
-  coals: Coal[];
-  price_factor: PriceFactor;
-}
-
 /** 估价模块入口的输出. */
 export interface PriceResult {
   ok: boolean;
@@ -607,15 +601,11 @@ export interface BlendResult {
   price_robustness?: RobustnessReport | null;
 }
 
-/** 混合后 6 项指标 (CSR 回归自变量 X). */
-export interface MixedIndicators {
-  s: number;
-  a: number;
-  v: number;
-  g: number;
-  y: number;
-  m: number;
-}
+/** 混合后 6 项指标 (CSR 回归自变量 X) 对应的指标键; 与服务端 admin.rs 的 MIXED_KEYS 一致. */
+export const MIXED_KEYS = ["S", "A", "V", "G", "Y", "M"] as const satisfies readonly IndicatorKey[];
+
+/** 混合后 6 项指标: 字段是 MIXED_KEYS 的小写 (s / a / v / g / y / m). */
+export type MixedIndicators = Record<Lowercase<(typeof MIXED_KEYS)[number]>, number>;
 
 /** 回填的混煤实测化验值. 缺省/null = 本次不更新该项. */
 export interface MeasuredQuality {
@@ -665,7 +655,9 @@ export interface HistoryRecord {
 
 // ===== Master schema =====
 
-export type CoalStatus = "verified" | "active" | "draft" | "incomplete" | "archived";
+/** 煤的状态; 与 master 词表、服务端 today.rs 的 COAL_STATUSES 一致. */
+export const COAL_STATUSES = ["verified", "active", "draft", "incomplete", "archived"] as const;
+export type CoalStatus = (typeof COAL_STATUSES)[number];
 export type Confidence = "high" | "medium" | "low" | "spec";
 
 export interface MasterCoalEntry {
@@ -682,8 +674,13 @@ export interface MasterCoalEntry {
   /** 镜质组最大反射率估算值 (Ro,max %, 煤阶), 由挥发换算; 只是存档, 求解器不读. */
   ro_estimate?: number | null;
   props: Partial<Record<string, number>>;
-  fob?: number | null;
-  frt?: number | null;
+  /**
+   * 服务端结构里还有这两个字段, 但煤价一律按质量估算, 前端不读也不写:
+   * 类型写成 never: 给它赋值、或把读出来的值当数用, 编译都报错 (单纯读不报, 读到的类型是 undefined).
+   * `check:data` 也禁止 master 带它们.
+   */
+  fob?: never;
+  frt?: never;
   confidence?: Record<string, Confidence>;
   note?: string | null;
 }

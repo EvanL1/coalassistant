@@ -1,6 +1,6 @@
 import { INDICATOR_LABEL } from "../types";
 import type { BlendResult, InfeasibleBound } from "../types";
-import { friendlySolverText } from "../domain/resultNotes";
+import { failureKind, friendlySolverText } from "../domain/resultNotes";
 
 /**
  * 不可行诊断面板.
@@ -59,16 +59,17 @@ export function InfeasiblePanel({
   contractIncomplete?: boolean;
 }) {
   const bounds = result.infeasible_bounds ?? [];
+  const kind = failureKind(result, contractIncompleteInput);
   // ok 却没有成本结构 = 结果不完整 (畸形或存量记录), 不是合同不可行 —— 标题和
   // 说明都得跟着变, 否则界面会对着一个成功的求解喊"不可行".
-  const incomplete = result.ok;
+  const incomplete = kind === "incomplete";
   const reason = friendlySolverText(
     result.reason ??
       (incomplete ? "求解成功但没有返回成本结构, 无法展示方案." : "求解未给出原因."),
   );
-  const contractIncomplete = !incomplete && contractIncompleteInput;
+  const contractIncomplete = kind === "contract";
   // 求解器没算出结论、也没能证实不可行: 合同也许本来配得出, 不能按"不可行"引导用户去放宽.
-  const undetermined = !incomplete && !contractIncomplete && result.undetermined === true;
+  const undetermined = kind === "undetermined";
 
   return (
     <div className="card" style={{ borderLeft: "4px solid var(--c-danger)" }}>
@@ -153,7 +154,7 @@ export function InfeasiblePanel({
         </p>
       )}
 
-      {bounds.length === 0 && !incomplete && !contractIncomplete && !undetermined && (
+      {bounds.length === 0 && kind === "infeasible" && (
         <p style={{ margin: 0, fontSize: 12, color: "var(--c-text-3)" }}>
           没有单独一项约束能解释这次不可行: 冲突牵涉两项以上, 或者煤池本身就不够.
           需要同时放宽多项, 或去「煤池」启用更多煤源.

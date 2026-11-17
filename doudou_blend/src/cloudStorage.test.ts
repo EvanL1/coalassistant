@@ -6,8 +6,9 @@ import {
   resetSyncState,
   resolveSyncConflict,
   retrySync,
-  SYNC_STATUS_EVENT,
 } from "./cloudStorage";
+import { listen } from "./events";
+import { makeStorage } from "./test/makeStorage";
 import {
   canonicalUserSnapshot,
   getCoalPrefs,
@@ -95,41 +96,10 @@ function fakeCloud(initial: UserStorageSnapshot) {
   };
 }
 
-function makeStorage(): Storage {
-  const values = new Map<string, string>();
-  return {
-    get length() {
-      return values.size;
-    },
-    clear: () => values.clear(),
-    getItem: (key) => values.get(key) ?? null,
-    key: (index) => [...values.keys()][index] ?? null,
-    removeItem: (key) => {
-      values.delete(key);
-    },
-    setItem: (key, value) => {
-      values.set(key, value);
-    },
-  };
-}
-
 beforeEach(() => {
   vi.stubGlobal("window", new EventTarget());
   vi.stubGlobal("localStorage", makeStorage());
   vi.stubGlobal("fetch", vi.fn());
-  if (typeof CustomEvent === "undefined") {
-    vi.stubGlobal(
-      "CustomEvent",
-      class<T> extends Event {
-        detail: T;
-
-        constructor(type: string, init?: CustomEventInit<T>) {
-          super(type);
-          this.detail = init?.detail as T;
-        }
-      },
-    );
-  }
 });
 
 afterEach(() => {
@@ -236,7 +206,7 @@ describe("Web PostgreSQL 状态同步", () => {
     const fetchMock = vi.mocked(fetch);
     const cloud = fakeCloud(snapshotOf({}));
     let changes = 0;
-    window.addEventListener(SYNC_STATUS_EVENT, () => {
+    listen(["sync_status_changed"], () => {
       changes += 1;
     });
 

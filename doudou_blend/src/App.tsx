@@ -11,7 +11,8 @@ import { getSession } from "./auth";
 import { AdminScreen } from "./screens/AdminScreen";
 import { IndexTicker } from "./IndexTicker";
 import { initializeCloudStorage, resetSyncState } from "./cloudStorage";
-import { SESSION_EXPIRED_EVENT, SESSION_EXPIRED_MESSAGE } from "./http";
+import { listen } from "./events";
+import { SESSION_EXPIRED_MESSAGE } from "./http";
 import { SyncBanner } from "./SyncBanner";
 
 function App() {
@@ -40,13 +41,13 @@ function App() {
       setAuthed(false);
       setLoginNotice(SESSION_EXPIRED_MESSAGE);
     };
-    window.addEventListener("doudou:auth_changed", onChange);
-    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
+    const stopAuth = listen(["auth_changed"], onChange);
+    const stopExpired = listen(["session_expired"], onExpired);
     void refresh();
     return () => {
       active = false;
-      window.removeEventListener("doudou:auth_changed", onChange);
-      window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
+      stopAuth();
+      stopExpired();
     };
   }, []);
 

@@ -6,7 +6,8 @@
  */
 
 import type { QuoteComparisonResponse } from "./types";
-import { apiFetch, readOk } from "./http";
+import { apiJson } from "./http";
+import { invalidateMaster } from "./master_loader";
 
 export interface AdminSettings {
   /** 煤阶交互罚项系数; null 或 0 = 不启用. 设置后服务端对所有求解自动生效. */
@@ -68,56 +69,61 @@ export interface CoalUpdate {
 
 /**
  * 错误体有两种: 普通错误 `{reason}`, 批量校验失败 `{errors: [...]}` (422).
- * 都原样回显给用户 —— "这个字段基线已有" 之类的理由比 HTTP 码有用得多.
+ * 都原样回显给用户 (http.ts 的 reasonFromBody) —— "这个字段基线已有" 之类的理由比 HTTP 码有用得多.
  */
-async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const text = await readOk(
-    await apiFetch(`/api/${path}`, { credentials: "same-origin", ...init }),
-  );
-  return text ? JSON.parse(text) : null;
-}
-
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
+/**
+ * 煤库覆盖层的写接口: 成功或失败都让 master 缓存失效, 别的屏下次进来重新拉.
+ * 失败也失效: 请求可能已经到了服务端 (超时、回包丢了), 不能假定什么都没改.
+ */
+async function writeMaster(path: string, init: RequestInit): Promise<void> {
+  try {
+    await apiJson(path, init);
+  } finally {
+    invalidateMaster();
+  }
+}
+
 export async function getSettings(): Promise<AdminSettings> {
-  const result = (await request("admin/settings", { cache: "no-store" })) as {
-    settings: AdminSettings;
-  };
+  const result = await apiJson<{ settings: AdminSettings }>("/api/admin/settings", {
+    cache: "no-store",
+  });
   return result.settings;
 }
 
 export async function setRankInteractionK(k: number | null): Promise<AdminSettings> {
-  const result = (await request("admin/settings", {
+  const result = await apiJson<{ settings: AdminSettings }>("/api/admin/settings", {
     method: "PUT",
     headers: JSON_HEADERS,
     body: JSON.stringify({ rank_interaction_k: k }),
-  })) as { settings: AdminSettings };
+  });
   return result.settings;
 }
 
 export async function getCalibration(): Promise<Calibration> {
-  const result = (await request("admin/calibration", { cache: "no-store" })) as {
-    calibration: Calibration;
-  };
+  const result = await apiJson<{ calibration: Calibration }>("/api/admin/calibration", {
+    cache: "no-store",
+  });
   return result.calibration;
 }
 
 export async function getCsrModel(): Promise<CsrModelStatus> {
-  const result = (await request("admin/csr-model", { cache: "no-store" })) as {
-    model: CsrModelStatus;
-  };
+  const result = await apiJson<{ model: CsrModelStatus }>("/api/admin/csr-model", {
+    cache: "no-store",
+  });
   return result.model;
 }
 
 export async function listOverrides(): Promise<CoalOverride[]> {
-  const result = (await request("master/overrides", { cache: "no-store" })) as {
-    overrides?: CoalOverride[];
-  };
+  const result = await apiJson<{ overrides?: CoalOverride[] }>("/api/master/overrides", {
+    cache: "no-store",
+  });
   return result.overrides ?? [];
 }
 
 export async function addOverrides(updates: CoalUpdate[]): Promise<void> {
-  await request("master/coals", {
+  await writeMaster("/api/master/coals", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify({ updates }),
@@ -125,14 +131,14 @@ export async function addOverrides(updates: CoalUpdate[]): Promise<void> {
 }
 
 export async function deleteOverride(coal: string, field: string): Promise<void> {
-  await request(
-    `master/coals/${encodeURIComponent(coal)}/${encodeURIComponent(field)}`,
+  await writeMaster(
+    `/api/master/coals/${encodeURIComponent(coal)}/${encodeURIComponent(field)}`,
     { method: "DELETE" },
   );
 }
 
 export async function fetchQuoteComparison(): Promise<Omit<QuoteComparisonResponse, "ok">> {
-  const result = await request("admin/quotes", { cache: "no-store" }) as QuoteComparisonResponse;
+  const result = await apiJson<QuoteComparisonResponse>("/api/admin/quotes", { cache: "no-store" });
   if (result?.ok !== true || !Array.isArray(result.quotes) || !Array.isArray(result.by_type)
     || !result.quotes.every((quote) => quote
       && [quote.id, quote.username, quote.batch_id, quote.quoted_on, quote.name, quote.created_at].every((value) => typeof value === "string")
@@ -152,5 +158,5 @@ export async function fetchQuoteComparison(): Promise<Omit<QuoteComparisonRespon
 }
 
 export async function deleteQuote(id: string): Promise<void> {
-  await request(`admin/quotes/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await apiJson(`/api/admin/quotes/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

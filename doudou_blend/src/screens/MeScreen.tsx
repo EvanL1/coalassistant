@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { logout } from "../auth";
 import { getBackend } from "../backend";
 import { hasUnsyncedChanges } from "../cloudStorage";
+import { listen } from "../events";
 import { getLocalOwner } from "../localAccount";
 import { numberOrNull } from "../domain/numberInput";
 import {
@@ -74,15 +75,13 @@ export function MeScreen() {
     const onHistoryChange = () => void refreshHistoryCount();
 
     void refreshHistoryCount();
-    window.addEventListener("doudou:prefs_changed", refreshLocalStats);
-    window.addEventListener("doudou:contract_changed", refreshLocalStats);
-    window.addEventListener("doudou:history_changed", onHistoryChange);
+    const stopLocal = listen(["prefs_changed", "contract_changed"], refreshLocalStats);
+    const stopHistory = listen(["history_changed"], onHistoryChange);
     return () => {
       mountedRef.current = false;
       historyRequestRef.current += 1;
-      window.removeEventListener("doudou:prefs_changed", refreshLocalStats);
-      window.removeEventListener("doudou:contract_changed", refreshLocalStats);
-      window.removeEventListener("doudou:history_changed", onHistoryChange);
+      stopLocal();
+      stopHistory();
     };
   }, []);
 
@@ -241,16 +240,14 @@ export function MeScreen() {
 
 /**
  * 配煤现场: 一铲多少吨. 求解时每种煤要么不用、要么至少一铲, 且按整铲配.
- * 失焦或回车提交; 非法值回退上次值. 改了今日页会收到 doudou:shovel_changed 自动重算.
+ * 失焦或回车提交; 非法值回退上次值. 改了今日页会收到 shovel_changed 事件自动重算.
  */
 function ShovelCard() {
   const [input, setInput] = useState(() => String(getShovelTons()));
 
   useEffect(() => {
     // 登录后云端快照可能晚于本屏挂载才到, 跟着刷新.
-    const sync = () => setInput(String(getShovelTons()));
-    window.addEventListener("doudou:shovel_changed", sync);
-    return () => window.removeEventListener("doudou:shovel_changed", sync);
+    return listen(["shovel_changed"], () => setInput(String(getShovelTons())));
   }, []);
 
   function commit() {
