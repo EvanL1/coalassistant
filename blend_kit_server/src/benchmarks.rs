@@ -17,17 +17,18 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::{
-    bad_request, database_error, is_authenticated, merged_master_json, require_admin,
-    require_database, require_json_content_type, unauthorized, AppState,
+    bad_request, database_error, merged_master_json, require_database, require_json_content_type,
+    AdminUser, AppState, Authed,
 };
 use crate::coal_index::{self, IndexPoint};
 use crate::mcci;
+use crate::today;
 
 /// 只给人看或只给服务端用的价格因子字段, 交给核心前去掉.
 pub(crate) const MASTER_ONLY_KEYS: [&str; 8] = [
@@ -220,8 +221,13 @@ fn nearest_series(
     if candidates.len() <= 1 {
         return candidates.first().map(|(_, code, _)| code.to_string());
     }
-    let mut coal = json!({"name": "待推算", "props": {}, "fob": 0.0, "frt": 0.0});
-    put_present(&mut coal, benchmark, &["props", "coal_type", "form"]);
+    // 报价当煤: 只带煤种与形态, 不带产地 (挑序列不看地区).
+    let props = match &benchmark["props"] {
+        Value::Null => json!({}),
+        props => props.clone(),
+    };
+    let kind = today::tags_of(benchmark).filter(|(key, _)| ["coal_type", "form"].contains(key));
+    let coal = today::estimate_coal(json!("待推算"), props, 0.0, kind);
     let anchors: Vec<Value> = candidates
         .iter()
         .map(|(series, code, _)| {
@@ -404,8 +410,7 @@ pub(crate) async fn current_from_pool(
     master: &Value,
 ) -> (Vec<Value>, Option<String>) {
     let (inputs, read_error) = load_inputs(pool).await;
-    let today = Utc::now().with_timezone(&mcci::beijing()).date_naive();
-    (as_of(master, &inputs, today), read_error)
+    (as_of(master, &inputs, mcci::beijing_today()), read_error)
 }
 
 async fn master_value(state: &AppState) -> Value {
@@ -413,10 +418,7 @@ async fn master_value(state: &AppState) -> Value {
 }
 
 /// GET /api/benchmarks —— 当前生效的基准报价 (登录即可).
-pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
-    }
+pub(crate) async fn list(State(state): State<AppState>) -> Response {
     let master = master_value(&state).await;
     Json(json!({ "ok": true, "benchmarks": current(&state, &master).await })).into_response()
 }
@@ -473,14 +475,12 @@ pub(crate) fn validate_place(name: &str, levels: [&Option<String>; 3]) -> Result
 
 /// POST /api/admin/benchmarks —— 补录一条基准报价 (管理员).
 pub(crate) async fn create(
+    Authed(admin): Authed<AdminUser>,
     State(state): State<AppState>,
     headers: HeaderMap,
     request: Request<Body>,
 ) -> Response {
-    let admin = match require_admin(&headers, &state) {
-        Ok(admin) => admin.username.clone(),
-        Err(response) => return *response,
-    };
+    let admin = admin.username;
     if let Err(response) = require_json_content_type(&headers) {
         return *response;
     }
@@ -496,7 +496,10 @@ pub(crate) async fn create(
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    let quoted_on = NaiveDate::parse_from_str(&benchmark.date, "%Y-%m-%d").expect("已校验");
+    // parse_benchmark 已校验过日期, 这里只是取值; 取不出来照样按请求不对回 400.
+    let Ok(quoted_on) = NaiveDate::parse_from_str(&benchmark.date, "%Y-%m-%d") else {
+        return bad_request(&format!("报价日 {} 须为 YYYY-MM-DD", benchmark.date));
+    };
     let id = Uuid::new_v4().to_string();
     let inserted = sqlx::query(
         r#"
@@ -531,14 +534,7 @@ pub(crate) async fn create(
 }
 
 /// DELETE /api/admin/benchmarks/{id} —— 删一条补录的基准报价 (录错了用). master 的删不了.
-pub(crate) async fn delete(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
+pub(crate) async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -588,14 +584,7 @@ pub(crate) fn fill_price_request(request: &mut Value, master: &Value, benchmarks
 
 /// POST /api/price —— 估价模块的独立入口: 只估价, 不求解 (登录即可).
 /// 请求体 `{"coals": [...], "price_factor"?: {...}}`; 不给系数表或基准就用线上当前的.
-pub(crate) async fn estimate(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: Request<Body>,
-) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
-    }
+pub(crate) async fn estimate(State(state): State<AppState>, request: Request<Body>) -> Response {
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_PRICE_BODY).await else {
         return bad_request("请求体读取失败或超出大小上限");
     };

@@ -3,9 +3,10 @@
 use super::benchmarks;
 use super::master_data::INDICATOR_RANGE;
 use super::{
-    authenticated_username, bad_request, database_error, mcci, merged_master_json, require_admin,
-    require_database, require_json_content_type, AppState,
+    bad_request, database_error, mcci, merged_master_json, require_database,
+    require_json_content_type, AppState, Authed, SessionUser,
 };
+use crate::today;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -13,7 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use blend_kit::INDICATORS;
+use blend_kit::{COAL_TAG_KEYS, INDICATORS};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -59,6 +60,52 @@ pub(crate) struct QuoteItem {
     /// 当场改过的指标名.
     #[serde(default)]
     pub changed: Vec<String>,
+}
+
+impl QuoteItem {
+    /// 由一种煤的报价拼一条: 标签 (煤种、形态、产地) 从 `tags` 这条 JSON 上按
+    /// [`COAL_TAG_KEYS`] 取. 解构的元素个数绑在那张表上: 核心加了标签字段, 这里不跟着加就编不过;
+    /// 字段与键的对应由 `test_quote_item_tags_follow_the_shared_keys` 看着.
+    pub(crate) fn new(
+        name: String,
+        fob: f64,
+        frt: f64,
+        tags: &Value,
+        props: Map<String, Value>,
+        changed: Vec<String>,
+    ) -> Self {
+        let [coal_type, form, region, province, city, county] =
+            COAL_TAG_KEYS.map(|key| tags[key].as_str().map(String::from));
+        Self {
+            name,
+            fob,
+            frt,
+            coal_type,
+            form,
+            region,
+            province,
+            city,
+            county,
+            props,
+            changed,
+        }
+    }
+
+    /// 标签字段, 与 [`COAL_TAG_KEYS`] 同序.
+    pub(crate) fn tags(&self) -> impl Iterator<Item = (&'static str, Option<&str>)> {
+        let fields: [&Option<String>; COAL_TAG_KEYS.len()] = [
+            &self.coal_type,
+            &self.form,
+            &self.region,
+            &self.province,
+            &self.city,
+            &self.county,
+        ];
+        COAL_TAG_KEYS
+            .into_iter()
+            .zip(fields)
+            .map(|(key, field)| (key, field.as_deref()))
+    }
 }
 
 pub(crate) fn validate(batch: &QuoteBatch) -> Result<(), String> {
@@ -190,26 +237,12 @@ fn estimates_or_blank(items: &[QuoteItem], master: &Value, benchmarks: &[Value])
 
 /// 估价用的煤: 出厂口径 (运费不进), 空值指标去掉 (同每日快照).
 fn price_coal(item: &QuoteItem) -> Value {
-    let props: Map<String, Value> = item
-        .props
-        .iter()
-        .filter(|(_, value)| !value.is_null())
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    let mut coal = json!({ "name": item.name, "props": props, "fob": item.fob, "frt": 0 });
-    for (key, value) in [
-        ("coal_type", &item.coal_type),
-        ("form", &item.form),
-        ("region", &item.region),
-        ("province", &item.province),
-        ("city", &item.city),
-        ("county", &item.county),
-    ] {
-        if let Some(value) = value {
-            coal[key] = json!(value);
-        }
-    }
-    coal
+    today::estimate_coal(
+        json!(item.name),
+        today::present_props(&item.props),
+        item.fob,
+        item.tags(),
+    )
 }
 
 /// 存档后回给精算页的一条: 报价与服务端估价的对比.
@@ -338,14 +371,11 @@ pub(crate) async fn store(
 
 /// POST /api/quotes —— 存档一批询价 (登录即可). 估价由这里重算, 不信任浏览器.
 pub(crate) async fn archive(
+    Authed(user): Authed<SessionUser>,
     State(state): State<AppState>,
     headers: HeaderMap,
     request: Request<Body>,
 ) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
     if let Err(response) = require_json_content_type(&headers) {
         return *response;
     }
@@ -356,8 +386,7 @@ pub(crate) async fn archive(
         Ok(batch) => batch,
         Err(error) => return bad_request(&format!("询价格式无效: {error}")),
     };
-    let day = Utc::now().with_timezone(&mcci::beijing()).date_naive();
-    match store(&state, &username, &batch, day).await {
+    match store(&state, &user.username, &batch, mcci::beijing_today()).await {
         Ok(items) => Json(json!({ "ok": true, "items": items })).into_response(),
         Err(StoreError::Invalid(reason)) => bad_request(&reason),
         Err(StoreError::Unavailable(response)) => *response,
@@ -381,18 +410,17 @@ fn archived(items: &[QuoteItem], estimates: &[Estimate]) -> Vec<ArchivedQuote> {
 }
 
 /// 本账号每种煤最近一次询价, 只供输入框占位提示.
-pub(crate) async fn latest(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
+pub(crate) async fn latest(
+    Authed(user): Authed<SessionUser>,
+    State(state): State<AppState>,
+) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
     };
     match sqlx::query_as::<_, LatestQuote>(
         "SELECT DISTINCT ON (name) name, fob, frt, quoted_on FROM coal_quotes WHERE username = $1 ORDER BY name, created_at DESC"
-    ).bind(username).fetch_all(pool).await {
+    ).bind(user.username).fetch_all(pool).await {
         Ok(quotes) => Json(json!({ "ok": true, "quotes": quotes })).into_response(),
         Err(error) => database_error(error),
     }
@@ -506,12 +534,8 @@ pub(crate) struct ListQuery {
 
 pub(crate) async fn list(
     State(state): State<AppState>,
-    headers: HeaderMap,
     query: Result<Query<ListQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
     let limit = match query
         .ok()
         .and_then(|Query(query)| parse_limit(query.limit.as_deref()).ok())
@@ -551,14 +575,7 @@ pub(crate) async fn list(
     }
 }
 
-pub(crate) async fn delete(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
+pub(crate) async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -710,6 +727,48 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(validate(&batch(vec![edge])), Ok(()));
+    }
+
+    /// 标签字段与核心的 `COAL_TAG_KEYS` 一一对上: 每个标签的值就写它自己的键名, 对错了位看得出来.
+    #[test]
+    fn test_quote_item_tags_follow_the_shared_keys() {
+        let expected = COAL_TAG_KEYS.map(|key| (key, Some(key)));
+        let tags: Map<String, Value> = COAL_TAG_KEYS
+            .iter()
+            .map(|key| (key.to_string(), json!(key)))
+            .collect();
+        let built = QuoteItem::new(
+            "甲".into(),
+            2000.0,
+            60.0,
+            &Value::Object(tags.clone()),
+            Map::new(),
+            Vec::new(),
+        );
+        assert_eq!(built.tags().collect::<Vec<_>>(), expected);
+
+        // 网页存档走反序列化, 同样对得上.
+        let mut posted = tags;
+        posted.insert("name".into(), json!("甲"));
+        posted.insert("fob".into(), json!(2000));
+        posted.insert("props".into(), json!({}));
+        let parsed: QuoteItem = serde_json::from_value(Value::Object(posted)).unwrap();
+        assert_eq!(parsed.tags().collect::<Vec<_>>(), expected);
+
+        // 估价输入带全标签, 运费不进估价.
+        let coal = price_coal(&built);
+        for key in COAL_TAG_KEYS {
+            assert_eq!(coal[key], key);
+        }
+        assert_eq!(coal["fob"], 2000.0);
+        assert_eq!(coal["frt"], 0.0);
+
+        // 没有标签的 (只借校验的草稿): 一个也不带.
+        let bare = QuoteItem::new("乙".into(), 1.0, 0.0, &Value::Null, Map::new(), Vec::new());
+        assert!(bare.tags().all(|(_, tag)| tag.is_none()));
+        assert!(COAL_TAG_KEYS
+            .iter()
+            .all(|key| price_coal(&bare).get(key).is_none()));
     }
 
     #[test]

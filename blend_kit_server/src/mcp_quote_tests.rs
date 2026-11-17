@@ -168,9 +168,13 @@ fn test_cost_note_only_for_quote_blend() {
 #[test]
 fn test_gap_text_rounds_first_and_needs_a_benchmark() {
     let result = |gap: f64, benchmark: Value| {
-        json!({"coal_values": [
-            {"name": "甲", "fob": 2000.0 + gap, "fair": 2000.0, "gap": gap, "benchmark": benchmark}
-        ]})
+        let mut result = BlendResult::infeasible("", Vec::new());
+        result.coal_values = serde_json::from_value(json!([
+            {"name": "甲", "fob": 2000.0 + gap, "fair": 2000.0, "gap": gap, "benchmark": benchmark,
+             "adjustment": 0.0, "points": 1000.0}
+        ]))
+        .unwrap();
+        result
     };
     assert_eq!(
         gap_text(&result(54.6, json!("基准")), "甲").unwrap(),

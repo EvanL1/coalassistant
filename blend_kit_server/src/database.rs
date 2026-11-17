@@ -192,24 +192,26 @@ pub struct HistoryRecord {
     pub flue_temp: Option<f64>,
 }
 
-pub async fn connect_from_env() -> Option<PgPool> {
+/// 按环境变量连库并跑迁移. 本机没配 `DATABASE_URL` 返回 `Ok(None)` (不带数据库运行);
+/// Railway 上没配、连不上或迁移失败返回 Err —— 服务不该带着半截数据库起来, 由调用方退出.
+pub async fn connect_from_env() -> Result<Option<PgPool>, String> {
     let on_railway = std::env::var_os("RAILWAY_ENVIRONMENT_NAME").is_some();
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(value) if !value.trim().is_empty() => value,
-        _ if on_railway => panic!("Railway 部署必须设置 DATABASE_URL"),
-        _ => return None,
+        _ if on_railway => return Err("Railway 部署必须设置 DATABASE_URL".into()),
+        _ => return Ok(None),
     };
 
     let pool = retry_startup(&STARTUP_RETRY_DELAYS, || {
         pool_options().connect(&database_url)
     })
     .await
-    .unwrap_or_else(|error| panic!("无法连接 PostgreSQL: {error}"));
+    .map_err(|error| format!("无法连接 PostgreSQL: {error}"))?;
     migrator()
         .run(&pool)
         .await
-        .unwrap_or_else(|error| panic!("数据库迁移失败: {error}"));
-    Some(pool)
+        .map_err(|error| format!("数据库迁移失败: {error}"))?;
+    Ok(Some(pool))
 }
 
 /// 取连接最多等这么久: 数据库出问题时请求快速失败, 不挂满默认的 30 秒.
@@ -255,7 +257,7 @@ where
 
 /// 容忍库里有本二进制不认识的已应用迁移: 回滚到旧镜像时新版迁移已经跑过, 默认设置会
 /// 报 VersionMissing 让服务起不来. 前提是迁移只做加法、兼容上一版代码 (见部署文档).
-fn migrator() -> sqlx::migrate::Migrator {
+pub(crate) fn migrator() -> sqlx::migrate::Migrator {
     let mut migrator = sqlx::migrate!();
     migrator.set_ignore_missing(true);
     migrator
@@ -542,7 +544,7 @@ pub struct ApiKeyRow {
 pub async fn create_api_key(
     pool: &PgPool,
     name: &str,
-    scope: &str,
+    scope: crate::api_key::Scope,
     hash: &str,
     prefix: &str,
 ) -> Result<ApiKeyRow, sqlx::Error> {
@@ -556,7 +558,7 @@ pub async fn create_api_key(
     )
     .bind(id)
     .bind(name)
-    .bind(scope)
+    .bind(scope.as_str())
     .bind(hash)
     .bind(prefix)
     .fetch_one(pool)
@@ -601,7 +603,7 @@ pub async fn revoke_api_key(pool: &PgPool, id: &str) -> Result<u64, sqlx::Error>
 pub async fn authenticate_api_key(
     pool: &PgPool,
     hash: &str,
-    scope: &str,
+    scope: crate::api_key::Scope,
 ) -> Result<Option<String>, sqlx::Error> {
     let row = sqlx::query(
         r#"
@@ -611,7 +613,7 @@ pub async fn authenticate_api_key(
         "#,
     )
     .bind(hash)
-    .bind(scope)
+    .bind(scope.as_str())
     .fetch_optional(pool)
     .await?;
     row.map(|row| row.try_get("name")).transpose()

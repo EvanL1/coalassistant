@@ -30,6 +30,15 @@ http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 
+# 生产代码不许 unwrap / expect / panic: 能失败的地方走正常的错误处理; 确实不可能失败的
+# (启动期的常量解析等) 用 #[expect(clippy::…, reason = "…")] 就地说明. 测试里放行, 见 clippy.toml.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+# CI 历史上放行的写法, 与 CI 命令保持一致 (见 ci.yml 的 clippy 步骤).
+uninlined_format_args = "allow"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -57,13 +57,12 @@ pub(super) fn snapshot_line(coal: &ResolvedCoal, context: &Context) -> Option<St
     Some(line)
 }
 
-/// `tools/list` 里 `market` 的条目.
-pub(super) fn tool() -> Value {
-    json!({
-        "name": "market",
-        "description": "炼焦煤行情: 钢铁网炼焦煤价格指数各品种 (综合指数在最前) 的最新值、较上一期的涨跌与一周后的预测。预测只作参考, 不进配方、不当报价。",
-        "inputSchema": { "type": "object", "properties": {} }
-    })
+/// `tools/list` 里 `market` 的说明与参数.
+pub(super) fn tool() -> (&'static str, Value) {
+    (
+        "炼焦煤行情: 钢铁网炼焦煤价格指数各品种 (综合指数在最前) 的最新值、较上一期的涨跌与一周后的预测。预测只作参考, 不进配方、不当报价。",
+        json!({ "type": "object", "properties": {} }),
+    )
 }
 
 /// `market` 工具: 钢铁网炼焦煤价格指数各序列的最新值、较上一期的涨跌与一周后的预测.

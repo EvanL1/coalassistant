@@ -310,7 +310,8 @@ fn save_store(dir: &ConfigDir, store: &Store) -> Result<(), String> {
     }
     let path = root.join("profiles.json");
     let temporary = root.join("profiles.json.tmp");
-    let text = serde_json::to_string_pretty(store).expect("Store 可序列化");
+    let text =
+        serde_json::to_string_pretty(store).map_err(|error| format!("档案序列化失败: {error}"))?;
     // 上次中断可能留下旧的临时文件 (权限、链接都不可信): 删掉后新建, 不沿用.
     match std::fs::remove_file(&temporary) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
@@ -538,10 +539,9 @@ async fn run(invocation: Invocation, dir: &ConfigDir) -> Result<bool, String> {
                     )
                 })
                 .collect();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&listing).expect("可序列化")
-            );
+            let text = serde_json::to_string_pretty(&listing)
+                .map_err(|error| format!("档案列表序列化失败: {error}"))?;
+            println!("{text}");
             return Ok(true);
         }
         Command::Whoami => {

@@ -62,12 +62,17 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     let work = async move {
-        let permit = gate.acquire_owned().await.expect("求解信号量不会关闭");
+        // 这个信号量从不关闭; 万一拿不到许可, 当作这次没算成, 不让请求线程崩掉.
+        let permit = gate
+            .acquire_owned()
+            .await
+            .map_err(|error| error.to_string())?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             task()
         })
         .await
+        .map_err(|error| error.to_string())
     };
     match tokio::time::timeout(limit, work).await {
         Ok(Ok(value)) => Ok(value),

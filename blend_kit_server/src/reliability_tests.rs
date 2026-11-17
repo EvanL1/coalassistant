@@ -490,7 +490,7 @@ const ARCHIVED_LINE: &str = "这批报价已按批存档, 供后台「询价对�
 
 type Stored = std::sync::Mutex<Vec<(chrono::NaiveDate, quotes::QuoteBatch)>>;
 
-/// 走 `mcp_serve` 鉴权之后的那一段: 闸门开或关, 存档按 `outcome` 回, 落库的 (日期, 批) 记进 `stored`.
+/// 走 `mcp_post` (密钥已由中间件验过) 之后的那一段: 闸门开或关, 存档按 `outcome` 回, 落库的 (日期, 批) 记进 `stored`.
 async fn answer_with(
     context: mcp::Context,
     messages: Vec<Value>,
@@ -708,4 +708,195 @@ fn test_mcp_archive_line_states_the_outcome() {
         mcp_archive_line(&Err(quotes::StoreError::Database(sqlx::Error::PoolClosed))),
         "这批报价没有存档成功 (不影响上面的结果): 数据库写入失败"
     );
+}
+
+/// 存档规则穷举时一条消息是什么.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sent {
+    /// 报价合法的询价精算: 光看消息有一批可存.
+    Quote,
+    /// 报价写错的询价精算 (没求解, 没有可存的).
+    BadQuote,
+    /// 别的工具.
+    Other,
+    /// 不带 id 的询价精算: 通知, 不回包.
+    QuoteNotification,
+}
+
+/// 那条消息的回包是哪一种.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Got {
+    /// 工具结果, `isError == false`: 求解过.
+    Solved,
+    /// 工具结果, `isError == true`.
+    ToolError,
+    /// JSON-RPC error (求解闸门拒绝、超时).
+    RpcError,
+}
+
+/// 一条消息可能的 (消息, 回包). 写错的报价不会有 "算成了" 的回包; 通知没有回包.
+const ARCHIVE_CASES: [(Sent, Option<Got>); 9] = [
+    (Sent::Quote, Some(Got::Solved)),
+    (Sent::Quote, Some(Got::ToolError)),
+    (Sent::Quote, Some(Got::RpcError)),
+    (Sent::BadQuote, Some(Got::ToolError)),
+    (Sent::BadQuote, Some(Got::RpcError)),
+    (Sent::Other, Some(Got::Solved)),
+    (Sent::Other, Some(Got::ToolError)),
+    (Sent::Other, Some(Got::RpcError)),
+    (Sent::QuoteNotification, None),
+];
+
+/// 第 `at` 条消息的出厂报价: 每条不同, 存下来的那一批是哪条消息的一看便知.
+fn case_fob(at: usize) -> f64 {
+    2100.0 + 100.0 * at as f64
+}
+
+fn case_message(at: usize, sent: Sent) -> Value {
+    let id = at as i64 + 1;
+    match sent {
+        Sent::Quote => quote_call(id, case_fob(at), json!({})),
+        Sent::BadQuote => quote_call(id, -5.0, json!({})),
+        Sent::Other => rpc(
+            id,
+            "tools/call",
+            json!({ "name": "today_blend", "arguments": {} }),
+        ),
+        Sent::QuoteNotification => {
+            let mut message = quote_call(id, case_fob(at), json!({}));
+            message.as_object_mut().unwrap().remove("id");
+            message
+        }
+    }
+}
+
+fn case_reply(at: usize, got: Got) -> Value {
+    let id = at as i64 + 1;
+    let result = |is_error: bool| {
+        json!({"jsonrpc": "2.0", "id": id, "result": {
+            "content": [{"type": "text", "text": format!("第 {id} 条的正文")}],
+            "isError": is_error
+        }})
+    };
+    match got {
+        Got::Solved => result(false),
+        Got::ToolError => result(true),
+        Got::RpcError => json!({"jsonrpc": "2.0", "id": id,
+                                "error": {"code": -32603, "message": "求解超时"}}),
+    }
+}
+
+/// 3 条消息以内 (消息, 回包) 的全部组合.
+fn archive_combinations() -> Vec<Vec<(Sent, Option<Got>)>> {
+    let mut all = Vec::new();
+    for len in 1..=3_u32 {
+        for code in 0..ARCHIVE_CASES.len().pow(len) {
+            let combination = (0..len)
+                .map(|digit| {
+                    ARCHIVE_CASES[code / ARCHIVE_CASES.len().pow(digit) % ARCHIVE_CASES.len()]
+                })
+                .collect();
+            all.push(combination);
+        }
+    }
+    all
+}
+
+/// 询价存档规则, 对 3 条消息以内的全部组合逐一核对 (回包是照组合造的, 不真求解):
+/// - 只有 "报价合法的询价精算 + 回包是没报错的工具结果" 才算求解过; 一个请求最多落一批, 是最后一条;
+/// - 落库的那条回包结尾是存档的成败 (存成了说存了, 没存成说没存成), 其余算成了的结尾是
+///   "只存档最后一条", 这两句话都必须为真;
+/// - 其余回包 (工具报错、JSON-RPC error、别的工具) 一个字不动; 回包条数不变.
+#[tokio::test]
+async fn test_mcp_archive_rules_hold_for_every_combination_up_to_three_messages() {
+    const NOT_LAST: &str = "这批报价没有存档: 同一请求里有多条询价精算, 只存档最后一条。";
+    let context = quote_context();
+    let combinations = archive_combinations();
+    assert_eq!(combinations.len(), 9 + 81 + 729);
+    for combination in combinations {
+        for store_succeeds in [true, false] {
+            let messages: Vec<Value> = combination
+                .iter()
+                .enumerate()
+                .map(|(at, (sent, _))| case_message(at, *sent))
+                .collect();
+            // 回包只有带 id 的消息才有, 顺序同消息; 记下每条回包是第几条消息的.
+            let answered: Vec<(usize, Sent, Got)> = combination
+                .iter()
+                .enumerate()
+                .filter_map(|(at, (sent, got))| Some((at, *sent, (*got)?)))
+                .collect();
+            let before: Vec<Value> = answered
+                .iter()
+                .map(|(at, _, got)| case_reply(*at, *got))
+                .collect();
+            let solved: Vec<usize> = answered
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, sent, got))| *sent == Sent::Quote && *got == Got::Solved)
+                .map(|(reply_at, _)| reply_at)
+                .collect();
+            let label = format!("{combination:?}, 存档成功 = {store_succeeds}");
+
+            // 决策本身 (纯函数): 存最后一条算成的, 其余算成的另列.
+            let archives = mcp_quote_archives(&messages, Some(&context));
+            let (last, skipped) = mcp_archives_to_store(archives, &before);
+            assert_eq!(
+                last.as_ref().map(|archive| archive.reply_at),
+                solved.last().copied(),
+                "{label}"
+            );
+            let skipped: Vec<usize> = skipped.iter().map(|archive| archive.reply_at).collect();
+            assert_eq!(skipped, solved[..solved.len().saturating_sub(1)], "{label}");
+
+            // 落库与回包结尾的话.
+            let stored = Stored::default();
+            let store = |day, batch| {
+                stored.lock().unwrap().push((day, batch));
+                let outcome = if store_succeeds {
+                    Ok(())
+                } else {
+                    Err(quotes::StoreError::Invalid("库里放不下".into()))
+                };
+                async move { outcome }
+            };
+            let mut after = before.clone();
+            let archives = mcp_quote_archives(&messages, Some(&context));
+            archive_mcp_quotes(archives, &mut after, store).await;
+
+            let stored = stored.lock().unwrap();
+            assert_eq!(stored.len(), solved.len().min(1), "{label}");
+            assert_eq!(after.len(), before.len(), "{label}");
+            for (reply_at, (reply, original)) in after.iter().zip(&before).enumerate() {
+                let Some(position) = solved.iter().position(|at| *at == reply_at) else {
+                    assert_eq!(reply, original, "{label}: 第 {reply_at} 条回包不该动");
+                    continue;
+                };
+                let is_last = position + 1 == solved.len();
+                let line = match (is_last, store_succeeds) {
+                    (false, _) => NOT_LAST.to_string(),
+                    (true, true) => ARCHIVED_LINE.to_string(),
+                    (true, false) => {
+                        "这批报价没有存档成功 (不影响上面的结果): 库里放不下".to_string()
+                    }
+                };
+                let mut expected = original.clone();
+                expected["result"]["content"][0]["text"] =
+                    json!(format!("{}\n{line}", reply_text(original)));
+                assert_eq!(reply, &expected, "{label}: 第 {reply_at} 条回包");
+                if is_last {
+                    // 落库的就是这条消息的那批报价, 日期是装数据时的 "今天".
+                    let message_at = answered[reply_at].0;
+                    let (day, batch) = &stored[0];
+                    assert_eq!(*day, context.today, "{label}");
+                    let low = batch.items.iter().find(|item| item.name == "低硫");
+                    assert_eq!(
+                        low.map(|item| item.fob),
+                        Some(case_fob(message_at)),
+                        "{label}"
+                    );
+                }
+            }
+        }
+    }
 }
