@@ -7,13 +7,13 @@
  *   - 使用同源 API, 避免额外的 CORS 和环境变量配置
  */
 
-import type { BlendResult, HistoryRecord, MeasuredQuality, MixedIndicators } from './types';
-import { apiFetch, readOk } from './http';
+import { MIXED_KEYS, type BlendResult, type HistoryRecord, type MeasuredQuality, type MixedIndicators } from './types';
+import { emit } from './events';
+import { apiFetch, apiJson, readOk } from './http';
 
 interface Backend {
   solveJson: (input: string) => Promise<string>;
   getMasterJson: () => Promise<string>;
-  getVersion: () => Promise<string>;
   /** 采集: 保存一次配煤方案 (含混合后指标, 回归 X). */
   saveHistory: (result: BlendResult, contractName: string, quantity: number | null) => Promise<void>;
   /** 返回历史方案数量，不加载完整 result_json. */
@@ -26,28 +26,21 @@ interface Backend {
   clearHistory: () => Promise<void>;
 }
 
-function notifyHistoryChanged(): void {
-  window.dispatchEvent(new CustomEvent('doudou:history_changed'));
-}
-
 /** 从 BlendResult 的 indicator_check 抽出回归自变量 X (混合后 6 项指标). 缺任一项 → null. */
-const MIXED_KEYS: ReadonlyArray<readonly [string, keyof MixedIndicators]> = [
-  ['S', 's'], ['A', 'a'], ['V', 'v'], ['G', 'g'], ['Y', 'y'], ['M', 'm'],
-];
-
 function deriveMixed(result: BlendResult): MixedIndicators | null {
   const byKey = new Map(result.indicator_check.map((ic) => [ic.indicator, ic.value]));
   const out = {} as MixedIndicators;
-  for (const [indicator, field] of MIXED_KEYS) {
+  for (const indicator of MIXED_KEYS) {
     const v = byKey.get(indicator);
     if (v == null) return null; // 缺任一指标 → 无完整 X, 不可回填
-    out[field] = v;
+    out[indicator.toLowerCase() as keyof MixedIndicators] = v;
   }
   return out;
 }
 
 let cached: Backend | null = null;
 
+/** 求解与 master 把 JSON 原文交给调用方 (核心的边界是 JSON 字符串进、JSON 字符串出), 不在这里解析. */
 async function requestApi(path: string, init?: RequestInit): Promise<string> {
   return readOk(await apiFetch(`/api/${path}`, init));
 }
@@ -84,9 +77,8 @@ async function makeHttpBackend(): Promise<Backend> {
         body: input,
       }),
     getMasterJson: async () => requestApi('master'),
-    getVersion: async () => requestApi('version'),
     saveHistory: async (result, contractName, quantity) => {
-      await requestApi('history', {
+      await apiJson('/api/history', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -95,15 +87,15 @@ async function makeHttpBackend(): Promise<Backend> {
           quantity,
         }),
       });
-      notifyHistoryChanged();
+      emit('history_changed');
     },
     countHistory: async () => {
-      const response = JSON.parse(await requestApi('history/count')) as { count?: unknown };
-      if (typeof response.count !== 'number') throw new Error('历史数量格式无效');
+      const response = await apiJson<{ count?: unknown } | null>('/api/history/count');
+      if (typeof response?.count !== 'number') throw new Error('历史数量格式无效');
       return response.count;
     },
     listHistory: async () => {
-      const rows = JSON.parse(await requestApi('history')) as HttpHistoryRow[];
+      const rows = await apiJson<HttpHistoryRow[]>('/api/history');
       if (!Array.isArray(rows)) throw new Error('历史列表格式无效');
       return rows.map((row) => {
         let mixed: MixedIndicators | null = null;
@@ -139,16 +131,16 @@ async function makeHttpBackend(): Promise<Backend> {
       });
     },
     setMeasuredQuality: async (id, measured) => {
-      await requestApi(`history/${encodeURIComponent(id)}/measured`, {
+      await apiJson(`/api/history/${encodeURIComponent(id)}/measured`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(measured),
       });
-      notifyHistoryChanged();
+      emit('history_changed');
     },
     clearHistory: async () => {
-      await requestApi('history', { method: 'DELETE' });
-      notifyHistoryChanged();
+      await apiJson('/api/history', { method: 'DELETE' });
+      emit('history_changed');
     },
   };
 }

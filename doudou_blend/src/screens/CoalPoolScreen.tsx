@@ -19,7 +19,8 @@ import { NewCoalDialog } from "../NewCoalDialog";
 import { coalTag } from "../domain/coalTypes";
 import { placeLabel } from "../domain/place";
 import { PenaltyTemplateEditor } from "../PenaltyTemplateEditor";
-import { getPenaltyTemplate, PENALTY_TEMPLATE_EVENT } from "../penaltyStorage";
+import { getPenaltyTemplate } from "../penaltyStorage";
+import { listen } from "../events";
 import {
   enableAllCoals,
   getCoalPrefs,
@@ -84,18 +85,15 @@ export function CoalPoolScreen() {
     setPrefs(getCoalPrefs());
     setUserCoals(getUserCoals());
 
-    const onPrefs = () => setPrefs(getCoalPrefs());
-    const onUserCoals = () => setUserCoals(getUserCoals());
-    const onTemplate = () =>
-      setTemplateClauseCount(getPenaltyTemplate()?.clauses.length ?? 0);
-    window.addEventListener("doudou:prefs_changed", onPrefs);
-    window.addEventListener("doudou:user_coals_changed", onUserCoals);
-    window.addEventListener(PENALTY_TEMPLATE_EVENT, onTemplate);
+    const stops = [
+      listen(["prefs_changed"], () => setPrefs(getCoalPrefs())),
+      listen(["user_coals_changed"], () => setUserCoals(getUserCoals())),
+      listen(["penalty_template_changed"], () =>
+        setTemplateClauseCount(getPenaltyTemplate()?.clauses.length ?? 0)),
+    ];
     return () => {
       active = false;
-      window.removeEventListener("doudou:prefs_changed", onPrefs);
-      window.removeEventListener("doudou:user_coals_changed", onUserCoals);
-      window.removeEventListener(PENALTY_TEMPLATE_EVENT, onTemplate);
+      for (const stop of stops) stop();
     };
   }, []);
 

@@ -15,14 +15,11 @@ const masterCoal: MasterCoalEntry = {
   coal_type: "焦煤",
   status: "verified",
   props: { S: 0.5, A: 10, G: 80 },
-  fob: 1_000,
-  frt: 100,
 };
 
 const secondCoal: MasterCoalEntry = {
   ...masterCoal,
   name: "第二煤",
-  fob: 800,
 };
 
 const template: PenaltyTemplate = {

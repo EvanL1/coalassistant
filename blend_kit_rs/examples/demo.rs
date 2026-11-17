@@ -75,7 +75,7 @@ fn main() {
         last = Some(solve(&req));
     }
     let elapsed = start.elapsed();
-    let r = last.unwrap();
+    let Some(r) = last else { return };
     println!(
         "性能: {} 次求解 {:.2}ms 总, 平均 {:.3}ms/次\n",
         runs,
@@ -84,7 +84,7 @@ fn main() {
     );
 
     if !r.ok {
-        println!("❌ {}", r.reason.unwrap());
+        println!("❌ {}", r.reason.as_deref().unwrap_or("未知原因"));
         for w in &r.warnings {
             println!("⚠️  {}", w);
         }
@@ -92,7 +92,7 @@ fn main() {
     }
 
     // 视图 A: 成本三层结构
-    let cost = r.cost.as_ref().unwrap();
+    let Some(cost) = r.cost.as_ref() else { return };
     println!("─── 视图 A · 成本结构 (财务) ───");
     println!("  FOB (出厂) 加权: {:>10.2} 元/吨", cost.fob_per_ton);
     println!("  FRT (运费) 加权: {:>10.2} 元/吨", cost.frt_per_ton);

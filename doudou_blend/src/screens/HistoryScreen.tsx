@@ -1,6 +1,6 @@
 /**
  * 屏 4 - 历史方案
- * 列出历史方案 (后端: native SQLite / web PostgreSQL), 倒序展示.
+ * 列出历史方案 (存在服务端 PostgreSQL), 倒序展示.
  * 支持回填混煤实测化验 (CSR + S/A/V/G/Y/M) —— 数据闭环: 把「配比 + 预测指标」
  * 配上事后化验单, 既是信任对照 (预测 vs 实测), 也是 G 修正/CSR 回归的样本.
  */
@@ -11,6 +11,7 @@ import {
   type CSSProperties,
 } from "react";
 import { getBackend } from "../backend";
+import { listen } from "../events";
 import type { HistoryRecord, MeasuredQuality } from "../types";
 import { parseNumberInput } from "../domain/numberInput";
 import { errorMessage } from "../http";
@@ -94,12 +95,11 @@ export function HistoryScreen() {
   useEffect(() => {
     mountedRef.current = true;
     void refresh();
-    const onChange = () => void refresh();
-    window.addEventListener("doudou:history_changed", onChange);
+    const stopListening = listen(["history_changed"], () => void refresh());
     return () => {
       mountedRef.current = false;
       refreshRequestRef.current += 1;
-      window.removeEventListener("doudou:history_changed", onChange);
+      stopListening();
     };
   }, []);
 
@@ -246,7 +246,6 @@ function HistoryCard({ entry }: { entry: HistoryRecord }) {
   // 列表刷新后, 非编辑态同步外部最新值 (避免 useState 初值过期).
   useEffect(() => {
     if (!editing) setInputs(inputsFromEntry(entry));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entry, editing]);
 
   const filled = MEASURED_FIELDS.filter(([key]) => inputs[key].trim() !== "");

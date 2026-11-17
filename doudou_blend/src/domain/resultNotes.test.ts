@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  failureKind,
   friendlySolverText,
   shovelRoundingMissed,
   shovelRoundingNotice,
@@ -18,6 +19,30 @@ describe("整铲没凑成", () => {
 
   it("提示写明一铲吨数", () => {
     expect(shovelRoundingNotice(3)).toContain("一铲 3 吨");
+  });
+});
+
+describe("求解失败属于哪一类", () => {
+  const failed = { ok: false, undetermined: undefined as boolean | undefined };
+
+  it("ok 却没有成本结构是结果不完整, 与合同无关", () => {
+    expect(failureKind({ ok: true }, false)).toBe("incomplete");
+    // 合同没填完整、undetermined 都盖不过它: 求解明明是成功的.
+    expect(failureKind({ ok: true, undetermined: true }, true)).toBe("incomplete");
+  });
+
+  it("合同没填完整优先于其它失败原因", () => {
+    expect(failureKind(failed, true)).toBe("contract");
+    expect(failureKind({ ok: false, undetermined: true }, true)).toBe("contract");
+  });
+
+  it("求解器没算出结论不算不可行", () => {
+    expect(failureKind({ ok: false, undetermined: true }, false)).toBe("undetermined");
+  });
+
+  it("其余都是合同与煤池确实冲突", () => {
+    expect(failureKind(failed, false)).toBe("infeasible");
+    expect(failureKind({ ok: false, undetermined: false }, false)).toBe("infeasible");
   });
 });
 

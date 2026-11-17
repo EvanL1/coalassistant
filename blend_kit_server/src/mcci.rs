@@ -20,7 +20,6 @@ use std::time::Duration;
 
 use axum::{
     extract::State,
-    http::HeaderMap,
     response::{IntoResponse, Response},
     Json,
 };
@@ -29,7 +28,7 @@ use md5::{Digest, Md5};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
-use super::{database_error, is_authenticated, unauthorized, AppState};
+use super::{database_error, AppState};
 use crate::coal_index::IndexPoint;
 use crate::forecast::{self, Forecast};
 
@@ -102,8 +101,24 @@ pub(crate) fn configured_series(master: &Value) -> Vec<Series> {
         .collect()
 }
 
+/// 北京时间 (UTC+8). 编译期求值: 写错了编不过, 运行时没有失败的可能.
+const BEIJING: FixedOffset = match FixedOffset::east_opt(8 * 3600) {
+    Some(offset) => offset,
+    None => panic!("UTC+8 是合法时区"),
+};
+
 pub(crate) fn beijing() -> FixedOffset {
-    FixedOffset::east_opt(8 * 3600).expect("UTC+8 是合法时区")
+    BEIJING
+}
+
+/// `now` 这一刻北京时间的日期.
+pub(crate) fn beijing_day(now: DateTime<Utc>) -> NaiveDate {
+    now.with_timezone(&beijing()).date_naive()
+}
+
+/// 北京时间的今天. 估价快照、基准、询价存档、MCP 的批号都按它分天, 只在这里取.
+pub(crate) fn beijing_today() -> NaiveDate {
+    beijing_day(Utc::now())
 }
 
 /// 前端同款签名: MD5("path" + 路径 + "timestamp" + 毫秒时间戳 + "version" + 版本 + appSecret), 大写十六进制.
@@ -269,10 +284,7 @@ pub(crate) fn overview(
 }
 
 /// GET /api/mcci —— 钢铁网炼焦煤指数总览 (登录即可). 只读库, 不碰钢铁网.
-pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
-    }
+pub(crate) async fn list(State(state): State<AppState>) -> Response {
     let series = match &state.database {
         Some(pool) => match stored_overview(pool).await {
             Ok(series) => series,
@@ -293,11 +305,12 @@ fn builtin_config() -> Vec<Value> {
 pub(crate) async fn stored_overview(pool: &PgPool) -> Result<Vec<Value>, sqlx::Error> {
     let history = history(pool).await?;
     // 预测只是参考: 读不到就不带, 行情照常显示.
-    let today = Utc::now().with_timezone(&beijing()).date_naive();
-    let forecasts = forecast::latest(pool, today).await.unwrap_or_else(|error| {
-        tracing::warn!(%error, "读取指数预测失败, 行情条不带预测");
-        HashMap::new()
-    });
+    let forecasts = forecast::latest(pool, beijing_today())
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "读取指数预测失败, 行情条不带预测");
+            HashMap::new()
+        });
     Ok(overview(&builtin_config(), &history, &forecasts))
 }
 
@@ -354,7 +367,7 @@ async fn stored_state(pool: &PgPool) -> Result<HashMap<String, Stored>, sqlx::Er
 pub(crate) async fn history(
     pool: &PgPool,
 ) -> Result<HashMap<String, Vec<IndexPoint>>, sqlx::Error> {
-    let since = Utc::now().with_timezone(&beijing()).date_naive() - Days::new(HISTORY_DAYS);
+    let since = beijing_today() - Days::new(HISTORY_DAYS);
     history_since(pool, since).await
 }
 
@@ -766,6 +779,76 @@ mod tests {
         // 还没拉到的序列照样列出, points 为空.
         assert_eq!(rows[1]["code"], "LJM_QM");
         assert_eq!(rows[1]["points"], json!([]));
+    }
+
+    /// 指数表与预测表 (`mcci_daily` / `mcci_forecast`) 在真库上写入、读回、重写覆盖; 行情总览拼得出来.
+    /// 序列代码是编的, 不读 master 配了哪些序列.
+    #[tokio::test]
+    #[ignore = "需要独立 PostgreSQL, 设置 DATABASE_URL 后用 --ignored 执行"]
+    async fn test_index_and_forecast_tables_round_trip() {
+        let db = crate::test_db::TestDb::migrated("smoke_index").await;
+        let today = beijing_today();
+        let day = |back: u64| (today - Days::new(back)).format("%Y-%m-%d").to_string();
+        let point = |back: u64, price: f64| IndexPoint {
+            date: day(back),
+            price,
+        };
+
+        upsert(&db.pool, "SMOKE_A", &[point(2, 1500.0), point(1, 1510.0)])
+            .await
+            .unwrap();
+        // 同一天重拉: 覆盖, 不新增.
+        upsert(&db.pool, "SMOKE_A", &[point(1, 1512.5)])
+            .await
+            .unwrap();
+        // 很久以前的一期: 估价用的近一年多里没有, 全部历史里有.
+        let old = IndexPoint {
+            date: "2019-01-02".into(),
+            price: 900.0,
+        };
+        upsert(&db.pool, "SMOKE_B", std::slice::from_ref(&old))
+            .await
+            .unwrap();
+
+        let recent = history(&db.pool).await.unwrap();
+        assert_eq!(recent["SMOKE_A"], [point(2, 1500.0), point(1, 1512.5)]);
+        assert!(!recent.contains_key("SMOKE_B"));
+        let full = full_history(&db.pool).await.unwrap();
+        assert_eq!(full["SMOKE_A"].len(), 2);
+        assert_eq!(full["SMOKE_B"], [old]);
+        let state = stored_state(&db.pool).await.unwrap();
+        assert_eq!(state["SMOKE_A"].first, today - Days::new(2));
+        assert_eq!(state["SMOKE_A"].latest, today - Days::new(1));
+        assert_eq!(state["SMOKE_B"].first, state["SMOKE_B"].latest);
+
+        let forecast = Forecast {
+            made_on: day(1),
+            base_price: 1512.5,
+            date: (today + Days::new(6)).format("%Y-%m-%d").to_string(),
+            price: 1530.0,
+        };
+        let stored =
+            |forecast: &Forecast| HashMap::from([("SMOKE_A".to_string(), forecast.clone())]);
+        forecast::store(&db.pool, &stored(&forecast)).await.unwrap();
+        // 同一期重算: 覆盖.
+        let revised = Forecast {
+            price: 1540.0,
+            ..forecast
+        };
+        forecast::store(&db.pool, &stored(&revised)).await.unwrap();
+        let latest = forecast::latest(&db.pool, today).await.unwrap();
+        assert_eq!(latest, stored(&revised));
+        // 预测的那天已经到了就不再给.
+        let later = today + Days::new(30);
+        assert!(forecast::latest(&db.pool, later).await.unwrap().is_empty());
+
+        // 重算预测读的是全部历史; 没配序列时没有可算的, 照样读得通.
+        let nothing = json!({"price_factor": {"index_series": []}});
+        let refreshed = forecast::refresh(&db.pool, &nothing, today).await.unwrap();
+        assert!(refreshed.is_empty());
+        // 行情总览 (`GET /api/mcci` 与 MCP 的 market 共用) 在真库上拼得出来.
+        stored_overview(&db.pool).await.unwrap();
+        db.drop().await;
     }
 
     /// 连钢铁网实拉一次 (默认不跑): 怀疑签名失效时 `cargo test mcci_live -- --ignored`.

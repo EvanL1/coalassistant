@@ -9,6 +9,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { emit } from "../events";
 import type { BlendResult, CoalMaster } from "../types";
 import type { CoalPrefs } from "../storage";
 import { setPenaltyTemplate } from "../penaltyStorage";
@@ -84,8 +85,6 @@ const master: CoalMaster = {
       name: "测试煤",
       status: "verified",
       props: { S: 0.5 },
-      fob: null,
-      frt: null,
     },
   ],
   price_factor: basePriceFactor,
@@ -181,7 +180,7 @@ describe("TodayScreen 求解快照", () => {
     await waitFor(() => expect(backend.solveJson).toHaveBeenCalledTimes(1));
 
     act(() => {
-      window.dispatchEvent(new CustomEvent("doudou:prefs_changed"));
+      emit("prefs_changed");
     });
     await waitFor(() => expect(backend.solveJson).toHaveBeenCalledTimes(2));
 
@@ -338,7 +337,7 @@ describe("TodayScreen 求解快照", () => {
     await screen.findByText("今日配方");
     await waitFor(() => expect(backend.solveJson).toHaveBeenCalledTimes(1));
 
-    window.dispatchEvent(new CustomEvent("doudou:shovel_changed"));
+    emit("shovel_changed");
     await waitFor(() => expect(backend.solveJson).toHaveBeenCalledTimes(2));
   });
 
@@ -778,6 +777,25 @@ describe("TodayScreen 不可行", () => {
     expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "去「合同」补全" }));
     expect(onNavigate).toHaveBeenCalledWith("contract");
+  });
+
+  // 求解器没算出结论 ≠ 合同不可行: 合同也许本来配得出, 劝人放宽合同是错的指路.
+  it("没算出结论时不给放宽合同的建议, 仍可重试", async () => {
+    const undetermined = makeInfeasible([]);
+    undetermined.reason = "求解器没有算出可靠结论 (迭代停滞), 无法判定合同是否可行";
+    undetermined.undetermined = true;
+    mocks.getBackend.mockResolvedValue({
+      solveJson: vi.fn().mockResolvedValue(JSON.stringify(undetermined)),
+      saveHistory: vi.fn(),
+    });
+
+    render(<TodayScreen onNavigate={vi.fn()} />);
+    await screen.findByText("✗ 这次没算出结论");
+
+    expect(screen.queryByText(/放宽某项约束/)).toBeNull();
+    expect(screen.queryByText(/启用更多煤源/)).toBeNull();
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "去「合同」补全" })).toBeNull();
   });
 
   it("合同完整时的不可行仍有重试", async () => {

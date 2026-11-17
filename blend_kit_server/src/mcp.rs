@@ -12,9 +12,11 @@
 //!
 //! 排版给聊天模型读, 每个数都要自带含义: 判定规则、估算与否、哪个数对合同负责都写成
 //! 人话, 不吐原始 JSON —— 模型拿不准时会自己编一个解释转告用户.
+use std::collections::HashMap;
+
 use blend_kit::{
-    AcceptanceMode, AcceptanceRule, Direction, EvaluationMethod, EvaluationStatus, IndicatorCheck,
-    InfeasibleBound,
+    AcceptanceMode, AcceptanceRule, BlendResult, CoalValue, Direction, Enforcement,
+    EvaluationMethod, EvaluationStatus, IndicatorCheck, InfeasibleBound, Spec,
 };
 use chrono::NaiveDate;
 use serde_json::{json, Map, Value};
@@ -47,9 +49,6 @@ const INSTRUCTIONS: &str = "豆哥配煤: 炼焦配煤的最低成本配方, 给
 /// 判原值是否越过合同数时容的浮点残差, 与核心 `quality` 的 `CHECK_TOLERANCE` 一致.
 const RAW_TOLERANCE: f64 = 1e-8;
 
-/// 核心在凑不成整铲时给的警告前缀 (`blend_kit::shovel`).
-const SHOVEL_WARNING: &str = "凑不成整铲";
-
 /// 处理一条消息要用到的线上数据. 只有 tools/call 需要, 由调用方按需加载.
 pub struct Context {
     pub master: Value,
@@ -72,9 +71,134 @@ pub fn needs_context(message: &Value) -> bool {
     message.get("method").and_then(Value::as_str) == Some("tools/call")
 }
 
-/// 这条消息是不是在调 `tool` 这个工具 (调用方据此决定装哪些数据、进不进求解闸门).
-pub fn calls(message: &Value, tool: &str) -> bool {
-    needs_context(message) && message["params"]["name"].as_str() == Some(tool)
+/// 工具清单: 枚举与工具名只在这里对应一次, `ALL` 由同一张表生成 (漏不掉), 顺序即 `tools/list`
+/// 的顺序.
+macro_rules! tools {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        /// MCP 的工具. 调用方要知道的事 —— 过不过求解闸门、要装哪些数据、存不存档 —— 都是对它的
+        /// 穷尽 `match`: 新加一个工具, 每一处不表态就编不过.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Tool {
+            $($variant),+
+        }
+
+        impl Tool {
+            pub const ALL: [Tool; [$($name),+].len()] = [$(Tool::$variant),+];
+
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Tool::$variant => $name),+
+                }
+            }
+        }
+    };
+}
+
+tools! {
+    TodayBlend => "today_blend",
+    CheckRatios => "check_ratios",
+    FindCoal => "find_coal",
+    GetContract => "get_contract",
+    Market => "market",
+    QuoteBlend => "quote_blend",
+}
+
+impl Tool {
+    fn from_name(name: &str) -> Option<Tool> {
+        Tool::ALL.into_iter().find(|tool| tool.name() == name)
+    }
+
+    /// 这条消息调的是哪个工具; 不是 `tools/call`、或工具名不认识为 None.
+    pub fn called_by(message: &Value) -> Option<Tool> {
+        if !needs_context(message) {
+            return None;
+        }
+        message["params"]["name"].as_str().and_then(Tool::from_name)
+    }
+
+    /// 要不要过求解闸门: 求解或估价是 CPU 密集的, 受并发上限与超时约束; 只拼文字的不过.
+    pub fn computes(self) -> bool {
+        match self {
+            Tool::TodayBlend | Tool::CheckRatios | Tool::QuoteBlend | Tool::FindCoal => true,
+            Tool::GetContract | Tool::Market => false,
+        }
+    }
+
+    /// 要不要每日估价快照 ([`Context::coal_prices`]).
+    pub fn needs_coal_prices(self) -> bool {
+        match self {
+            Tool::FindCoal => true,
+            Tool::TodayBlend
+            | Tool::CheckRatios
+            | Tool::GetContract
+            | Tool::Market
+            | Tool::QuoteBlend => false,
+        }
+    }
+
+    /// 要不要指数行情 ([`Context::market`]).
+    pub fn needs_market(self) -> bool {
+        match self {
+            Tool::Market => true,
+            Tool::TodayBlend
+            | Tool::CheckRatios
+            | Tool::FindCoal
+            | Tool::GetContract
+            | Tool::QuoteBlend => false,
+        }
+    }
+
+    /// 算成之后要不要把这批报价存档 (存哪一批见 [`quote_archive`]).
+    pub fn archives_quotes(self) -> bool {
+        match self {
+            Tool::QuoteBlend => true,
+            Tool::TodayBlend
+            | Tool::CheckRatios
+            | Tool::FindCoal
+            | Tool::GetContract
+            | Tool::Market => false,
+        }
+    }
+
+    /// `tools/list` 里这个工具的说明与参数; `quantity` / `specs` 是几个工具共用的参数说明.
+    fn definition(self, quantity: &Value, specs: &Value) -> (&'static str, Value) {
+        match self {
+            Tool::TodayBlend => (
+                "按线上保存的合同与煤池, 全部用估算价求最低成本配方。返回配比、吨数、每种煤估算价、成本、8 项指标体检 (已按合同判定规则判过达标与否)。客户的合同要求与保存的不同时用 specs 按次指定, 客户只有某几种煤时用 only 列出; 两者只对这一次生效, 不改线上保存的合同与煤池。",
+                json!({ "type": "object", "properties": {
+                    "total_quantity": quantity,
+                    "exclude": { "type": "array", "items": { "type": "string" },
+                                 "description": "本次不用的煤 (如停产、拉不出来), 每项必须是完整煤名。用户说的一个词对应几种煤时 (如「东山」对应东山一号、东山二号), 要用哪几种就逐个列出完整煤名; 拿不准先用 find_coal 查。有一个名字对不上就不求解, 并列出名字相近的煤" },
+                    "specs": specs,
+                    "only": { "type": "array", "items": { "type": "string" },
+                              "description": "本次候选煤, 只对这一次生效: 只在这几种煤里配 (至少两种), 每项必须是完整煤名。煤池里没启用或隐藏的煤列进来也参与; 已停用、重名、数据非法的不行, 会逐个说明原因。与 exclude 同时给时先取 only 再去掉 exclude" }
+                } }),
+            ),
+            Tool::CheckRatios => (
+                "按给定配比验算 (不求最优): 算成本与 8 项指标是否达标。合同要求可用 specs 按次指定。",
+                json!({ "type": "object", "required": ["ratios"], "properties": {
+                    "ratios": { "type": "object", "additionalProperties": { "type": "number" },
+                                "description": "完整煤名 → 份数, 按总和归一 (如 {\"明鑫\": 4, \"豹子沟\": 2}); 只能用参与今日求解的煤, 点到不参与的煤会说明原因 (要用没启用或隐藏的煤, 把这次要用的煤名都列进 only); 煤名对不上会列出名字相近、能参与求解的煤" },
+                    "total_quantity": quantity,
+                    "specs": specs,
+                    "only": { "type": "array", "items": { "type": "string" },
+                              "description": "本次候选煤 (完整煤名), 只对这一次生效: 给了它, ratios 里的煤只需在 only 之内, 煤池里没启用或隐藏的煤也能验算; 已停用、重名、数据非法的不行" }
+                } }),
+            ),
+            Tool::FindCoal => (
+                "按煤名查煤: 状态、是否参与今日求解、煤种、产地、8 项指标 (按用户在煤池改过的值, 标出哪些是用户改过的、哪些是规格值而非化验值)、质量指数与估算价; 有每日估价快照的煤另带较前一日的涨跌与一周后的预测价 (预测按指数近期走势推算, 仅供参考)。",
+                json!({ "type": "object", "required": ["name"], "properties": {
+                    "name": { "type": "string", "description": "煤名或其中一段" }
+                } }),
+            ),
+            Tool::GetContract => (
+                "查看当前合同的 8 项质量要求 (含每项的判定规则)、采购吨数与估价用的市场价。",
+                json!({ "type": "object", "properties": {} }),
+            ),
+            Tool::Market => market::tool(),
+            Tool::QuoteBlend => quote::tool(quantity, specs),
+        }
+    }
 }
 
 /// 处理一条 JSON-RPC 消息. 通知 (没有 id) 返回 None, 调用方不回包.
@@ -122,46 +246,13 @@ fn tools() -> Value {
         } },
         "description": "本次合同要求, 只对这一次生效: 在线上保存的合同上逐项覆盖, 没提到的指标照旧。键为 S (硫) / A (灰) / V (挥发) / G (粘结) / Y (胶质) / petro (岩相) / CSR (焦炭强度) / M (水分); 值给 max (上限)、min (下限) 或两个都给, 写 null 表示本次不约束这一项。例: {\"S\": {\"max\": 0.8}, \"CSR\": {\"min\": 62}, \"Y\": null}"
     });
-    json!([
-        {
-            "name": "today_blend",
-            "description": "按线上保存的合同与煤池, 全部用估算价求最低成本配方。返回配比、吨数、每种煤估算价、成本、8 项指标体检 (已按合同判定规则判过达标与否)。客户的合同要求与保存的不同时用 specs 按次指定, 客户只有某几种煤时用 only 列出; 两者只对这一次生效, 不改线上保存的合同与煤池。",
-            "inputSchema": { "type": "object", "properties": {
-                "total_quantity": quantity,
-                "exclude": { "type": "array", "items": { "type": "string" },
-                             "description": "本次不用的煤 (如停产、拉不出来), 每项必须是完整煤名。用户说的一个词对应几种煤时 (如「东山」对应东山一号、东山二号), 要用哪几种就逐个列出完整煤名; 拿不准先用 find_coal 查。有一个名字对不上就不求解, 并列出名字相近的煤" },
-                "specs": specs,
-                "only": { "type": "array", "items": { "type": "string" },
-                          "description": "本次候选煤, 只对这一次生效: 只在这几种煤里配 (至少两种), 每项必须是完整煤名。煤池里没启用或隐藏的煤列进来也参与; 已停用、重名、数据非法的不行, 会逐个说明原因。与 exclude 同时给时先取 only 再去掉 exclude" }
-            } }
-        },
-        {
-            "name": "check_ratios",
-            "description": "按给定配比验算 (不求最优): 算成本与 8 项指标是否达标。合同要求可用 specs 按次指定。",
-            "inputSchema": { "type": "object", "required": ["ratios"], "properties": {
-                "ratios": { "type": "object", "additionalProperties": { "type": "number" },
-                            "description": "完整煤名 → 份数, 按总和归一 (如 {\"明鑫\": 4, \"豹子沟\": 2}); 只能用参与今日求解的煤, 点到不参与的煤会说明原因 (要用没启用或隐藏的煤, 把这次要用的煤名都列进 only); 煤名对不上会列出名字相近、能参与求解的煤" },
-                "total_quantity": quantity,
-                "specs": specs,
-                "only": { "type": "array", "items": { "type": "string" },
-                          "description": "本次候选煤 (完整煤名), 只对这一次生效: 给了它, ratios 里的煤只需在 only 之内, 煤池里没启用或隐藏的煤也能验算; 已停用、重名、数据非法的不行" }
-            } }
-        },
-        {
-            "name": "find_coal",
-            "description": "按煤名查煤: 状态、是否参与今日求解、煤种、产地、8 项指标 (按用户在煤池改过的值, 标出哪些是用户改过的、哪些是规格值而非化验值)、质量指数与估算价; 有每日估价快照的煤另带较前一日的涨跌与一周后的预测价 (预测按指数近期走势推算, 仅供参考)。",
-            "inputSchema": { "type": "object", "required": ["name"], "properties": {
-                "name": { "type": "string", "description": "煤名或其中一段" }
-            } }
-        },
-        {
-            "name": "get_contract",
-            "description": "查看当前合同的 8 项质量要求 (含每项的判定规则)、采购吨数与估价用的市场价。",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        market::tool(),
-        quote::tool(&quantity, &specs)
-    ])
+    Tool::ALL
+        .into_iter()
+        .map(|tool| {
+            let (description, schema) = tool.definition(&quantity, &specs);
+            json!({ "name": tool.name(), "description": description, "inputSchema": schema })
+        })
+        .collect()
 }
 
 fn tool_result(text: String, is_error: bool) -> Value {
@@ -178,14 +269,14 @@ fn call_tool(params: Option<&Value>, context: &Context) -> Value {
         .and_then(|p| p.get("arguments"))
         .and_then(Value::as_object)
         .unwrap_or(&empty);
-    let outcome = match name {
-        "today_blend" => blend(args, context, false),
-        "check_ratios" => blend(args, context, true),
-        "find_coal" => find_coal(args, context),
-        "get_contract" => Ok(contract_text(context)),
-        "market" => market::market_text(context),
-        "quote_blend" => quote::quote_blend(args, context),
-        other => Err(format!("没有这个工具: {other}")),
+    let outcome = match Tool::from_name(name) {
+        Some(Tool::TodayBlend) => blend(args, context, false),
+        Some(Tool::CheckRatios) => blend(args, context, true),
+        Some(Tool::FindCoal) => find_coal(args, context),
+        Some(Tool::GetContract) => Ok(contract_text(context)),
+        Some(Tool::Market) => market::market_text(context),
+        Some(Tool::QuoteBlend) => quote::quote_blend(args, context),
+        None => Err(format!("没有这个工具: {name}")),
     };
     match outcome {
         Ok(text) => tool_result(text, false),
@@ -207,12 +298,12 @@ pub(crate) fn label(indicator: &str) -> &'static str {
     }
 }
 
-fn bound_text(spec: &Value) -> String {
-    let fmt = |v: &Value| v.as_f64().map(|x| format!("{x}")).unwrap_or_default();
-    match spec["direction"].as_str() {
-        Some("Upper") => format!("≤{}", fmt(&spec["max"])),
-        Some("Lower") => format!("≥{}", fmt(&spec["min"])),
-        _ => format!("{}~{}", fmt(&spec["min"]), fmt(&spec["max"])),
+fn bound_text(spec: &Spec) -> String {
+    let fmt = |v: Option<f64>| v.map(|x| format!("{x}")).unwrap_or_default();
+    match spec.direction {
+        Direction::Upper => format!("≤{}", fmt(spec.max)),
+        Direction::Lower => format!("≥{}", fmt(spec.min)),
+        Direction::Range => format!("{}~{}", fmt(spec.min), fmt(spec.max)),
     }
 }
 
@@ -238,21 +329,18 @@ fn trim_num_apart(x: f64, other: f64) -> String {
 
 /// 本项的合同判定规则. 合同没写时照核心 `quality::acceptance_rule` 的旧口径:
 /// 今日请求打开了 `truncate_decimal`, 岩相以外一律保留 1 位小数截断.
-fn acceptance(spec: &Value) -> AcceptanceRule {
-    spec.get("acceptance")
-        .filter(|rule| !rule.is_null())
-        .and_then(|rule| serde_json::from_value(rule.clone()).ok())
-        .unwrap_or_else(|| {
-            if today::TRUNCATE_DECIMAL && spec["indicator"] != "petro" {
-                AcceptanceRule {
-                    mode: AcceptanceMode::Truncate,
-                    decimals: Some(1),
-                    tolerance: 0.0,
-                }
-            } else {
-                AcceptanceRule::default()
+fn acceptance(spec: &Spec) -> AcceptanceRule {
+    spec.acceptance.clone().unwrap_or_else(|| {
+        if today::TRUNCATE_DECIMAL && spec.indicator != "petro" {
+            AcceptanceRule {
+                mode: AcceptanceMode::Truncate,
+                decimals: Some(1),
+                tolerance: 0.0,
             }
-        })
+        } else {
+            AcceptanceRule::default()
+        }
+    })
 }
 
 fn rule_decimals(rule: &AcceptanceRule) -> usize {
@@ -275,13 +363,9 @@ fn rule_head(rule: &AcceptanceRule) -> String {
 }
 
 /// 判定规则的完整说明, 截断/四舍五入时带一个贴着合同界的例子 ("1.09 记作 1.0").
-fn rule_text(spec: &Value, rule: &AcceptanceRule) -> String {
-    let lower = spec["direction"] == "Lower";
-    let bound = if lower {
-        spec["min"].as_f64()
-    } else {
-        spec["max"].as_f64()
-    };
+fn rule_text(spec: &Spec, rule: &AcceptanceRule) -> String {
+    let lower = spec.direction == Direction::Lower;
+    let bound = if lower { spec.min } else { spec.max };
     let mut text = rule_head(rule);
     if let Some(clause) = tolerance_clause(spec, rule) {
         text.push_str(&format!("; {clause}"));
@@ -300,14 +384,14 @@ fn rule_text(spec: &Value, rule: &AcceptanceRule) -> String {
 }
 
 /// 合同另允许的偏差: "合同另允许超出上限 0.5 以内"; 没有偏差为 None.
-fn tolerance_clause(spec: &Value, rule: &AcceptanceRule) -> Option<String> {
+fn tolerance_clause(spec: &Spec, rule: &AcceptanceRule) -> Option<String> {
     if rule.tolerance <= 0.0 {
         return None;
     }
-    let side = match spec["direction"].as_str() {
-        Some("Upper") => "超出上限",
-        Some("Lower") => "低于下限",
-        _ => "超出上下限",
+    let side = match spec.direction {
+        Direction::Upper => "超出上限",
+        Direction::Lower => "低于下限",
+        Direction::Range => "超出上下限",
     };
     Some(format!(
         "合同另允许{side} {} 以内",
@@ -416,15 +500,39 @@ fn assemble(context: &Context, options: &TodayOptions) -> Result<today::TodayReq
     today::build(&context.master, &context.storage, &market, options)
 }
 
-/// 求解组装好的请求 (注入后台设的煤阶交互 k).
-fn solve(built: &today::TodayRequest, context: &Context) -> Result<Value, String> {
+/// 求解组装好的请求 (注入后台设的煤阶交互 k), 结果按核心的类型读回来 —— 字段改名时编译器会报.
+fn solve(built: &today::TodayRequest, context: &Context) -> Result<BlendResult, String> {
     let body = built.request.to_string();
     let body = crate::admin::inject_rank_interaction(&body, context.rank_k);
     serde_json::from_str(&blend_kit::solve_json(&body))
         .map_err(|e| format!("求解结果解析失败: {e}"))
 }
 
-fn format_result(built: &today::TodayRequest, result: &Value, market: Option<f64>) -> String {
+/// 请求里生效的合同项 (按核心的类型读). 读不成 `Spec` 的项核心也解析不了, 整个请求会被拒掉.
+fn enabled_specs(request: &Value) -> Vec<Spec> {
+    request["specs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|spec| serde_json::from_value::<Spec>(spec.clone()).ok())
+        .filter(|spec| spec.enabled)
+        .collect()
+}
+
+/// 按整铲配却没凑成时, 写在配方上方的那句话; 凑成了、没按整铲配、或没算成为 None.
+/// 看的是结构, 不是核心警告的原文: 请求按整铲配 (带 `shovel_tons`, 不是验算配比, 总量够一铲),
+/// 算成了, 订单里却有煤没有铲数. 这句话与核心此时给的警告同文, 所以提示里那一条不再重复;
+/// 核心哪天改了措辞, 这句照样在, 只是提示里会多一条意思相近的.
+/// 总量不够一铲时核心根本不按整铲配 (提示里另有说明), 不算没凑成.
+fn unrounded_shovels_note(request: &Value, result: &BlendResult) -> Option<String> {
+    let tons = request["shovel_tons"].as_f64()?;
+    let quantity = request["total_quantity"].as_f64()?;
+    let by_shovel = result.ok && request.get("fixed_ratios").is_none() && tons <= quantity;
+    let unrounded = result.orders.iter().any(|order| order.shovels.is_none());
+    (by_shovel && unrounded).then(|| format!("凑不成整铲 (一铲 {tons} 吨): 显示的是未凑整的配方"))
+}
+
+fn format_result(built: &today::TodayRequest, result: &BlendResult, market: Option<f64>) -> String {
     let request = &built.request;
     let quantity = request["total_quantity"].as_f64().unwrap_or(0.0);
     let mut out = Vec::new();
@@ -444,8 +552,8 @@ fn format_result(built: &today::TodayRequest, result: &Value, market: Option<f64
                 .unwrap_or("");
             format!("按 {} 条分煤种基准报价估价, 最新 {latest}", list.len())
         }
-        _ => result["market_price"]
-            .as_f64()
+        _ => result
+            .market_price
             .or(market)
             .map(|m| format!("标准品 1000 点 = {m:.0} 元/吨"))
             .unwrap_or_else(|| "无市场价".into()),
@@ -454,10 +562,11 @@ fn format_result(built: &today::TodayRequest, result: &Value, market: Option<f64
         Some(text) => text,
         None => format!("全部按估算价, {market_text}"),
     };
+    let specs = enabled_specs(request);
     out.push(format!(
         "{head} ({}{}, {quantity:.0} 吨, {pricing})",
         built.contract_name,
-        spec_changes_text(built)
+        spec_changes_text(built, &specs)
     ));
     if !built.only.is_empty() {
         out.push(format!("本次候选煤: {}", built.only.join("、")));
@@ -474,42 +583,33 @@ fn format_result(built: &today::TodayRequest, result: &Value, market: Option<f64
         out.push(format!("要排除的煤本来就不参与求解: {}", idle.join("、")));
     }
 
-    let specs: Vec<&Value> = request["specs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|s| s["enabled"] != false)
-        .collect();
-    let spec_of = |indicator: &str| specs.iter().copied().find(|s| s["indicator"] == indicator);
-    let (shovel_warnings, mut warnings): (Vec<String>, Vec<String>) = result["warnings"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(String::from)
-        .partition(|w| w.starts_with(SHOVEL_WARNING));
+    let spec_of = |indicator: &str| specs.iter().find(|s| s.indicator == indicator);
+    let unrounded = unrounded_shovels_note(request, result);
+    let warnings = result
+        .warnings
+        .iter()
+        .filter(|warning| Some(warning.as_str()) != unrounded.as_deref())
+        .cloned();
 
-    if result["ok"] != true {
-        let reason = result["reason"].as_str().unwrap_or("约束冲突");
+    if !result.ok {
+        let reason = result.reason.as_deref().unwrap_or("约束冲突");
         // 求解器没算出结论、也没证实不可行: 不能说"无解", 合同也许本来配得出.
-        if result["undetermined"] == true {
+        if result.undetermined {
             out.push(format!(
                 "这次没算出结论: {reason}。这不等于合同配不出来, 可以再算一次"
             ));
         } else {
             out.push(format!("无解: {reason}"));
         }
-        let bounds: Vec<InfeasibleBound> =
-            serde_json::from_value(result["infeasible_bounds"].clone()).unwrap_or_default();
-        for bound in &bounds {
+        for bound in &result.infeasible_bounds {
             out.push(format!(
                 "- {}",
                 infeasible_line(bound, spec_of(&bound.indicator))
             ));
         }
-        warnings.extend(shovel_warnings);
     } else {
-        if let Some(cost) = result["cost"]["cif_per_ton"].as_f64() {
+        if let Some(cost) = &result.cost {
+            let cost = cost.cif_per_ton;
             out.push(format!(
                 "成本 {cost:.1} 元/吨, 合计 {:.1} 万元{}",
                 cost * quantity / 10_000.0,
@@ -517,58 +617,51 @@ fn format_result(built: &today::TodayRequest, result: &Value, market: Option<f64
             ));
         }
         // 每种煤的单价: 有报价用报价, 否则用估算价 (记下对标的基准).
-        let mut price: Map<String, Value> = Map::new();
-        let mut notes: Map<String, Value> = Map::new();
-        for value in result["coal_values"].as_array().into_iter().flatten() {
-            if let Some(name) = value["name"].as_str() {
-                price.insert(name.into(), value["fair"].clone());
-                notes.insert(name.into(), Value::String(price_note(value)));
-            }
+        let mut price: HashMap<&str, f64> = HashMap::new();
+        let mut notes: HashMap<&str, String> = HashMap::new();
+        for value in &result.coal_values {
+            price.insert(&value.name, value.fair);
+            notes.insert(&value.name, price_note(value));
         }
         for coal in request["coals"].as_array().into_iter().flatten() {
             if let Some(name) = coal["name"].as_str() {
-                price.insert(name.into(), coal["fob"].clone());
+                match coal["fob"].as_f64() {
+                    Some(fob) => price.insert(name, fob),
+                    None => price.remove(name),
+                };
             }
         }
         let types = coal_types(request);
         // 按整铲配时每种煤配几铲 (orders[].shovels).
-        let shovels: Map<String, Value> = result["orders"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|order| {
-                Some((
-                    order["coal"].as_str()?.to_string(),
-                    order["shovels"].clone(),
-                ))
-            })
+        let shovels: HashMap<&str, u32> = result
+            .orders
+            .iter()
+            .filter_map(|order| Some((order.coal.as_str(), order.shovels?)))
             .collect();
         // 凑整失败的配方照样列出来, 但不放在末尾提示里: 模型会忽略它, 照未取整的吨数去凑铲.
-        for warning in &shovel_warnings {
+        if let Some(note) = &unrounded {
             out.push(format!(
-                "注意: {warning}。下面的吨数没有按整铲取整, 不能直接照此装车"
+                "注意: {note}。下面的吨数没有按整铲取整, 不能直接照此装车"
             ));
         }
         out.push("配方:".into());
-        for (name, ratio) in sorted_recipe(&result["recipe"]) {
+        for (name, ratio) in sorted_recipe(result) {
             let unit = price
-                .get(name.as_str())
-                .and_then(Value::as_f64)
+                .get(name)
                 .map(|p| format!(", 估算出厂价 {p:.0}"))
                 .unwrap_or_default();
-            let note = notes.get(name.as_str()).and_then(Value::as_str);
-            let unit = match quote::price_text(built, result, &name) {
+            let note = notes.get(name).map(String::as_str);
+            let unit = match quote::price_text(built, result, name) {
                 Some(text) => format!(", {text}"),
                 None => format!("{unit}{}", note.unwrap_or_default()),
             };
             let shovel = shovels
-                .get(name.as_str())
-                .and_then(Value::as_u64)
+                .get(name)
                 .map(|count| format!(" · {count} 铲"))
                 .unwrap_or_default();
             out.push(format!(
                 "- {} {:.1}% ({:.0} 吨{shovel}{unit})",
-                typed(&name, &types),
+                typed(name, &types),
                 ratio * 100.0,
                 ratio * quantity
             ));
@@ -577,21 +670,20 @@ fn format_result(built: &today::TodayRequest, result: &Value, market: Option<f64
 
     out.extend(quote::unused_lines(built, result));
 
-    let checks: Vec<IndicatorCheck> =
-        serde_json::from_value(result["indicator_check"].clone()).unwrap_or_default();
+    let checks = &result.indicator_check;
     if !checks.is_empty() {
         out.push("指标 (达标结论已按合同判定规则判过):".into());
-        for check in &checks {
+        for check in checks {
             out.push(indicator_line(check, spec_of(&check.indicator)));
         }
     }
-    if let Some(stamp) = result["csr_stamp_estimate"].as_f64() {
+    if let Some(stamp) = result.csr_stamp_estimate {
         let csr = checks.iter().find(|c| c.indicator == "CSR");
         out.push(stamp_line(
             stamp,
             spec_of("CSR"),
             csr,
-            result["csr_interaction_penalty"].as_f64(),
+            result.csr_interaction_penalty,
         ));
     }
     let notes: Vec<String> = built.notes.iter().cloned().chain(warnings).collect();
@@ -603,24 +695,19 @@ fn format_result(built: &today::TodayRequest, result: &Value, market: Option<f64
 }
 
 /// 第一行合同名后面注明本次按次改了什么: "; 本次改: 硫 S ≤0.8、胶质 Y 不约束"; 没改为空.
-fn spec_changes_text(built: &today::TodayRequest) -> String {
+fn spec_changes_text(built: &today::TodayRequest, specs: &[Spec]) -> String {
     if built.spec_changes.is_empty() {
         return String::new();
     }
-    let specs = built.request["specs"].as_array();
     let changes: Vec<String> = built
         .spec_changes
         .iter()
-        .map(|indicator| {
-            let spec = specs
-                .into_iter()
-                .flatten()
-                .find(|spec| spec["indicator"] == indicator.as_str() && spec["enabled"] != false);
-            match spec {
+        .map(
+            |indicator| match specs.iter().find(|spec| &spec.indicator == indicator) {
                 Some(spec) => format!("{} {}", label(indicator), bound_text(spec)),
                 None => format!("{} 不约束", label(indicator)),
-            }
-        })
+            },
+        )
         .collect();
     format!("; 本次改: {}", changes.join("、"))
 }
@@ -628,13 +715,13 @@ fn spec_changes_text(built: &today::TodayRequest) -> String {
 /// 无解诊断的一行人话. `relax_to` 是"合同上要填的数" (计价项是拒收线), 核心已按判定规则
 /// 与允许偏差逐档真解过, 所以可能比 `achievable` 还松一侧 —— 不说清这一点, 模型会以为
 /// 两个数互相矛盾.
-fn infeasible_line(bound: &InfeasibleBound, spec: Option<&Value>) -> String {
+fn infeasible_line(bound: &InfeasibleBound, spec: Option<&Spec>) -> String {
     let sign = match bound.direction {
         Direction::Upper => "≤",
         Direction::Lower => "≥",
         Direction::Range => "",
     };
-    let priced = spec.is_some_and(|s| s["enforcement"] == "Priced");
+    let priced = spec.is_some_and(|s| s.enforcement == Enforcement::Priced);
     let what = if priced { "拒收线" } else { "合同要求" };
     let achievable = trim_num_apart(bound.achievable, bound.required);
     let mut line = format!(
@@ -695,7 +782,7 @@ fn infeasible_line(bound: &InfeasibleBound, spec: Option<&Value>) -> String {
 }
 
 /// 指标行: 真实值, 合同规则取舍后的判定值 (与真实值不同时), 合同界, 结论.
-fn indicator_line(check: &IndicatorCheck, spec: Option<&Value>) -> String {
+fn indicator_line(check: &IndicatorCheck, spec: Option<&Spec>) -> String {
     let rule = spec.map(acceptance);
     let value = if check.method == EvaluationMethod::Unavailable {
         check.proxy_value
@@ -729,7 +816,7 @@ fn indicator_line(check: &IndicatorCheck, spec: Option<&Value>) -> String {
 fn display_value(
     value: f64,
     judged: Option<f64>,
-    spec: Option<&Value>,
+    spec: Option<&Spec>,
     rule: Option<&AcceptanceRule>,
 ) -> String {
     let (Some(spec), Some(rule)) = (spec, rule) else {
@@ -795,21 +882,21 @@ fn quantize(shown: f64, rule: &AcceptanceRule) -> f64 {
     }
 }
 
-fn within(x: f64, spec: &Value, tolerance: f64) -> bool {
+fn within(x: f64, spec: &Spec, tolerance: f64) -> bool {
     let near = |b: f64| 1e-9 * (1.0 + b.abs());
-    let upper = spec["max"]
-        .as_f64()
-        .filter(|_| spec["direction"] != "Lower")
+    let upper = spec
+        .max
+        .filter(|_| spec.direction != Direction::Lower)
         .is_none_or(|max| x <= max + tolerance + near(max));
-    let lower = spec["min"]
-        .as_f64()
-        .filter(|_| spec["direction"] != "Upper")
+    let lower = spec
+        .min
+        .filter(|_| spec.direction != Direction::Upper)
         .is_none_or(|min| x >= min - tolerance - near(min));
     upper && lower
 }
 
 /// 核心状态逐个翻成一眼能看出过没过的说法.
-fn status_text(check: &IndicatorCheck, spec: Option<&Value>) -> String {
+fn status_text(check: &IndicatorCheck, spec: Option<&Spec>) -> String {
     match check.status {
         EvaluationStatus::Fail => "不达标".into(),
         EvaluationStatus::Pass => if spec.is_some() {
@@ -820,7 +907,7 @@ fn status_text(check: &IndicatorCheck, spec: Option<&Value>) -> String {
         .into(),
         // 原值越过合同数, 但按合同判定规则 (取舍、允许偏差) 或计价条款仍放行.
         EvaluationStatus::TolerancePass => {
-            if spec.is_some_and(|s| s["enforcement"] == "Priced") {
+            if spec.is_some_and(|s| s.enforcement == Enforcement::Priced) {
                 priced_text(check)
             } else {
                 "达标 (原值超出合同数, 按合同判定规则算达标)".into()
@@ -835,7 +922,7 @@ fn status_text(check: &IndicatorCheck, spec: Option<&Value>) -> String {
             }
             None => "合同无要求 (估算值)".into(),
             Some(spec) if within(check.value, spec, RAW_TOLERANCE) => "界内 (估算值)".into(),
-            Some(spec) if spec["enforcement"] == "Priced" => {
+            Some(spec) if spec.enforcement == Enforcement::Priced => {
                 format!("{} (估算值)", priced_text(check))
             }
             Some(_) => "界内 (估算值; 原值超出合同数, 按合同判定规则算界内)".into(),
@@ -854,7 +941,7 @@ fn priced_text(check: &IndicatorCheck) -> String {
 /// 捣固 CSR 那一行: 如实说明它不参与达标判定, 合同 CSR 按指标行的值判.
 fn stamp_line(
     stamp: f64,
-    spec: Option<&Value>,
+    spec: Option<&Spec>,
     csr: Option<&IndicatorCheck>,
     interaction: Option<f64>,
 ) -> String {
@@ -875,9 +962,7 @@ fn stamp_line(
     line.push_str(&format!(
         "; 合同的焦炭强度 CSR 一项按上面指标行的 CSR 值判定 ({basis})"
     ));
-    let min = spec["min"]
-        .as_f64()
-        .filter(|_| spec["direction"] != "Upper");
+    let min = spec.min.filter(|_| spec.direction != Direction::Upper);
     if let Some(min) = min.filter(|min| stamp < *min) {
         line.push_str(&format!("。注意: 这个捣固估算值低于合同下限 {min}"));
     }
@@ -908,12 +993,11 @@ fn typed(name: &str, types: &Map<String, Value>) -> String {
 }
 
 /// 配方按占比降序, 去掉可忽略的零头.
-fn sorted_recipe(recipe: &Value) -> Vec<(String, f64)> {
-    let mut list: Vec<(String, f64)> = recipe
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(name, ratio)| ratio.as_f64().map(|r| (name.clone(), r)))
+fn sorted_recipe(result: &BlendResult) -> Vec<(&str, f64)> {
+    let mut list: Vec<(&str, f64)> = result
+        .recipe
+        .iter()
+        .map(|(name, ratio)| (name.as_str(), *ratio))
         .filter(|(_, r)| *r > 1e-4)
         .collect();
     list.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -980,7 +1064,7 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
             .filter(|(_, level)| level.as_str() == Some("spec"))
             .map(|(k, _)| k.as_str())
             .collect();
-        let props: Vec<String> = today::INDICATORS
+        let props: Vec<String> = blend_kit::INDICATORS
             .iter()
             .filter_map(|k| {
                 coal.props.get(*k).and_then(Value::as_f64).map(|v| {
@@ -998,19 +1082,14 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
                 })
             })
             .collect();
-        let tags: Vec<&str> = blend_kit::COAL_TAG_KEYS
-            .iter()
-            .filter_map(|key| entry[*key].as_str())
-            .collect();
+        let tags: Vec<&str> = today::tags_of(entry).filter_map(|(_, tag)| tag).collect();
         let mut line = format!("{name} [{status}] {}", tags.join(" "));
         line.push_str(&format!("\n  煤池: {}", pool_state(coal)));
         line.push_str(&format!("\n  指标: {}", props.join(", ")));
         if let Some(factor) = &factor {
             // 带上煤种、形态、产地: 估价按它们对标基准, 与 today_blend 同一口径.
-            let mut tagged = json!({ "name": name, "props": coal.props, "fob": 0.0, "frt": 0.0 });
-            for key in blend_kit::COAL_TAG_KEYS {
-                tagged[key] = entry[key].clone();
-            }
+            let tagged =
+                today::estimate_coal(json!(name), json!(coal.props), 0.0, today::tags_of(entry));
             let as_coal: Result<blend_kit::Coal, _> = serde_json::from_value(tagged);
             if let Ok(estimate) = as_coal
                 .map_err(|_| ())
@@ -1020,9 +1099,7 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
                     let price = estimate
                         .market
                         .map(|_| {
-                            let note = serde_json::to_value(value)
-                                .map(|v| price_note(&v))
-                                .unwrap_or_default();
+                            let note = price_note(value);
                             format!(", 估算出厂价 {:.0} 元/吨{note}", value.fair)
                         })
                         .unwrap_or_default();
@@ -1045,9 +1122,10 @@ fn find_coal(args: &Map<String, Value>, context: &Context) -> Result<String, Str
 }
 
 /// 估算价的出处说明 (一条 coal_values): ", 对标X"; 没对标基准为空.
-fn price_note(value: &Value) -> String {
-    value["benchmark"]
-        .as_str()
+fn price_note(value: &CoalValue) -> String {
+    value
+        .benchmark
+        .as_deref()
         .map(|benchmark| format!(", 对标{benchmark}"))
         .unwrap_or_default()
 }
@@ -1072,17 +1150,25 @@ fn contract_text(context: &Context) -> String {
         if spec["enabled"] == false {
             continue;
         }
+        let Ok(spec) = serde_json::from_value::<Spec>(spec.clone()) else {
+            // 读不成合同项的 (缺方向、数写成了字符串之类) 求解时也会被拒掉, 这里如实说, 不硬排版.
+            out.push(format!(
+                "- {} (这一项格式不对, 读不出来; 请在网页「合同」里重新保存)",
+                label(spec["indicator"].as_str().unwrap_or(""))
+            ));
+            continue;
+        };
         let mut line = format!(
             "- {} {} ({})",
-            label(spec["indicator"].as_str().unwrap_or("")),
-            bound_text(spec),
-            rule_text(spec, &acceptance(spec))
+            label(&spec.indicator),
+            bound_text(&spec),
+            rule_text(&spec, &acceptance(&spec))
         );
-        if spec["enforcement"] == "Priced" {
-            match spec["penalty"]["reject"].as_f64() {
-                Some(reject) => line.push_str(&format!(
+        if spec.enforcement == Enforcement::Priced {
+            match &spec.penalty {
+                Some(penalty) => line.push_str(&format!(
                     "; 超出合同界按条款扣款, 到 {} 拒收",
-                    trim_num(reject, 4)
+                    trim_num(penalty.reject, 4)
                 )),
                 None => line.push_str("; 超出合同界按条款扣款"),
             }
@@ -1356,6 +1442,24 @@ mod tests {
         }
     }
 
+    /// 手写的求解结果只给关心的字段: 其余必填字段补上空值, 再按核心的类型读 (同 `solve` 读核心的输出).
+    fn typed_result(given: &Value) -> BlendResult {
+        let mut value = serde_json::to_value(BlendResult::infeasible("", Vec::new())).unwrap();
+        value["reason"] = Value::Null;
+        for (key, field) in given.as_object().unwrap() {
+            value[key] = field.clone();
+        }
+        if let Some(cost) = value["cost"].as_object_mut() {
+            for key in ["fob_per_ton", "frt_per_ton", "cif_per_ton"] {
+                cost.entry(key).or_insert(json!(0.0));
+            }
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn typed_spec(spec: Value) -> Spec {
+        serde_json::from_value(spec).unwrap()
+    }
     fn check(indicator: &str, value: f64, judged: f64, status: &str, method: &str) -> Value {
         json!({"indicator": indicator, "label_zh": indicator, "value": value, "binding": false,
                "proxy_value": value, "evaluated_value": value, "judged_value": judged,
@@ -1451,7 +1555,7 @@ mod tests {
             check("Y", 16.0, 16.0, "Unverified", "ProvisionalLinear"),
             csr,
         ]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         let beyond = "界内 (估算值; 原值超出合同数, 按合同判定规则算界内)";
         assert!(
             text.contains(&format!("- 挥发 V 28.30 (合同 ≤28): {beyond}")),
@@ -1496,7 +1600,7 @@ mod tests {
         let built = fabricated(json!([{"indicator": "M", "direction": "Upper", "max": 8.0}]));
         let result = json!({"ok": true, "recipe": {}, "warnings": [], "indicator_check": [
             check("M", 7.9999995, 7.9, "Pass", "Linear")]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(
             text.contains("- 水分 M 7.999999, 按合同规则记 7.9 (合同 ≤8): 达标"),
             "{text}"
@@ -1505,13 +1609,13 @@ mod tests {
         // 求解器残差让原值略过 8, 核心按放行量仍记 7.9: 显示值也要落在 7.9 那一格.
         let result = json!({"ok": true, "recipe": {}, "warnings": [], "indicator_check": [
             check("M", 8.0000002, 7.9, "TolerancePass", "Linear")]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(
             text.contains("- 水分 M 7.999999, 按合同规则记 7.9"),
             "{text}"
         );
 
-        let spec = json!({"indicator": "M", "direction": "Upper", "max": 8.0});
+        let spec = typed_spec(json!({"indicator": "M", "direction": "Upper", "max": 8.0}));
         for mode in ["Truncate", "Round"] {
             let rule: AcceptanceRule =
                 serde_json::from_value(json!({"mode": mode, "decimals": 1})).unwrap();
@@ -1539,7 +1643,7 @@ mod tests {
         let result = json!({"ok": false, "undetermined": true, "warnings": [],
             "reason": "求解器没有算出可靠结论 (迭代次数用尽), 无法判定合同是否可行",
             "infeasible_bounds": []});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(text.contains("这次没算出结论"), "{text}");
         assert!(text.contains("这不等于合同配不出来"), "{text}");
         assert!(!text.contains("无解"), "{text}");
@@ -1561,7 +1665,7 @@ mod tests {
             "infeasible_bounds": [{"achievable": 1.2565290557686786, "direction": "Upper",
                 "enforced": 1.09999, "indicator": "S", "label_zh": "硫", "margin": 0.0,
                 "relax_to": 1.2, "required": 1.0}]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(
             text.contains(
                 "- 硫 S: 合同要求 ≤1, 其余要求都满足时这批煤最好只能做到 1.26; \
@@ -1577,7 +1681,7 @@ mod tests {
                 "indicator": "CSR", "label_zh": "CSR", "margin": 0.5, "relax_to": null,
                 "required": 68.0}]});
         let built = fabricated(json!([{"indicator": "CSR", "direction": "Lower", "min": 68.0}]));
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(
             text.contains("合同要求 ≥68, 其余要求都满足时这批煤最好只能做到 66.2"),
             "{text}"
@@ -1592,7 +1696,7 @@ mod tests {
             "infeasible_bounds": [{"achievable": 10.8, "direction": "Upper", "enforced": 10.5,
                 "indicator": "M", "label_zh": "水分", "margin": 0.0, "relax_to": 10.3,
                 "required": 10.0}]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(
             text.contains(
                 "- 水分 M: 合同要求 ≤10, 其余要求都满足时这批煤最好只能做到 10.8; \
@@ -1610,7 +1714,7 @@ mod tests {
             "infeasible_bounds": [{"achievable": 1.45, "direction": "Upper", "enforced": 1.39999,
                 "indicator": "S", "label_zh": "硫", "margin": 0.0, "relax_to": 1.4,
                 "required": 1.3}]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(
             text.contains(
                 "- 硫 S: 拒收线 ≤1.3, 其余要求都满足时这批煤最好只能做到 1.45; \
@@ -1683,7 +1787,7 @@ mod tests {
             check("G", 80.0, 80.0, "Unverified", "ProvisionalLinear"),
             check("M", 8.0, 8.0, "Pass", "Linear"),
         ]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(
             text.contains("- 灰 A 10.0999, 按合同规则记 10.0 (合同 ≤10): 达标 (原值超出合同数, 按合同判定规则算达标)"),
             "{text}"
@@ -1702,7 +1806,7 @@ mod tests {
 
         let result = json!({"ok": true, "recipe": {}, "warnings": [], "indicator_check": [
             check("A", 10.1001, 10.1, "Fail", "Linear")]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(
             text.contains("- 灰 A 10.10, 按合同规则记 10.1 (合同 ≤10): 不达标"),
             "{text}"
@@ -1711,13 +1815,13 @@ mod tests {
 
     #[test]
     fn test_display_digits_keep_conclusions_apart() {
-        let spec = json!({"indicator": "A", "direction": "Upper", "max": 10.0});
+        let spec = typed_spec(json!({"indicator": "A", "direction": "Upper", "max": 10.0}));
         let rule = acceptance(&spec);
         // 两位小数都显示 10.10, 判定却一个 10.0 一个 10.1: 必须多给位数分开.
         let low = display_value(10.09999, Some(10.0), Some(&spec), Some(&rule));
         let high = display_value(10.10001, Some(10.1), Some(&spec), Some(&rule));
         assert_ne!(low, high);
-        let raw = json!({"indicator": "petro", "direction": "Upper", "max": 0.3});
+        let raw = typed_spec(json!({"indicator": "petro", "direction": "Upper", "max": 0.3}));
         let raw_rule = acceptance(&raw);
         let shown = display_value(0.3004, Some(0.3004), Some(&raw), Some(&raw_rule));
         assert_eq!(shown, "0.3004");
@@ -1732,7 +1836,7 @@ mod tests {
         let result = json!({"ok": true, "recipe": {}, "warnings": [], "indicator_check": [
             {"indicator": "Y", "label_zh": "胶质", "value": 0.0, "binding": false,
              "status": "Unverified", "method": "Unavailable"}]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(
             text.contains("- 胶质 Y (合同 ≥15): 无法判定 (有参配煤缺这项数据)"),
             "{text}"
@@ -1745,7 +1849,7 @@ mod tests {
         let result = json!({"ok": true, "recipe": {}, "warnings": [],
             "csr_stamp_estimate": 62.3,
             "indicator_check": [check("CSR", 68.0, 68.0, "Unverified", "ProvisionalLinear")]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(text.contains("捣固炼焦 CSR 估算 62.3"), "{text}");
         assert!(text.contains("不参与达标判定"), "{text}");
         assert!(
@@ -1755,7 +1859,7 @@ mod tests {
         assert!(text.contains("低于合同下限 68"), "{text}");
 
         let built = fabricated(json!([]));
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         assert!(text.contains("合同没有 CSR 要求"), "{text}");
         assert!(!text.contains("低于合同下限"), "{text}");
     }
@@ -1764,10 +1868,13 @@ mod tests {
     fn test_shovel_warning_sits_above_recipe() {
         let mut built = fabricated(json!([]));
         built.notes.push("数据非法未参与: 某煤".into());
+        // 按整铲配 (一铲 3 吨), 订单里却没有铲数: 没凑成.
+        built.request["shovel_tons"] = json!(3.0);
         let result = json!({"ok": true, "recipe": {"甲": 0.6, "乙": 0.4},
+            "orders": [{"coal": "甲", "ratio": 0.6}, {"coal": "乙", "ratio": 0.4}],
             "cost": {"cif_per_ton": 1500.0}, "indicator_check": [],
             "warnings": ["剔除 丙: 缺指标 G", "凑不成整铲 (一铲 3 吨): 显示的是未凑整的配方"]});
-        let text = format_result(&built, &result, None);
+        let text = format_result(&built, &typed_result(&result), None);
         let warning = text
             .find("注意: 凑不成整铲 (一铲 3 吨): 显示的是未凑整的配方。下面的吨数没有按整铲取整, 不能直接照此装车")
             .unwrap_or_else(|| panic!("{text}"));
@@ -1776,6 +1883,61 @@ mod tests {
         let tips = &text[text.find("提示:").unwrap()..];
         assert!(!tips.contains("凑不成整铲"), "{text}");
         assert!(tips.contains("剔除 丙"), "{text}");
+    }
+
+    /// 整铲没凑成看的是结构 (按整铲配, 订单里却没有铲数), 不是核心警告的原文.
+    #[test]
+    fn test_unrounded_shovels_are_told_by_structure_not_by_warning_text() {
+        const CAUTION: &str =
+            "注意: 凑不成整铲 (一铲 3 吨): 显示的是未凑整的配方。下面的吨数没有按整铲取整, 不能直接照此装车";
+        let by_shovel = || {
+            let mut built = fabricated(json!([]));
+            built.request["shovel_tons"] = json!(3.0);
+            built
+        };
+        let result = |orders: Value, warnings: Value| {
+            typed_result(&json!({"ok": true, "recipe": {"甲": 0.6, "乙": 0.4},
+                "orders": orders, "warnings": warnings}))
+        };
+        let bare = json!([{"coal": "甲", "ratio": 0.6}, {"coal": "乙", "ratio": 0.4}]);
+        let whole = json!([{"coal": "甲", "ratio": 0.6, "shovels": 180},
+                           {"coal": "乙", "ratio": 0.4, "shovels": 120}]);
+
+        // 核心换了措辞: 配方上方那句照样在 (提示里多一条意思相近的, 不丢).
+        let text = format_result(
+            &by_shovel(),
+            &result(bare.clone(), json!(["整铲没凑成"])),
+            None,
+        );
+        assert!(
+            text.find(CAUTION).unwrap() < text.find("配方:").unwrap(),
+            "{text}"
+        );
+        assert!(text.contains("提示:\n- 整铲没凑成"), "{text}");
+
+        // 凑成了 (订单带铲数): 不提, 哪怕警告里碰巧有这几个字.
+        let text = format_result(
+            &by_shovel(),
+            &result(whole, json!(["凑不成整铲 (旧文)"])),
+            None,
+        );
+        assert!(!text.contains("注意:"), "{text}");
+        assert!(text.contains("- 甲 60.0% (540 吨 · 180 铲)"), "{text}");
+        assert!(text.contains("提示:\n- 凑不成整铲 (旧文)"), "{text}");
+
+        // 验算配比不凑铲; 没按整铲配的请求、总量不够一铲的请求也不算没凑成.
+        let mut fixed = by_shovel();
+        fixed.request["fixed_ratios"] = json!({"甲": 0.6, "乙": 0.4});
+        let mut too_small = by_shovel();
+        too_small.request["total_quantity"] = json!(2.0);
+        for built in [fixed, fabricated(json!([])), too_small] {
+            let text = format_result(&built, &result(bare.clone(), json!([])), None);
+            assert!(!text.contains("注意:"), "{text}");
+        }
+
+        // 没算成: 没有配方可提醒.
+        let failed = typed_result(&json!({"ok": false, "reason": "约束冲突", "orders": bare}));
+        assert!(!format_result(&by_shovel(), &failed, None).contains("注意:"));
     }
 
     #[test]
@@ -1931,10 +2093,62 @@ mod tests {
     fn test_calls_tells_which_tool_a_message_is_for() {
         let message = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                              "params": {"name": "market", "arguments": {}}});
-        assert!(calls(&message, "market") && !calls(&message, "find_coal"));
-        assert!(!calls(
-            &json!({"method": "tools/list", "params": {"name": "market"}}),
-            "market"
-        ));
+        assert_eq!(Tool::called_by(&message), Some(Tool::Market));
+        assert_eq!(
+            Tool::called_by(&json!({"method": "tools/list", "params": {"name": "market"}})),
+            None
+        );
+    }
+
+    /// `tools/list` 列的工具、枚举、分派三者一致: 列出来的每个名字都认得、都分派得到,
+    /// 认不出的名字只回 "没有这个工具".
+    #[test]
+    fn test_listed_tools_match_the_enum_and_all_dispatch() {
+        let list = handle(
+            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            None,
+        )
+        .unwrap();
+        let listed: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        let names: Vec<&str> = Tool::ALL.iter().map(|tool| tool.name()).collect();
+        assert_eq!(listed, names);
+        for (at, tool) in Tool::ALL.into_iter().enumerate() {
+            assert_eq!(Tool::from_name(tool.name()), Some(tool));
+            assert_eq!(
+                names.iter().position(|name| *name == tool.name()),
+                Some(at),
+                "工具名重复: {}",
+                tool.name()
+            );
+            let (text, _) = call(tool.name(), json!({}));
+            assert!(!text.contains("没有这个工具"), "{}: {text}", tool.name());
+        }
+        let (text, is_error) = call("no_such_tool", json!({}));
+        assert!(is_error && text == "没有这个工具: no_such_tool", "{text}");
+        assert_eq!(Tool::from_name("no_such_tool"), None);
+    }
+
+    /// 求解闸门、按需装数据、询价存档各管哪些工具 (与 `docs/mcp-agent.md` 的说明一致).
+    #[test]
+    fn test_tool_traits_are_what_the_docs_say() {
+        let pick = |test: fn(Tool) -> bool| -> Vec<&str> {
+            Tool::ALL
+                .into_iter()
+                .filter(|tool| test(*tool))
+                .map(Tool::name)
+                .collect()
+        };
+        assert_eq!(
+            pick(Tool::computes),
+            ["today_blend", "check_ratios", "find_coal", "quote_blend"]
+        );
+        assert_eq!(pick(Tool::needs_coal_prices), ["find_coal"]);
+        assert_eq!(pick(Tool::needs_market), ["market"]);
+        assert_eq!(pick(Tool::archives_quotes), ["quote_blend"]);
     }
 }

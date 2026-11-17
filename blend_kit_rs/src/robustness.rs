@@ -19,7 +19,7 @@
 
 use crate::model::*;
 use crate::penalty::cif_eff_or_quoted;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// 配方换掉多少吨位 (½Σ|Δx|) 算"变了".
 const MOVED_SHARE: f64 = 0.10;
@@ -156,7 +156,7 @@ fn price_errors(template: &BlendRequest, original: &BlendRequest) -> HashMap<Str
         .collect()
 }
 
-fn weighted_error(recipe: &HashMap<String, f64>, errors: &HashMap<String, (f64, bool)>) -> f64 {
+fn weighted_error(recipe: &BTreeMap<String, f64>, errors: &HashMap<String, (f64, bool)>) -> f64 {
     recipe
         .iter()
         .map(|(name, share)| share * errors.get(name).map_or(0.0, |(error, _)| *error))
@@ -164,8 +164,8 @@ fn weighted_error(recipe: &HashMap<String, f64>, errors: &HashMap<String, (f64, 
 }
 
 /// 两个配方之间换掉的吨位比例 = ½Σ|Δx|.
-fn moved_share(a: &HashMap<String, f64>, b: &HashMap<String, f64>) -> f64 {
-    let names: HashSet<&String> = a.keys().chain(b.keys()).collect();
+fn moved_share(a: &BTreeMap<String, f64>, b: &BTreeMap<String, f64>) -> f64 {
+    let names: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
     names
         .into_iter()
         .map(|name| (a.get(name).unwrap_or(&0.0) - b.get(name).unwrap_or(&0.0)).abs())
@@ -189,7 +189,7 @@ fn ask_priority(swing: &PriceSwing) -> f64 {
 
 struct Analysis<'a> {
     template: &'a BlendRequest,
-    base_recipe: &'a HashMap<String, f64>,
+    base_recipe: &'a BTreeMap<String, f64>,
     solve: &'a dyn Fn(&BlendRequest) -> BlendResult,
     /// 改价重解失败的次数 —— 只改价不该失败, 失败了要告诉用户门槛可能不准.
     failures: std::cell::Cell<usize>,
@@ -353,7 +353,7 @@ impl Analysis<'_> {
     }
 
     /// 按原价 (不加溢价) 验算配方的吨成本 —— 走验算模式, 与求解同一套成本算法.
-    fn cost_at_current_prices(&self, recipe: &HashMap<String, f64>) -> Option<f64> {
+    fn cost_at_current_prices(&self, recipe: &BTreeMap<String, f64>) -> Option<f64> {
         let mut request = self.template.clone();
         request.fixed_ratios = Some(recipe.clone());
         let result = (self.solve)(&request);
@@ -365,7 +365,7 @@ impl Analysis<'_> {
 mod tests {
     use super::*;
 
-    fn recipe(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
+    fn recipe(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
         pairs
             .iter()
             .map(|(name, share)| (name.to_string(), *share))

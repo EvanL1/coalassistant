@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use axum::{
     extract::{Query, State},
-    http::HeaderMap,
     response::{IntoResponse, Response},
     Json,
 };
@@ -16,11 +15,13 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use super::{
-    bad_request, benchmarks, database_error, is_authenticated, mcci, merged_master_json_from_pool,
-    require_database, unauthorized, AppState,
+    bad_request, benchmarks, database_error, mcci, merged_master_json_from_pool, require_database,
+    AppState,
 };
 use crate::coal_index::IndexPoint;
 use crate::forecast::{self, Forecast};
+use crate::mcci::beijing_day;
+use crate::today;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct PriceRow {
@@ -79,22 +80,14 @@ pub struct CoalPriceSnapshot {
     pub prices: Vec<CoalPriceEntry>,
 }
 
-fn beijing_day(now: DateTime<Utc>) -> NaiveDate {
-    now.with_timezone(&mcci::beijing()).date_naive()
-}
-
 fn snapshot_coal(coal: &Value) -> Result<Value, String> {
     let props = coal["props"].as_object().ok_or("煤的指标须为对象")?;
-    let props: serde_json::Map<String, Value> = props
-        .iter()
-        .filter(|(_, value)| !value.is_null())
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    let mut out = json!({ "name": coal["name"], "props": props, "fob": 0, "frt": 0 });
-    for key in blend_kit::COAL_TAG_KEYS {
-        out[key] = coal[key].clone();
-    }
-    Ok(out)
+    Ok(today::estimate_coal(
+        coal["name"].clone(),
+        today::present_props(props),
+        0.0,
+        today::tags_of(coal),
+    ))
 }
 
 fn snapshot_rows(master: &Value, benchmarks: &[Value]) -> Result<Vec<PriceRow>, String> {
@@ -738,10 +731,7 @@ async fn read_days(
     Ok((snapshots.next(), snapshots.next()))
 }
 
-pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
-    }
+pub(crate) async fn list(State(state): State<AppState>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -788,12 +778,8 @@ async fn read_history(pool: &PgPool, name: &str) -> Result<Vec<CoalPricePoint>, 
 
 pub(crate) async fn history(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Query(query): Query<HistoryQuery>,
 ) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
-    }
     let Some(name) = query.name.filter(|name| !name.is_empty()) else {
         return bad_request("缺少煤名 name");
     };

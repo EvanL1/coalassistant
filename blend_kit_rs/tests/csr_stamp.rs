@@ -1,7 +1,14 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 //! 捣固炼焦 CSR 估算 (ρ=1.0, 不含 MCI 项): 只展示, 不参与求解.
 
 use blend_kit::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// 按公式系数手算: M40 = 87.9924, CSR = 68.573.
 /// 输入取朋友配方 2:4:3:2 的配合煤实测值 (Vdaf 22.14 / G 87 / Y 20), 实测焦炭 CSR 70.
@@ -32,7 +39,7 @@ fn coals() -> Vec<Coal> {
     ]
 }
 
-fn request(coals: Vec<Coal>, fixed: Option<HashMap<String, f64>>) -> BlendRequest {
+fn request(coals: Vec<Coal>, fixed: Option<BTreeMap<String, f64>>) -> BlendRequest {
     BlendRequest {
         coals,
         specs: vec![Spec::upper("S", 2.5)],
@@ -59,7 +66,7 @@ fn value_of(result: &BlendResult, indicator: &str) -> f64 {
 /// 结果里的估算值必须由同一份结果里展示的挥发/G/Y 算出, 两处数字对得上.
 #[test]
 fn test_result_carries_estimate_from_its_own_blend_indicators() {
-    let fixed: HashMap<String, f64> = [("荣欣", 2.0), ("新星", 4.0), ("北沟", 3.0), ("浮精", 2.0)]
+    let fixed: BTreeMap<String, f64> = [("荣欣", 2.0), ("新星", 4.0), ("北沟", 3.0), ("浮精", 2.0)]
         .into_iter()
         .map(|(name, share)| (name.to_string(), share))
         .collect();

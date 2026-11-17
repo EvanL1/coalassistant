@@ -9,8 +9,6 @@ const masterCoal: MasterCoalEntry = {
   coal_type: "焦煤",
   status: "verified",
   props: { S: 0.5, A: 10, G: 80 },
-  fob: null,
-  frt: null,
 };
 
 describe("resolveCoal", () => {
@@ -53,7 +51,11 @@ describe("resolveCoal", () => {
   });
 
   it("master 里残留的出厂价/运费不进求解", () => {
-    const resolved = resolveCoal({ ...masterCoal, fob: 1_000, frt: 100 }, null, "master");
+    const resolved = resolveCoal(
+      { ...masterCoal, ...({ fob: 1_000, frt: 100 } as object) },
+      null,
+      "master",
+    );
 
     expect(resolved.readiness).toBe("ready");
     expect(toEstimateCoal(resolved)).toMatchObject({ fob: 0, frt: 0 });
@@ -121,8 +123,6 @@ describe("resolveCoal", () => {
       name: "用户煤",
       status: "draft",
       props: {},
-      fob: null,
-      frt: null,
     };
     const resolved = resolveCoal(
       userCoal,

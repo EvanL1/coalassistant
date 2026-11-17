@@ -19,11 +19,10 @@
 //! 服务端拿不到, 所以不计买入侧扣款.
 use std::collections::HashMap;
 
+use blend_kit::{COAL_TAG_KEYS, INDICATORS};
 use serde_json::{json, Map, Value};
 
 use crate::database::UserStorage;
-
-pub const INDICATORS: [&str; 8] = ["S", "A", "V", "G", "Y", "petro", "CSR", "M"];
 
 /// 今日请求里的 `truncate_decimal`: 合同项没写判定规则时, 核心按它决定是否一位小数截断.
 pub const TRUNCATE_DECIMAL: bool = true;
@@ -146,7 +145,8 @@ pub fn normalize(name: &str) -> String {
     name.replace('\u{3000}', " ").trim().to_lowercase()
 }
 
-/// 自建煤的 status 只认这几种, 与网页 `storage.ts` 的 `COAL_STATUSES` 一致.
+/// 自建煤的 status 只认这几种, 与网页 `types.ts` 的 `COAL_STATUSES` 一致
+/// (网页 `storage.ts` 的 `getUserCoals` 按它筛自建煤).
 const COAL_STATUSES: [&str; 5] = ["verified", "active", "draft", "incomplete", "archived"];
 
 /// 网页 `getUserCoals` 收下的自建煤: 煤名非空、status 认识、`props` 是对象.
@@ -653,14 +653,47 @@ pub fn build(
 
 /// 进求解的煤: 不带报价, 核心按估算价并入煤池.
 fn request_coal(coal: &ResolvedCoal) -> Value {
-    let mut out = json!({ "name": coal.name, "props": coal.props, "fob": 0.0, "frt": 0.0 });
-    // 煤种、形态、产地不进 LP, 估价按它们对标基准.
-    for key in blend_kit::COAL_TAG_KEYS {
-        if let Some(text) = coal.entry.get(key).and_then(Value::as_str) {
-            out[key] = json!(text);
+    estimate_coal(
+        json!(coal.name),
+        json!(coal.props),
+        0.0,
+        tags_of(coal.entry),
+    )
+}
+
+/// 一条 JSON (煤库条目、基准报价…) 上的标签: 煤种、形态、产地, 按 [`COAL_TAG_KEYS`] 取, 只认字符串.
+pub(crate) fn tags_of(entry: &Value) -> impl Iterator<Item = (&'static str, Option<&str>)> {
+    COAL_TAG_KEYS
+        .into_iter()
+        .map(move |key| (key, entry[key].as_str()))
+}
+
+/// 指标表里有值的那些 (null 去掉): 核心的指标表不收 null.
+pub(crate) fn present_props(props: &Map<String, Value>) -> Value {
+    props
+        .iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Map<String, Value>>()
+        .into()
+}
+
+/// 煤 → 估价输入 (核心 `Coal` 的 JSON). 今日请求、查煤、每日估价快照、询价存档、给旧报价挑推算
+/// 指数都经这里拼, 不各写一份: 估价是出厂口径, 运费恒为 0; 没报价的煤 `fob` 给 0;
+/// 标签 (不进 LP, 估价按它们对标基准) 只抄有值的.
+pub(crate) fn estimate_coal<'a>(
+    name: Value,
+    props: Value,
+    fob: f64,
+    tags: impl IntoIterator<Item = (&'static str, Option<&'a str>)>,
+) -> Value {
+    let mut coal = json!({ "name": name, "props": props, "fob": fob, "frt": 0.0 });
+    for (key, tag) in tags {
+        if let Some(tag) = tag {
+            coal[key] = json!(tag);
         }
     }
-    out
+    coal
 }
 
 #[path = "today_overrides.rs"]
@@ -740,6 +773,44 @@ mod tests {
         // 没设过一铲吨数: 按默认 3 吨.
         assert_eq!(req["shovel_tons"], 3.0);
         assert_eq!(built.contract_name, "默认合同");
+    }
+
+    /// 线上保存的合同里, 上限项带着一个更大的残留 `min` (改方向时留下的), 下限项带着一个更小的
+    /// 残留 `max`: 核心对 Upper 忽略 `min`、对 Lower 忽略 `max`, 所以照常求解, 与不带残留时同一个
+    /// 配方 —— 不报 "下限大于上限" (网页一直能解, 这里也得能).
+    #[test]
+    fn test_saved_contract_with_a_stale_opposite_bound_still_solves() {
+        let mut master = master();
+        // 给两种煤一个互相牵制的下限指标, 配方不是随便哪种煤都行.
+        master["coals"][0]["props"]["G"] = json!(85.0);
+        master["coals"][1]["props"]["G"] = json!(60.0);
+        let solve = |contract: Value| {
+            let mut storage = storage(json!({"无价": {"enabled": true}}));
+            storage.contract = Some(contract);
+            let built = build(
+                &master,
+                &storage,
+                &index_only(1907.0),
+                &TodayOptions::default(),
+            )
+            .unwrap();
+            let result: Value =
+                serde_json::from_str(&blend_kit::solve_json(&built.request.to_string())).unwrap();
+            result
+        };
+        let stale = solve(json!([
+            {"indicator": "S", "direction": "Upper", "min": 5.0, "max": 0.9},
+            {"indicator": "G", "direction": "Lower", "min": 70.0, "max": 10.0}
+        ]));
+        assert_eq!(stale["ok"], true, "{}", stale["reason"]);
+        let clean = solve(json!([
+            {"indicator": "S", "direction": "Upper", "max": 0.9},
+            {"indicator": "G", "direction": "Lower", "min": 70.0}
+        ]));
+        assert_eq!(clean["ok"], true, "{}", clean["reason"]);
+        assert_eq!(stale["recipe"], clean["recipe"]);
+        assert!(stale["recipe"].as_object().is_some_and(|r| r.len() == 2));
+        assert_eq!(stale["indicator_check"], clean["indicator_check"]);
     }
 
     #[test]

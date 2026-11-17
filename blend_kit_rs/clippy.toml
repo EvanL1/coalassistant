@@ -1,0 +1,5 @@
+# 测试代码 (#[test] 函数与 #[cfg(test)] 模块) 允许 unwrap/expect/panic:
+# 断言失败本来就要炸, 写 let-else 只会稀释测试意图.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

@@ -38,10 +38,6 @@ export const cellStyle: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-export function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 export function formatDate(iso: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString("zh-CN");

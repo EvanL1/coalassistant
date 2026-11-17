@@ -1,3 +1,10 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 //! 价格稳健性 (`BlendRequest.price_robustness`): 逐煤翻转门槛 + 更稳的配方.
 //!
 //! 全部走公开 JSON 入口 `solve_json`, 数据都是 fixture, 不读 master.

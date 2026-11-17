@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { emit, listen } from "../events";
 import type { BlendResult, CoalMaster, CoalValue, Spec } from "../types";
 import type { CoalPrefs } from "../storage";
 import * as storage from "../storage";
@@ -33,7 +34,8 @@ const master: CoalMaster = {
   coals: ["甲", "乙", "丙", "丁"].map<CoalMaster["coals"][number]>((name) => ({
     name, status: "verified", coal_type: "主焦煤", form: "精煤", region: "山西",
     props: { S: 0.6, A: 9.8, V: 25, G: 85, Y: 20, petro: 50, CSR: 60, M: 10 },
-    fob: 9999, frt: 888,
+    // master 里残留的价格 (类型已不允许, 旧数据仍可能带) 不该进精算.
+    ...({ fob: 9999, frt: 888 } as object),
   })).concat([
     { name: "停用", status: "archived", props: { S: 1 } },
     { name: "坏指标", status: "verified", props: { S: -1 } },
@@ -294,7 +296,7 @@ it("返回调用 onBack", async () => {
 it("精算与改指标不写 localStorage 或 storage, 不触发云同步事件", async () => {
   localStorage.setItem("保留", "原值");
   const before = { ...localStorage };
-  const sync = vi.fn(); window.addEventListener("doudou:prefs_changed", sync);
+  const sync = vi.fn(); const stopListening = listen(["prefs_changed"], sync);
   await open(); priceBoth();
   fireEvent.click(screen.getByRole("button", { name: "改这批指标 甲" })); fill("甲 S", "1.2");
   fireEvent.click(screen.getByRole("button", { name: "精算" }));
@@ -304,7 +306,7 @@ it("精算与改指标不写 localStorage 或 storage, 不触发云同步事件"
     if (/^(set|clear|append|add|remove|enable|replace)/.test(name) && vi.isMockFunction(fn)) expect(fn).not.toHaveBeenCalled();
   }
   expect(sync).not.toHaveBeenCalled();
-  window.removeEventListener("doudou:prefs_changed", sync);
+  stopListening();
 });
 
 it("今日入口打开精算页, 返回仍保留原估价结果", async () => {
@@ -335,7 +337,7 @@ it("精算页开着时今日页后台重算失败, 已填的报价不丢", async
   fill("甲 出厂价", "2150");
   mocks.solve.mockRejectedValueOnce(new Error("网络断了"));
   await act(async () => {
-    window.dispatchEvent(new Event("doudou:prefs_changed"));
+    emit("prefs_changed");
   });
   await waitFor(() => expect(mocks.solve).toHaveBeenCalledTimes(2));
   await act(async () => {});

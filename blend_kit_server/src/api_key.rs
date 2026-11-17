@@ -13,6 +13,31 @@ const KEY_RANDOM_BYTES: usize = 32;
 /// 管理端列表里展示的前缀长度 (含 `dk_`), 用于认领某一把, 不足以还原密钥。
 const DISPLAY_PREFIX_LEN: usize = 11;
 
+/// 密钥用途: 一把钥匙只开一扇门. 数据库列 (`data_api_keys.scope`) 存的是 [`Scope::as_str`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// 写煤库覆盖层 (`/api/master/*`).
+    Data,
+    /// 手机 Agent 经 `/mcp` 查询 + 求解 + 询价存档, 写不了煤库.
+    Mcp,
+}
+
+impl Scope {
+    pub const ALL: [Scope; 2] = [Scope::Data, Scope::Mcp];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Data => "data",
+            Scope::Mcp => "mcp",
+        }
+    }
+
+    /// 认不出的用途为 None (建密钥时据此拒绝).
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|scope| scope.as_str() == text)
+    }
+}
+
 /// 新生成的明文密钥. 只在创建时存在一次。
 pub struct GeneratedKey {
     pub plaintext: String,

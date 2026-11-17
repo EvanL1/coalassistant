@@ -71,8 +71,6 @@ export function NewCoalDialog({ existing, onClose }: Props) {
       form: form || null,
       status: "draft",
       props: {},
-      fob: null,
-      frt: null,
       note: null,
     };
     addUserCoal(entry);

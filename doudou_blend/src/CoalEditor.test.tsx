@@ -27,8 +27,6 @@ const coal: MasterCoalEntry = {
   name: "测试主焦",
   status: "verified",
   props: { A: 9.5, G: 85 },
-  fob: 1000,
-  frt: 100,
 };
 
 /** 采购合同: 灰分保证值以内不扣, 每超 0.1% 扣 8 元/吨, 超 12% 拒收. */

@@ -1,3 +1,10 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 use blend_kit::{
     solve_json, solve_with_evaluators, BlendRequest, EvaluatorSet, GObservation, ModelPolicy,
 };

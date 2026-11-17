@@ -1,10 +1,11 @@
 //! 询价精算 (`quote_blend`): 客户问到实际出厂价与运费后, 只用报了价的煤、按到厂价重算配方.
 //! 请求由 [`crate::today`] 组装 (对照前端 `domain/blendRequest.ts` 的 `quoteRequest`); 这里解析
 //! 参数、排版报价与估算价的对比, 并算出要存档的那一批报价 —— 落库是调用方的事.
+use blend_kit::BlendResult;
 use serde_json::{json, Map, Value};
 
 use super::{
-    assemble, calls, coal_types, format_result, label, solve, specs_arg, trim_num, typed, Context,
+    assemble, coal_types, format_result, label, solve, specs_arg, trim_num, typed, Context, Tool,
 };
 use crate::quotes::{self, QuoteBatch, QuoteItem};
 use crate::today::{self, Quote, QuotedCoal, TodayOptions, TodayRequest};
@@ -12,12 +13,11 @@ use crate::today::{self, Quote, QuotedCoal, TodayOptions, TodayRequest};
 /// 占比不超过它的煤不算进了配方 (同配方行的取舍).
 const RECIPE_GRAIN: f64 = 1e-4;
 
-/// `tools/list` 里 `quote_blend` 的条目; `quantity` / `specs` 是与其他工具共用的参数说明.
-pub(super) fn tool(quantity: &Value, specs: &Value) -> Value {
-    json!({
-        "name": "quote_blend",
-        "description": "询价精算: 客户问到几种煤的实际出厂价与运费后, 只用这几种煤、按到厂价 (出厂价 + 运费) 求最低成本配方。返回配方、成本、8 项指标体检, 以及每种煤的报价比估算价高或低多少。至少两种煤; 煤池里没启用或隐藏的煤报了价也参与, 已停用、重名、数据非法的不行。这批报价会按批存档, 供后台校准估价; 存没存成看结果最后一行, 没存成不影响结果。不改煤池与合同。",
-        "inputSchema": { "type": "object", "required": ["quotes"], "properties": {
+/// `tools/list` 里 `quote_blend` 的说明与参数; `quantity` / `specs` 是与其他工具共用的参数说明.
+pub(super) fn tool(quantity: &Value, specs: &Value) -> (&'static str, Value) {
+    (
+        "询价精算: 客户问到几种煤的实际出厂价与运费后, 只用这几种煤、按到厂价 (出厂价 + 运费) 求最低成本配方。返回配方、成本、8 项指标体检, 以及每种煤的报价比估算价高或低多少。至少两种煤; 煤池里没启用或隐藏的煤报了价也参与, 已停用、重名、数据非法的不行。这批报价会按批存档, 供后台校准估价; 存没存成看结果最后一行, 没存成不影响结果。不改煤池与合同。",
+        json!({ "type": "object", "required": ["quotes"], "properties": {
             "quotes": { "type": "object",
                         "additionalProperties": { "type": "object", "required": ["fob"], "properties": {
                             "fob": { "type": "number", "description": "出厂价 (含税), 元/吨" },
@@ -28,8 +28,8 @@ pub(super) fn tool(quantity: &Value, specs: &Value) -> Value {
                         "description": "完整煤名 → 这种煤的报价, 如 {\"明鑫\": {\"fob\": 1850, \"frt\": 60}, \"豹子沟\": {\"fob\": 1720}}; 煤名对不上就不求解, 并列出名字相近的煤" },
             "total_quantity": quantity,
             "specs": specs
-        } }
-    })
+        } }),
+    )
 }
 
 /// 存没存档不在这里说: 真正落库在调用方, 存完才知道成败, 那句结论由它补到文本结尾.
@@ -43,7 +43,8 @@ pub(super) fn quote_blend(args: &Map<String, Value>, context: &Context) -> Resul
 /// 的那份); 不是这个工具、不回包的通知、或参数没过校验 (没求解) 为 None. 无解也存档.
 /// 这一批过不过得了存档校验留给落库那一步判, 过不了由它如实说没存成.
 pub(crate) fn archive(message: &Value, context: &Context) -> Option<QuoteBatch> {
-    if !calls(message, "quote_blend") || message.get("id").is_none_or(Value::is_null) {
+    let archiving = Tool::called_by(message).is_some_and(Tool::archives_quotes);
+    if !archiving || message.get("id").is_none_or(Value::is_null) {
         return None;
     }
     let args = message["params"]["arguments"].as_object()?;
@@ -129,7 +130,7 @@ fn draft_batch(quotes: &[Quote]) -> QuoteBatch {
     let items = quotes
         .iter()
         .map(|quote| {
-            item(
+            QuoteItem::new(
                 quote.name.clone(),
                 quote.fob,
                 quote.frt.unwrap_or(0.0),
@@ -145,30 +146,6 @@ fn draft_batch(quotes: &[Quote]) -> QuoteBatch {
     }
 }
 
-fn item(
-    name: String,
-    fob: f64,
-    frt: f64,
-    tags: &Value,
-    props: Map<String, Value>,
-    changed: Vec<String>,
-) -> QuoteItem {
-    let tag = |key: &str| tags[key].as_str().map(String::from);
-    QuoteItem {
-        name,
-        fob,
-        frt,
-        coal_type: tag("coal_type"),
-        form: tag("form"),
-        region: tag("region"),
-        province: tag("province"),
-        city: tag("city"),
-        county: tag("county"),
-        props,
-        changed,
-    }
-}
-
 /// 要存档的一批: 煤名用煤池里的写法, 指标是这次实际用的 (煤池值 ∪ 当场给的), 标签照煤池.
 /// 批号由日期与这组煤定: 同一天同一组煤再算一次覆盖上一次, 换了煤或隔了天另起一批.
 fn archive_batch(built: &TodayRequest, context: &Context) -> QuoteBatch {
@@ -179,7 +156,7 @@ fn archive_batch(built: &TodayRequest, context: &Context) -> QuoteBatch {
         .zip(coals.into_iter().flatten())
         .map(|(quote, coal)| {
             let props = coal["props"].as_object().cloned().unwrap_or_default();
-            item(
+            QuoteItem::new(
                 quote.name.clone(),
                 quote.fob,
                 quote.frt,
@@ -226,7 +203,7 @@ pub(super) fn cost_note(built: &TodayRequest) -> &'static str {
 
 /// 一种报了价的煤的价格说明: 报价、运费、到厂价, 报价比估算价高或低多少, 当场给的化验值;
 /// 不是报了价的煤为 None.
-pub(super) fn price_text(built: &TodayRequest, result: &Value, name: &str) -> Option<String> {
+pub(super) fn price_text(built: &TodayRequest, result: &BlendResult, name: &str) -> Option<String> {
     let at = built.quoted.iter().position(|quote| quote.name == name)?;
     let quote = &built.quoted[at];
     let mut text = format!("出厂报价 {} 元/吨", trim_num(quote.fob, 2));
@@ -250,17 +227,12 @@ pub(super) fn price_text(built: &TodayRequest, result: &Value, name: &str) -> Op
 
 /// "报价比估算出厂价 1795 高 55 元 (对标X)". 只在估算价对上了基准时写: 没对上时核心拿这批
 /// 报价自己反推估价, 拿它评价报价是循环论证 (同网页的报价对比).
-fn gap_text(result: &Value, name: &str) -> Option<String> {
-    let value = result["coal_values"]
-        .as_array()?
-        .iter()
-        .find(|value| value["name"] == name)?;
-    let benchmark = value["benchmark"].as_str()?;
-    let fair = value["fair"]
-        .as_f64()
-        .filter(|fair| fair.is_finite() && *fair > 0.0)?;
+fn gap_text(result: &BlendResult, name: &str) -> Option<String> {
+    let value = result.coal_values.iter().find(|value| value.name == name)?;
+    let benchmark = value.benchmark.as_deref()?;
+    let fair = Some(value.fair).filter(|fair| fair.is_finite() && *fair > 0.0)?;
     // 先取整再判高低: 差 0.3 元写 "持平", 不能是 "高 0 元".
-    let gap = value["gap"].as_f64().filter(|gap| gap.is_finite())?.round();
+    let gap = value.gap.filter(|gap| gap.is_finite())?.round();
     Some(if gap == 0.0 {
         format!("报价与估算出厂价 {fair:.0} 持平 (对标{benchmark})")
     } else {
@@ -286,13 +258,14 @@ fn changed_text(quote: &QuotedCoal, coal: &Value) -> Option<String> {
 }
 
 /// 报了价但没进配方的煤各一行; 无解时没有配方, 改列这次用的全部报价. 不是询价精算为空.
-pub(super) fn unused_lines(built: &TodayRequest, result: &Value) -> Vec<String> {
-    let solved = result["ok"] == true;
+pub(super) fn unused_lines(built: &TodayRequest, result: &BlendResult) -> Vec<String> {
+    let solved = result.ok;
     let used = |name: &str| {
         solved
-            && result["recipe"][name]
-                .as_f64()
-                .is_some_and(|ratio| ratio > RECIPE_GRAIN)
+            && result
+                .recipe
+                .get(name)
+                .is_some_and(|ratio| *ratio > RECIPE_GRAIN)
     };
     let types = coal_types(&built.request);
     let rest: Vec<String> = built

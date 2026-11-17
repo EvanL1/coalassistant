@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initializeCloudStorage } from "../cloudStorage";
 import { getCoalPrefs, getUserCoals } from "../storage";
+import { makeStorage } from "../test/makeStorage";
 import type { MasterCoalEntry } from "../types";
 import { resolveCoalPool, toEstimateCoal } from "./resolvedCoal";
 import poolCasesRaw from "../../../blend_kit_server/data/pool_cases.json?raw";
@@ -27,38 +28,10 @@ interface PoolCase {
 
 const fixture = JSON.parse(poolCasesRaw) as { cases: PoolCase[] };
 
-function makeStorage(): Storage {
-  const values = new Map<string, string>();
-  return {
-    get length() {
-      return values.size;
-    },
-    clear: () => values.clear(),
-    getItem: (key) => values.get(key) ?? null,
-    key: (index) => [...values.keys()][index] ?? null,
-    removeItem: (key) => {
-      values.delete(key);
-    },
-    setItem: (key, value) => {
-      values.set(key, value);
-    },
-  };
-}
-
 beforeEach(() => {
   vi.stubGlobal("window", new EventTarget());
   vi.stubGlobal("localStorage", makeStorage());
   vi.stubGlobal("fetch", vi.fn());
-  if (typeof CustomEvent === "undefined") {
-    vi.stubGlobal(
-      "CustomEvent",
-      class extends Event {
-        constructor(type: string) {
-          super(type);
-        }
-      },
-    );
-  }
 });
 
 afterEach(() => {

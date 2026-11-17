@@ -1,6 +1,6 @@
 //! 管理端: 全局设置 (煤阶交互 k)、k 标定、CSR 模型状态.
 //!
-//! 全部只认管理员会话 (见 `require_admin`). 纯计算放在 blend_kit (`fit_k` 等),
+//! 全部只认管理员会话 (路由表里归 `Access::Admin`, 由 `require_admin` 中间件把关). 纯计算放在 blend_kit (`fit_k` 等),
 //! 这里只做 PG 读写与 JSON 拼装; 能脱离数据库的部分都写成纯函数单测.
 
 use std::borrow::Cow;
@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
 use super::{
-    bad_request, database_error, merged_master_json, require_admin, require_database,
-    require_json_content_type, AppState,
+    bad_request, database_error, merged_master_json, require_database, require_json_content_type,
+    AppState,
 };
 
 /// 煤阶交互系数 k 在 app_settings 里的键.
@@ -86,10 +86,7 @@ fn settings_response(k: Option<f64>) -> Response {
 }
 
 /// GET /api/admin/settings
-pub(crate) async fn get_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
+pub(crate) async fn get_settings(State(state): State<AppState>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -100,15 +97,12 @@ pub(crate) async fn get_settings(State(state): State<AppState>, headers: HeaderM
     }
 }
 
-/// PUT /api/admin/settings —— 收 `Request<Body>`, 先鉴权再解析 (理由见 update_coal_data).
+/// PUT /api/admin/settings —— 收 `Request<Body>`: 请求体不合法回本接口自己的 400 (理由见 update_coal_data).
 pub(crate) async fn put_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
     request: Request<Body>,
 ) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
     if let Err(response) = require_json_content_type(&headers) {
         return *response;
     }
@@ -325,10 +319,7 @@ fn calibrate(rows: &[MeasuredRow], ranks: &HashMap<String, Option<f64>>) -> Valu
 }
 
 /// GET /api/admin/calibration —— 用普通账号的历史实测反推煤阶交互 k.
-pub(crate) async fn calibration(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
+pub(crate) async fn calibration(State(state): State<AppState>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -376,10 +367,7 @@ fn csr_model_status(observations: &[blend_kit::CsrObservation]) -> Value {
 }
 
 /// GET /api/admin/csr-model —— CSR 回归的样本进度与拟合优度.
-pub(crate) async fn csr_model(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
+pub(crate) async fn csr_model(State(state): State<AppState>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,

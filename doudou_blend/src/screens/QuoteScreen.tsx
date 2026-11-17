@@ -12,8 +12,8 @@ import { loadMaster } from "../master_loader";
 import { getCoalPrefs, getQuantity, getShovelTons, getUserCoals, getUserContract } from "../storage";
 import { getPenaltyTemplate } from "../penaltyStorage";
 import { archiveQuotes, fetchLatestQuotes, type QuoteItemInput } from "../quotes";
-import { resolveCoalPool, type ResolvedCoal } from "../domain/resolvedCoal";
-import { loadPriceFactorWithStatus, quoteRequest, type QuotedCoal } from "../domain/blendRequest";
+import { resolveCoalPool, toWireCoal, type ResolvedCoal } from "../domain/resolvedCoal";
+import { currentContract, loadPriceFactorWithStatus, quoteRequest, type QuotedCoal } from "../domain/blendRequest";
 import { isPartialNumberInput, parseNumberInput } from "../domain/numberInput";
 import { clearQuoteDraft, loadQuoteDraft, saveQuoteDraft, type QuoteDraftRow } from "../domain/quoteDraft";
 import { isContractIncomplete } from "../domain/contract";
@@ -26,7 +26,6 @@ import {
 } from "../domain/purchaseTerms";
 import { LatestRequestTracker, type SolveSnapshot } from "../domain/solveSession";
 import { coalTypeMap } from "../domain/coalTypes";
-import { placeFields } from "../domain/place";
 import { INDICATOR_LABEL, INDICATOR_ORDER } from "../types";
 import type { BlendResult, CoalMaster, CoalValue, IndicatorKey, LatestQuote } from "../types";
 import { CostCard } from "./CostCard";
@@ -273,9 +272,7 @@ export function QuoteScreen({
     // 现场输入、合同和条款在任何 await 前冻结; 求解与存档使用同一批指标.
     const totalQuantity = getQuantity();
     const shovelTons = getShovelTons();
-    const contract = getUserContract();
-    const specs = contract ?? data.master.default_contract.specs;
-    const contractName = contract ? "用户自定义合同" : data.master.default_contract.name;
+    const { specs, name: contractName } = currentContract(getUserContract(), data.master);
     const terms = resolvePurchaseTerms(
       pricedRows.map((row) => row.coal),
       getCoalPrefs(),
@@ -300,13 +297,9 @@ export function QuoteScreen({
       }),
     };
     const items: QuoteItemInput[] = quoted.map((item) => ({
-      name: item.coal.name,
+      ...toWireCoal(item.coal),
       fob: item.fob,
       frt: item.frt,
-      coal_type: item.coal.coal_type ?? undefined,
-      form: item.coal.form ?? undefined,
-      region: item.coal.region ?? undefined,
-      ...placeFields(item.coal),
       props: { ...item.coal.props, ...item.props },
       changed: Object.keys(item.props) as IndicatorKey[],
     }));

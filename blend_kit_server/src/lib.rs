@@ -1,14 +1,16 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Extension, Json, Path, State},
-    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    extract::{ConnectInfo, Extension, FromRequestParts, Json, MatchedPath, Path, State},
+    handler::Handler,
+    http::{header, request::Parts, HeaderMap, HeaderValue, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{on, MethodFilter, MethodRouter},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -54,8 +56,11 @@ const LOGIN_FAILURE_DELAY: Duration = Duration::from_secs(1);
 /// MCP 一个请求里最多的 JSON-RPC 消息条数; 每条 tools/call 都要求解一次.
 const MAX_MCP_MESSAGES: usize = 16;
 
-pub async fn app(public_dir: PathBuf) -> Router {
-    let database = database::connect_from_env().await;
+/// 线上入口. `auth` 由调用方先建好 ([`AuthConfig::from_env`]): 监听哪个地址要看它
+/// ([`AuthConfig::listen_ip`]), 得在绑定端口之前知道. 数据库配了却连不上、迁移失败时返回 Err,
+/// 调用方记下原因后退出.
+pub async fn app(public_dir: PathBuf, auth: AuthConfig) -> Result<Router, String> {
+    let database = database::connect_from_env().await?;
     // k 启动时读一次, 之后只由 PUT /api/admin/settings 更新 —— 求解路径不碰库.
     let rank_k = match database.as_ref() {
         Some(pool) => admin::load_rank_interaction_k(pool).await,
@@ -67,14 +72,14 @@ pub async fn app(public_dir: PathBuf) -> Router {
         mcci::spawn_daily(pool.clone(), &master);
         coal_prices::spawn_hourly(pool);
     }
-    app_with_state(
+    Ok(app_with_state(
         public_dir,
         AppState {
-            auth: AuthConfig::from_env(),
+            auth,
             database,
             rank_k: Arc::new(RwLock::new(rank_k)),
         },
-    )
+    ))
 }
 
 /// 密钥名字上限, 与迁移里的 CHECK 一致.
@@ -90,6 +95,9 @@ pub struct AuthConfig {
     admin: Option<AdminAccount>,
     /// 登录限速状态, 随这份配置共享.
     login_guard: Arc<limits::LoginGuard>,
+    /// 账号、口令、会话令牌里有没显式配置、退回了内置默认值的 (只该出现在本机开发).
+    /// 为真时只监听本机回环, 见 [`AuthConfig::listen_ip`].
+    default_credentials: bool,
 }
 
 /// 管理员账号: 普通账号的超集, 另可调参、维护煤库、管理密钥.
@@ -121,7 +129,23 @@ impl AuthConfig {
             secure_cookie,
             admin: None,
             login_guard: Arc::default(),
+            default_credentials: false,
         }
+    }
+
+    /// 监听哪个地址. 用了内置默认口令 (谁都知道) 就只听本机回环, 免得同一个镜像在 Railway 之外
+    /// 没配 `AUTH_*` 就启动时带着默认口令对外; 三项都显式配置了才对外监听.
+    pub fn listen_ip(&self) -> IpAddr {
+        if self.default_credentials {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        } else {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        }
+    }
+
+    /// 是否用了内置默认口令 (启动日志据此说明为什么只监听本机).
+    pub fn uses_default_credentials(&self) -> bool {
+        self.default_credentials
     }
 
     fn short_session_token(&self) -> bool {
@@ -168,53 +192,65 @@ impl AuthConfig {
         self
     }
 
-    pub fn from_env() -> Self {
+    /// 从环境变量读配置. Railway 上缺 `AUTH_*` 返回 Err (启动失败), 本机缺了退回内置默认口令.
+    /// 设成空串或只有空白的变量按"没设"处理: 空令牌等于谁都能登录.
+    pub fn from_env() -> Result<Self, String> {
         let on_railway = std::env::var_os("RAILWAY_ENVIRONMENT_NAME").is_some();
-        let read = |name: &str, local_default: &str| {
-            std::env::var(name).unwrap_or_else(|_| {
-                if on_railway {
-                    panic!("Railway 部署必须设置 {name}");
-                }
-                local_default.to_string()
-            })
-        };
+        Self::from_lookup(on_railway, |name| std::env::var(name).ok())
+    }
 
-        let ip_lockout =
-            limits::ip_lockout_enabled(std::env::var(limits::IP_LOCKOUT_ENV).ok().as_deref());
+    /// [`AuthConfig::from_env`] 的本体; `lookup` 按名字取环境变量, 单测时换成固定值.
+    fn from_lookup(
+        on_railway: bool,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        // 变量在而值是空的 (部署配置里留了个空项) 不算配置过: 否则空的会话令牌会和空 Cookie 对上.
+        let lookup = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
+        let mut default_credentials = false;
+        let mut read = |name: &str, local_default: &str| match lookup(name) {
+            Some(value) => Ok(value),
+            None if on_railway => Err(format!("Railway 部署必须设置 {name}")),
+            None => {
+                default_credentials = true;
+                Ok(local_default.to_string())
+            }
+        };
+        let username = read("AUTH_USERNAME", "doudou")?;
+        let password = read("AUTH_PASSWORD", "123456")?;
+        let session_token = read("AUTH_SESSION_TOKEN", "local-development-session")?;
+
+        let ip_lockout = limits::ip_lockout_enabled(lookup(limits::IP_LOCKOUT_ENV).as_deref());
         tracing::info!(
             ip_lockout,
             "登录按来源 IP 锁定: {} ({} 设为 on 打开)",
             if ip_lockout { "开" } else { "关" },
             limits::IP_LOCKOUT_ENV
         );
-        let config = Self::new(
-            read("AUTH_USERNAME", "doudou"),
-            read("AUTH_PASSWORD", "123456"),
-            read("AUTH_SESSION_TOKEN", "local-development-session"),
-            on_railway,
-        )
-        .with_login_ip_lockout(ip_lockout);
+        let mut config = Self::new(username, password, session_token, on_railway)
+            .with_login_ip_lockout(ip_lockout);
+        config.default_credentials = default_credentials;
         // 本机默认令牌不提醒; 显式配置的短令牌只告警, 不拒绝启动.
-        if std::env::var_os("AUTH_SESSION_TOKEN").is_some() && config.short_session_token() {
+        if lookup("AUTH_SESSION_TOKEN").is_some() && config.short_session_token() {
             tracing::warn!(
                 "AUTH_SESSION_TOKEN 短于 {MIN_SESSION_TOKEN_BYTES} 字节, 可被穷举, 请换成更长的随机值"
             );
         }
-        // 管理员三项全部可选: 缺任一项即停用管理端, Railway 上也不 panic.
-        let optional = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
-        match (
-            optional("ADMIN_USERNAME"),
-            optional("ADMIN_PASSWORD"),
-            optional("ADMIN_SESSION_TOKEN"),
-        ) {
-            (Some(username), Some(password), Some(token)) => {
-                config.with_admin(username, password, token)
-            }
-            _ => {
-                tracing::info!("ADMIN_* 未配齐, 管理端停用");
-                config
-            }
-        }
+        // 管理员三项全部可选: 缺任一项即停用管理端, Railway 上也照常启动.
+        Ok(
+            match (
+                lookup("ADMIN_USERNAME"),
+                lookup("ADMIN_PASSWORD"),
+                lookup("ADMIN_SESSION_TOKEN"),
+            ) {
+                (Some(username), Some(password), Some(token)) => {
+                    config.with_admin(username, password, token)
+                }
+                _ => {
+                    tracing::info!("ADMIN_* 未配齐, 管理端停用");
+                    config
+                }
+            },
+        )
     }
 }
 
@@ -274,58 +310,328 @@ fn app_with_state(public_dir: PathBuf, state: AppState) -> Router {
         HeaderValue::from_static("no-cache"),
     );
 
-    let router = Router::new()
-        .route("/api/health", get(health))
-        .route("/api/coal-index", get(coal_index_handler))
-        .route("/api/auth/session", get(auth_session))
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/logout", post(logout))
-        .route("/api/solve", post(solve))
-        .route("/api/price", post(benchmarks::estimate))
-        .route("/api/coal-prices", get(coal_prices::list))
-        .route("/api/coal-prices/history", get(coal_prices::history))
-        .route("/api/quotes", post(quotes::archive))
-        .route("/api/quotes/latest", get(quotes::latest))
-        .route("/api/admin/quotes", get(quotes::list))
-        .route("/api/admin/quotes/{id}", delete(quotes::delete))
-        .route("/api/benchmarks", get(benchmarks::list))
-        .route("/api/mcci", get(mcci::list))
-        .route("/api/admin/benchmarks", post(benchmarks::create))
-        .route("/api/admin/benchmarks/{id}", delete(benchmarks::delete))
-        .route("/api/master", get(master))
-        // 数据更新接口: 机器密钥 (X-API-Key) 或管理员会话, 普通用户会话无权
-        .route("/api/master/coals", post(update_coal_data))
-        .route("/api/master/overrides", get(list_coal_overrides))
-        .route(
-            "/api/master/coals/{coal}/{field}",
-            delete(delete_coal_override),
-        )
-        // 管理端: 只认管理员会话 (不是 X-API-Key)
-        .route("/api/admin/keys", get(list_api_keys).post(create_api_key))
-        .route("/api/admin/keys/{id}", delete(revoke_api_key))
-        .route(
-            "/api/admin/settings",
-            get(admin::get_settings).put(admin::put_settings),
-        )
-        .route("/api/admin/calibration", get(admin::calibration))
-        .route("/api/admin/csr-model", get(admin::csr_model))
-        .route("/api/version", get(version))
-        .route("/api/storage", get(get_storage).put(put_storage))
-        .route(
-            "/api/history",
-            get(list_history).post(create_history).delete(clear_history),
-        )
-        .route("/api/history/count", get(count_history))
-        .route("/api/history/import", post(import_history))
-        .route("/api/history/{id}/measured", patch(set_measured_quality))
-        // MCP (手机 Agent): mcp 用途密钥, 查询 + 求解 + 询价存档
-        .route("/mcp", post(mcp_post).get(mcp_get))
-        .route("/mcp/{key}", post(mcp_post_with_key).get(mcp_get))
+    let router = api_router(&state)
         .nest_service("/assets", assets)
         .fallback_service(static_files)
         .with_state(state)
         .layer(CompressionLayer::new());
-    with_security_headers(router, https_only).layer(TraceLayer::new_for_http())
+    with_security_headers(router, https_only)
+        .layer(TraceLayer::new_for_http().make_span_with(trace_span))
+}
+
+/// 访问日志的 span: 只记方法与路由模板 (如 `/mcp/{key}`), 不记实际路径. `tower_http` 默认的
+/// span 带完整 URI, 日志一旦开到 debug, `/mcp/{key}` 路径里的密钥就进了日志. 没匹配上路由表的
+/// 请求 (静态资源、SPA 兜底、写错的地址) 记 `-` —— 写错的地址里同样可能带着密钥.
+/// 验证见 `test_access_log_never_contains_the_key_in_the_path`.
+fn trace_span(request: &Request<Body>) -> tracing::Span {
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("-", MatchedPath::as_str);
+    tracing::debug_span!("request", method = %request.method(), route, version = ?request.version())
+}
+
+// ---------------------------------------------------------------------------
+// 路由表与鉴权
+//
+// 每条路由都登记在 `routes()` 里, 并写明谁能进 (`Access`). 鉴权由这一类的中间件在进 handler
+// 之前做完 —— 也就在请求体解析之前, 所以未登录的请求拿不到 422 里的字段名, 也触发不了
+// 反序列化. handler 不再自己验; 要用身份就收一个 `Authed<…>` 参数. 路由表测试
+// (`test_every_route_without_credentials_gets_401`) 照这张表逐条不带凭据去请求, 新加的路由
+// 自动在内; 路由只能经这张表挂上去 (`test_routes_are_only_mounted_through_the_table`).
+// ---------------------------------------------------------------------------
+
+/// 一条路由谁能进. 新路由必须选一种.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Access {
+    /// 不用登录.
+    Public,
+    /// 登录会话 (普通账号; 管理员会话是它的超集).
+    Session,
+    /// 管理员会话. 不认 X-API-Key —— 管钥匙的不能是钥匙自己.
+    Admin,
+    /// 煤库数据更新: 管理员会话, 或 data 用途的机器密钥 (X-API-Key). 普通用户会话无权.
+    DataWriter,
+    /// MCP (手机 Agent): mcp 用途的机器密钥, 放在请求头或路径里.
+    McpKey,
+}
+
+impl Access {
+    /// 给一条路由套上这一类的鉴权. 用 `MethodRouter::route_layer`: 只包住真正处理请求的 handler,
+    /// 路径在而方法不对的请求照旧回 405 (不先问凭据). 穷尽 `match`: 新加一类不写鉴权就编不过.
+    fn guard(self, handler: MethodRouter<AppState>, state: &AppState) -> MethodRouter<AppState> {
+        let state = state.clone();
+        match self {
+            Access::Public => handler,
+            Access::Session => {
+                handler.route_layer(middleware::from_fn_with_state(state, require_session))
+            }
+            Access::Admin => {
+                handler.route_layer(middleware::from_fn_with_state(state, require_admin))
+            }
+            Access::DataWriter => {
+                handler.route_layer(middleware::from_fn_with_state(state, require_data_writer))
+            }
+            Access::McpKey => {
+                handler.route_layer(middleware::from_fn_with_state(state, require_mcp_key))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verb {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl Verb {
+    fn filter(self) -> MethodFilter {
+        match self {
+            Verb::Get => MethodFilter::GET,
+            Verb::Post => MethodFilter::POST,
+            Verb::Put => MethodFilter::PUT,
+            Verb::Patch => MethodFilter::PATCH,
+            Verb::Delete => MethodFilter::DELETE,
+        }
+    }
+
+    #[cfg(test)]
+    fn method(self) -> axum::http::Method {
+        match self {
+            Verb::Get => axum::http::Method::GET,
+            Verb::Post => axum::http::Method::POST,
+            Verb::Put => axum::http::Method::PUT,
+            Verb::Patch => axum::http::Method::PATCH,
+            Verb::Delete => axum::http::Method::DELETE,
+        }
+    }
+}
+
+/// 路由表的一行.
+struct RouteDef {
+    access: Access,
+    /// 只给路由表测试看: 挂路由用的是 `handler`, 它已经按这个方法建好.
+    #[cfg(test)]
+    verb: Verb,
+    path: &'static str,
+    handler: MethodRouter<AppState>,
+}
+
+fn route<H, T>(access: Access, verb: Verb, path: &'static str, handler: H) -> RouteDef
+where
+    H: Handler<T, AppState>,
+    T: 'static,
+{
+    RouteDef {
+        access,
+        #[cfg(test)]
+        verb,
+        path,
+        handler: on(verb.filter(), handler),
+    }
+}
+
+/// 全部路由 (静态资源与 SPA 兜底除外).
+fn routes() -> Vec<RouteDef> {
+    use Access::{Admin, DataWriter, McpKey, Public, Session};
+    use Verb::{Delete, Get, Patch, Post, Put};
+    vec![
+        route(Public, Get, "/api/health", health),
+        route(Public, Get, "/api/coal-index", coal_index_handler),
+        route(Public, Get, "/api/auth/session", auth_session),
+        route(Public, Post, "/api/auth/login", login),
+        route(Public, Post, "/api/auth/logout", logout),
+        // 本服务不开 SSE 推送流, GET 按规范回 405.
+        route(Public, Get, "/mcp", mcp_get),
+        route(Public, Get, "/mcp/{key}", mcp_get),
+        route(Session, Post, "/api/solve", solve),
+        route(Session, Post, "/api/price", benchmarks::estimate),
+        route(Session, Get, "/api/coal-prices", coal_prices::list),
+        route(
+            Session,
+            Get,
+            "/api/coal-prices/history",
+            coal_prices::history,
+        ),
+        route(Session, Post, "/api/quotes", quotes::archive),
+        route(Session, Get, "/api/quotes/latest", quotes::latest),
+        route(Session, Get, "/api/benchmarks", benchmarks::list),
+        route(Session, Get, "/api/mcci", mcci::list),
+        route(Session, Get, "/api/master", master),
+        route(Session, Get, "/api/storage", get_storage),
+        route(Session, Put, "/api/storage", put_storage),
+        route(Session, Get, "/api/history", list_history),
+        route(Session, Post, "/api/history", create_history),
+        route(Session, Delete, "/api/history", clear_history),
+        route(Session, Get, "/api/history/count", count_history),
+        route(Session, Post, "/api/history/import", import_history),
+        route(
+            Session,
+            Patch,
+            "/api/history/{id}/measured",
+            set_measured_quality,
+        ),
+        route(Admin, Get, "/api/admin/quotes", quotes::list),
+        route(Admin, Delete, "/api/admin/quotes/{id}", quotes::delete),
+        route(Admin, Post, "/api/admin/benchmarks", benchmarks::create),
+        route(
+            Admin,
+            Delete,
+            "/api/admin/benchmarks/{id}",
+            benchmarks::delete,
+        ),
+        route(Admin, Get, "/api/admin/keys", list_api_keys),
+        route(Admin, Post, "/api/admin/keys", create_api_key),
+        route(Admin, Delete, "/api/admin/keys/{id}", revoke_api_key),
+        route(Admin, Get, "/api/admin/settings", admin::get_settings),
+        route(Admin, Put, "/api/admin/settings", admin::put_settings),
+        route(Admin, Get, "/api/admin/calibration", admin::calibration),
+        route(Admin, Get, "/api/admin/csr-model", admin::csr_model),
+        route(DataWriter, Post, "/api/master/coals", update_coal_data),
+        route(
+            DataWriter,
+            Get,
+            "/api/master/overrides",
+            list_coal_overrides,
+        ),
+        route(
+            DataWriter,
+            Delete,
+            "/api/master/coals/{coal}/{field}",
+            delete_coal_override,
+        ),
+        route(McpKey, Post, "/mcp", mcp_post),
+        route(McpKey, Post, "/mcp/{key}", mcp_post),
+    ]
+}
+
+/// 按路由表建路由器: 每条路由先套上它那一类的鉴权中间件再挂上去 (同一路径的不同方法可以
+/// 各是一类, 如 `/mcp` 的 GET 公开、POST 要密钥).
+fn api_router(state: &AppState) -> Router<AppState> {
+    routes().into_iter().fold(Router::new(), |router, def| {
+        router.route(def.path, def.access.guard(def.handler, state))
+    })
+}
+
+/// 登录会话的身份 (由 [`require_session`] 放进请求扩展). 线上所有登录者共用一个网页账号,
+/// 管理员会话读写的也是这一行数据, 所以只有用户名.
+#[derive(Clone)]
+struct SessionUser {
+    username: String,
+}
+
+/// 管理员的身份 (由 [`require_admin`] 放进请求扩展), 留痕用.
+#[derive(Clone)]
+struct AdminUser {
+    username: String,
+}
+
+/// 煤库数据更新的调用方 (由 [`require_data_writer`] 放进请求扩展).
+#[derive(Clone)]
+struct DataWriter {
+    /// 落库留痕用的持有者名字: 管理员为 `管理员:<账号>`, 密钥为密钥名字 (调用方伪造不了).
+    holder: String,
+    /// 走的是 Cookie 会话 (写接口据此要求 JSON Content-Type).
+    by_session: bool,
+}
+
+/// 从请求扩展里取鉴权中间件放进去的身份. 取不到说明这条路由没挂在对应的组里 ——
+/// 当作没登录回 401, 不放行.
+struct Authed<T>(T);
+
+impl<S, T> FromRequestParts<S> for Authed<T>
+where
+    S: Send + Sync,
+    T: Clone + Send + Sync + 'static,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        match parts.extensions.get::<T>() {
+            Some(identity) => Ok(Self(identity.clone())),
+            None => {
+                tracing::error!("handler 要身份, 但这条路由没挂在对应的鉴权组里");
+                Err(unauthorized())
+            }
+        }
+    }
+}
+
+/// 登录会话组: 没有有效会话 401.
+async fn require_session(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    if session_role(request.headers(), &state.auth).is_none() {
+        return unauthorized();
+    }
+    request.extensions_mut().insert(SessionUser {
+        username: state.auth.username.clone(),
+    });
+    next.run(request).await
+}
+
+/// 管理员组: 未登录 401, 普通账号 403.
+async fn require_admin(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    match (
+        session_role(request.headers(), &state.auth),
+        &state.auth.admin,
+    ) {
+        (Some(Role::Admin), Some(admin)) => {
+            request.extensions_mut().insert(AdminUser {
+                username: admin.username.clone(),
+            });
+            next.run(request).await
+        }
+        (None, _) => unauthorized(),
+        _ => (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+            r#"{"ok":false,"reason":"需要管理员权限"}"#,
+        )
+            .into_response(),
+    }
+}
+
+/// 煤库数据更新组: 管理员会话或 data 用途的 X-API-Key 二选一.
+async fn require_data_writer(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    match check_data_writer(request.headers(), &state).await {
+        Ok(writer) => {
+            request.extensions_mut().insert(writer);
+            next.run(request).await
+        }
+        Err(response) => *response,
+    }
+}
+
+/// MCP 组: mcp 用途的密钥, 取自路径 (`/mcp/{key}`) 或请求头. 验过才往下走, 请求体留给 handler 读.
+async fn require_mcp_key(
+    State(state): State<AppState>,
+    key: Option<Path<String>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let presented = match key {
+        Some(Path(key)) => key,
+        None => mcp_key_from_headers(request.headers()),
+    };
+    match check_mcp_key(&state, &presented).await {
+        Ok(()) => next.run(request).await,
+        Err(response) => *response,
+    }
 }
 
 /// 安全响应头. 不加限制脚本/样式来源的 CSP, 只用 frame-ancestors 禁止被别的站点嵌入.
@@ -497,15 +803,7 @@ async fn logout() -> Response {
         .into_response()
 }
 
-async fn solve(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: Request<Body>,
-) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
-    }
-
+async fn solve(State(state): State<AppState>, request: Request<Body>) -> Response {
     let body = match axum::body::to_bytes(request.into_body(), 2 * 1024 * 1024).await {
         Ok(body) => body,
         Err(error) => {
@@ -546,11 +844,7 @@ async fn solve(
         .into_response()
 }
 
-async fn master(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
-    }
-
+async fn master(State(state): State<AppState>) -> Response {
     (
         [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
         merged_master_json(&state).await,
@@ -584,28 +878,12 @@ async fn merged_master_json_from_pool(
     Ok(blend_kit::master_json().into())
 }
 
-async fn version(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !is_authenticated(&headers, &state.auth) {
-        return unauthorized();
-    }
-
-    (
-        [(header::CONTENT_TYPE, TEXT_CONTENT_TYPE)],
-        env!("CARGO_PKG_VERSION"),
-    )
-        .into_response()
-}
-
-async fn get_storage(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
+async fn get_storage(State(state): State<AppState>, Authed(user): Authed<SessionUser>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    match database::load_storage(pool, &username).await {
+    match database::load_storage(pool, &user.username).await {
         Ok(storage) => Json(storage).into_response(),
         Err(error) => database_error(error),
     }
@@ -613,13 +891,9 @@ async fn get_storage(State(state): State<AppState>, headers: HeaderMap) -> Respo
 
 async fn put_storage(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Authed(user): Authed<SessionUser>,
     Json(mut storage): Json<database::UserStorage>,
 ) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
     if let Err(reason) = storage.validate() {
         return bad_request(reason);
     }
@@ -628,7 +902,7 @@ async fn put_storage(
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    match database::save_storage(pool, &username, &storage).await {
+    match database::save_storage(pool, &user.username, &storage).await {
         Ok(()) => Json(storage).into_response(),
         Err(error) => database_error(error),
     }
@@ -636,13 +910,9 @@ async fn put_storage(
 
 async fn create_history(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Authed(user): Authed<SessionUser>,
     Json(input): Json<database::CreateHistory>,
 ) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
     if let Err(reason) = input.validate() {
         return bad_request(reason);
     }
@@ -650,7 +920,7 @@ async fn create_history(
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    match database::create_history(pool, &username, &input).await {
+    match database::create_history(pool, &user.username, &input).await {
         Ok(id) => Json(json!({ "id": id })).into_response(),
         Err(error) => database_error(error),
     }
@@ -658,13 +928,9 @@ async fn create_history(
 
 async fn import_history(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Authed(user): Authed<SessionUser>,
     Json(input): Json<database::ImportHistory>,
 ) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
     if input.entries.len() > 100 {
         return bad_request("一次最多导入 100 条历史方案");
     }
@@ -672,37 +938,35 @@ async fn import_history(
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    match database::import_history(pool, &username, &input).await {
+    match database::import_history(pool, &user.username, &input).await {
         Ok(imported) => Json(json!({ "imported": imported })).into_response(),
         Err(error) => database_error(error),
     }
 }
 
-async fn count_history(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
+async fn count_history(
+    State(state): State<AppState>,
+    Authed(user): Authed<SessionUser>,
+) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    match database::count_history(pool, &username).await {
+    match database::count_history(pool, &user.username).await {
         Ok(count) => Json(database::count_response(count)).into_response(),
         Err(error) => database_error(error),
     }
 }
 
-async fn list_history(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
+async fn list_history(
+    State(state): State<AppState>,
+    Authed(user): Authed<SessionUser>,
+) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    match database::list_history(pool, &username).await {
+    match database::list_history(pool, &user.username).await {
         Ok(history) => Json(history).into_response(),
         Err(error) => database_error(error),
     }
@@ -710,14 +974,10 @@ async fn list_history(State(state): State<AppState>, headers: HeaderMap) -> Resp
 
 async fn set_measured_quality(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Authed(user): Authed<SessionUser>,
     Path(id): Path<String>,
     Json(measured): Json<database::MeasuredQuality>,
 ) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
     if let Err(reason) = measured.validate() {
         return bad_request(reason);
     }
@@ -725,7 +985,7 @@ async fn set_measured_quality(
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    match database::set_measured_quality(pool, &username, &id, &measured).await {
+    match database::set_measured_quality(pool, &user.username, &id, &measured).await {
         Ok(true) => Json(json!({ "updated": true })).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
@@ -737,25 +997,18 @@ async fn set_measured_quality(
     }
 }
 
-async fn clear_history(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let username = match authenticated_username(&headers, &state) {
-        Ok(username) => username,
-        Err(response) => return *response,
-    };
+async fn clear_history(
+    State(state): State<AppState>,
+    Authed(user): Authed<SessionUser>,
+) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    match database::clear_history(pool, &username).await {
+    match database::clear_history(pool, &user.username).await {
         Ok(deleted) => Json(json!({ "deleted": deleted })).into_response(),
         Err(error) => database_error(error),
     }
-}
-
-fn authenticated_username(headers: &HeaderMap, state: &AppState) -> Result<String, Box<Response>> {
-    is_authenticated(headers, &state.auth)
-        .then(|| state.auth.username.clone())
-        .ok_or_else(|| Box::new(unauthorized()))
 }
 
 fn require_database(state: &AppState) -> Result<&PgPool, Box<Response>> {
@@ -790,10 +1043,6 @@ fn database_error(error: sqlx::Error) -> Response {
         .into_response()
 }
 
-fn is_authenticated(headers: &HeaderMap, auth: &AuthConfig) -> bool {
-    session_role(headers, auth).is_some()
-}
-
 fn session_role(headers: &HeaderMap, auth: &AuthConfig) -> Option<Role> {
     let token = headers
         .get(header::COOKIE)
@@ -804,6 +1053,10 @@ fn session_role(headers: &HeaderMap, auth: &AuthConfig) -> Option<Role> {
                 (name == SESSION_COOKIE).then_some(value)
             })
         })?;
+    // 空令牌永远不算登录: 即使配置里的令牌被弄成了空串, 也不能让空 Cookie 对上.
+    if token.is_empty() {
+        return None;
+    }
     if auth
         .admin
         .as_ref()
@@ -812,25 +1065,6 @@ fn session_role(headers: &HeaderMap, auth: &AuthConfig) -> Option<Role> {
         return Some(Role::Admin);
     }
     secret_eq(token, &auth.session_token).then_some(Role::User)
-}
-
-/// 管理端守卫: 未登录 401, 普通账号 403. 成功时返回管理员账号 (留痕用).
-fn require_admin<'a>(
-    headers: &HeaderMap,
-    state: &'a AppState,
-) -> Result<&'a AdminAccount, Box<Response>> {
-    match (session_role(headers, &state.auth), &state.auth.admin) {
-        (Some(Role::Admin), Some(admin)) => Ok(admin),
-        (None, _) => Err(Box::new(unauthorized())),
-        _ => Err(Box::new(
-            (
-                StatusCode::FORBIDDEN,
-                [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
-                r#"{"ok":false,"reason":"需要管理员权限"}"#,
-            )
-                .into_response(),
-        )),
-    }
 }
 
 fn secret_eq(actual: &str, expected: &str) -> bool {
@@ -850,21 +1084,58 @@ fn unauthorized() -> Response {
 // 煤库数据更新接口 (机器密钥, 与用户会话完全独立)
 // ---------------------------------------------------------------------------
 
-/// 数据更新接口的鉴权: 管理员会话或有效 X-API-Key 二选一.
-/// 返回落库留痕用的持有者名字 (管理员为 `管理员:<账号>`, 密钥为密钥名字),
-/// 以及是否走的是 Cookie 会话 (写接口据此要求 JSON Content-Type).
+/// 数据更新接口的鉴权: 管理员会话或有效 X-API-Key (data 用途) 二选一.
 async fn check_data_writer(
     headers: &HeaderMap,
     state: &AppState,
-) -> Result<(String, bool), Box<Response>> {
+) -> Result<DataWriter, Box<Response>> {
     if let (Some(Role::Admin), Some(admin)) =
         (session_role(headers, &state.auth), &state.auth.admin)
     {
-        return Ok((format!("管理员:{}", admin.username), true));
+        return Ok(DataWriter {
+            holder: format!("管理员:{}", admin.username),
+            by_session: true,
+        });
     }
-    check_data_api_key(headers, state)
-        .await
-        .map(|holder| (holder, false))
+    let presented = headers
+        .get(DATA_API_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let rejected = || {
+        // 只记事件, 不记 presented —— 那是攻击者可控内容, 不该进日志.
+        tracing::warn!("数据更新接口密钥校验失败");
+        (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+            r#"{"ok":false,"reason":"X-API-Key 无效或已销毁"}"#,
+        )
+            .into_response()
+    };
+    let holder = check_api_key(state, presented, api_key::Scope::Data, rejected).await?;
+    Ok(DataWriter {
+        holder,
+        by_session: false,
+    })
+}
+
+/// 验一把机器密钥: 对来访明文做 SHA-256, 查未销毁、用途为 `scope` 的密钥行 —— 用途不符
+/// 与密钥不存在一样对不上. 成功返回密钥的名字 (落库留痕用, 调用方伪造不了); 没带或对不上
+/// 回 `rejected` 给的 401 (发生在碰库之前), 没配数据库 503.
+async fn check_api_key(
+    state: &AppState,
+    presented: &str,
+    scope: api_key::Scope,
+    rejected: impl Fn() -> Response,
+) -> Result<String, Box<Response>> {
+    if presented.is_empty() {
+        return Err(Box::new(rejected()));
+    }
+    let pool = require_database(state)?;
+    match database::authenticate_api_key(pool, &api_key::hash_key(presented), scope).await {
+        Ok(Some(name)) => Ok(name),
+        Ok(None) => Err(Box::new(rejected())),
+        Err(error) => Err(Box::new(database_error(error))),
+    }
 }
 
 /// Cookie 鉴权的写接口必须带 `Content-Type: application/json`, 否则 415.
@@ -886,45 +1157,6 @@ fn require_json_content_type(headers: &HeaderMap) -> Result<(), Box<Response>> {
         )
             .into_response(),
     ))
-}
-
-/// 校验 X-API-Key: 对来访明文做 SHA-256, 再查未销毁的密钥行.
-/// 成功时返回该密钥的名字, 供落库留痕使用 (调用方伪造不了).
-async fn check_data_api_key(
-    headers: &HeaderMap,
-    state: &AppState,
-) -> Result<String, Box<Response>> {
-    let unauthorized = || {
-        // 只记事件, 不记 presented —— 那是攻击者可控内容, 不该进日志.
-        tracing::warn!("数据更新接口密钥校验失败");
-        Box::new(
-            (
-                StatusCode::UNAUTHORIZED,
-                [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
-                r#"{"ok":false,"reason":"X-API-Key 无效或已销毁"}"#,
-            )
-                .into_response(),
-        )
-    };
-
-    let presented = headers
-        .get(DATA_API_KEY_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if presented.is_empty() {
-        return Err(unauthorized());
-    }
-
-    let pool = require_database(state)?;
-    let hash = api_key::hash_key(presented);
-    match database::authenticate_api_key(pool, &hash, "data").await {
-        Ok(Some(name)) => Ok(name),
-        Ok(None) => Err(unauthorized()),
-        Err(error) => {
-            tracing::error!(%error, "密钥校验查询失败");
-            Err(Box::new(database_error(error)))
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -949,12 +1181,8 @@ fn default_key_scope() -> String {
 /// POST /api/admin/keys —— 生成一把新密钥. 明文只在这一次响应里出现.
 async fn create_api_key(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(payload): Json<CreateKeyRequest>,
 ) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
     let name = payload.name.trim();
     if name.is_empty() || name.chars().count() > MAX_KEY_NAME_CHARS {
         return (
@@ -966,30 +1194,22 @@ async fn create_api_key(
         )
             .into_response();
     }
-    if !matches!(payload.scope.as_str(), "data" | "mcp") {
+    let Some(scope) = api_key::Scope::parse(&payload.scope) else {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({ "ok": false, "reason": "scope 只能是 data 或 mcp" })),
         )
             .into_response();
-    }
+    };
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
     };
 
     let generated = api_key::generate();
-    match database::create_api_key(
-        pool,
-        name,
-        &payload.scope,
-        &generated.hash,
-        &generated.prefix,
-    )
-    .await
-    {
+    match database::create_api_key(pool, name, scope, &generated.hash, &generated.prefix).await {
         Ok(row) => {
-            tracing::info!(name, scope = %payload.scope, "已生成密钥");
+            tracing::info!(name, scope = scope.as_str(), "已生成密钥");
             (
                 StatusCode::CREATED,
                 Json(json!({
@@ -1006,10 +1226,7 @@ async fn create_api_key(
 }
 
 /// GET /api/admin/keys —— 列出密钥 (只有名字/前缀/时间, 永不含明文或哈希).
-async fn list_api_keys(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
+async fn list_api_keys(State(state): State<AppState>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -1021,14 +1238,7 @@ async fn list_api_keys(State(state): State<AppState>, headers: HeaderMap) -> Res
 }
 
 /// DELETE /api/admin/keys/{id} —— 销毁一把密钥 (软删除, 立即失效).
-async fn revoke_api_key(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    if let Err(response) = require_admin(&headers, &state) {
-        return *response;
-    }
+async fn revoke_api_key(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -1056,27 +1266,21 @@ struct CoalUpdateRequest {
 ///
 /// 只填空: 基线 coal_master.json 已有的指标一律拒绝, 整批校验不通过则一条不写。
 ///
-/// 这里收的是 `Request<Body>` 而不是 `Json<T>` extractor: axum 的 extractor 在
-/// handler 函数体**之前**执行, 用 `Json<T>` 会让未鉴权的请求先被反序列化 ——
-/// 既把接口 schema 回显给任何访客 (`updates[0].coal: invalid type ...`),
-/// 又让鉴权前就能触发 2MB 反序列化。同文件 `solve` 出于同样理由这么写。
+/// 这里收的是 `Request<Body>` 而不是 `Json<T>`: 请求体不合法时回的是本接口自己的 400 与说明,
+/// 不是 axum 的 422; 鉴权已由 [`require_data_writer`] 在进来之前做完.
 async fn update_coal_data(
+    Authed(writer): Authed<DataWriter>,
     State(state): State<AppState>,
     headers: HeaderMap,
     request: Request<Body>,
 ) -> Response {
     // 持有者名字由密钥推导, 不接受调用方自报 —— 出了坏数据要查得到人.
-    let holder = match check_data_writer(&headers, &state).await {
-        Ok((holder, by_session)) => {
-            if by_session {
-                if let Err(response) = require_json_content_type(&headers) {
-                    return *response;
-                }
-            }
-            holder
+    if writer.by_session {
+        if let Err(response) = require_json_content_type(&headers) {
+            return *response;
         }
-        Err(response) => return *response,
-    };
+    }
+    let holder = writer.holder;
 
     let body = match axum::body::to_bytes(request.into_body(), MAX_DATA_API_BODY).await {
         Ok(body) => body,
@@ -1124,10 +1328,7 @@ async fn update_coal_data(
 }
 
 /// GET /api/master/overrides —— 查看当前覆盖层内容 (排查"这个值哪来的")。
-async fn list_coal_overrides(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = check_data_writer(&headers, &state).await {
-        return *response;
-    }
+async fn list_coal_overrides(State(state): State<AppState>) -> Response {
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -1141,12 +1342,8 @@ async fn list_coal_overrides(State(state): State<AppState>, headers: HeaderMap) 
 /// DELETE /api/master/coals/{coal}/{field} —— 回滚一个值到基线状态。
 async fn delete_coal_override(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path((coal, field)): Path<(String, String)>,
 ) -> Response {
-    if let Err(response) = check_data_writer(&headers, &state).await {
-        return *response;
-    }
     let pool = match require_database(&state) {
         Ok(pool) => pool,
         Err(response) => return *response,
@@ -1179,32 +1376,9 @@ fn mcp_key_from_headers(headers: &HeaderMap) -> String {
     bearer.or(api_key).unwrap_or_default().to_string()
 }
 
-/// POST /mcp —— 密钥放在请求头里.
-async fn mcp_post(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    mcp_serve(&state, &mcp_key_from_headers(&headers), &body).await
-}
-
-/// POST /mcp/{key} —— 给只能填一个地址、设不了请求头的客户端. 生产日志级别为 info,
-/// 请求路径不进日志; 密钥泄露时在管理端销毁即可.
-async fn mcp_post_with_key(
-    State(state): State<AppState>,
-    Path(key): Path<String>,
-    body: axum::body::Bytes,
-) -> Response {
-    mcp_serve(&state, &key, &body).await
-}
-
-/// GET /mcp —— 本服务不开 SSE 推送流, 按规范回 405.
-async fn mcp_get() -> Response {
-    (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")]).into_response()
-}
-
-async fn mcp_serve(state: &AppState, presented: &str, body: &[u8]) -> Response {
-    let unauthorized = || {
+/// 验 MCP 密钥 (mcp 用途). data 用途的写煤库密钥进不来.
+async fn check_mcp_key(state: &AppState, presented: &str) -> Result<(), Box<Response>> {
+    let rejected = || {
         tracing::warn!("MCP 密钥校验失败");
         (
             StatusCode::UNAUTHORIZED,
@@ -1213,20 +1387,27 @@ async fn mcp_serve(state: &AppState, presented: &str, body: &[u8]) -> Response {
         )
             .into_response()
     };
-    if presented.is_empty() {
-        return unauthorized();
-    }
+    check_api_key(state, presented, api_key::Scope::Mcp, rejected)
+        .await
+        .map(drop)
+}
+
+/// GET /mcp —— 本服务不开 SSE 推送流, 按规范回 405.
+async fn mcp_get() -> Response {
+    (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")]).into_response()
+}
+
+/// POST /mcp 与 POST /mcp/{key}. 密钥已由 [`require_mcp_key`] 验过 (先验密钥, 再读请求体);
+/// 后一个地址给只能填一个地址、设不了请求头的客户端 —— 访问日志只记路由模板, 密钥不进日志
+/// (见 `trace_span`), 泄露时在管理端销毁即可.
+async fn mcp_post(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
+    // 下面的存档闭包要按引用带着它走.
+    let state = &state;
     let pool = match require_database(state) {
         Ok(pool) => pool,
         Err(response) => return *response,
     };
-    match database::authenticate_api_key(pool, &api_key::hash_key(presented), "mcp").await {
-        Ok(Some(_)) => {}
-        Ok(None) => return unauthorized(),
-        Err(error) => return database_error(error),
-    }
-
-    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return Json(json!({
             "jsonrpc": "2.0", "id": null,
             "error": { "code": -32700, "message": "请求体不是合法 JSON" }
@@ -1279,10 +1460,10 @@ fn mcp_messages(
 /// 一批 MCP 消息里要在求解闸门里算的那部分 (带原位置), 交给 `run` 执行.
 type McpTask = Box<dyn FnOnce() -> Vec<(usize, serde_json::Value)> + Send>;
 
-/// 要求解或估价的消息: 除查合同、看行情 (都只拼文字) 外的 tools/call.
+/// 要过求解闸门的消息: 求解或估价的 `tools/call` (哪些工具算, 见 [`mcp::Tool::computes`]).
+/// 工具名认不出的调用照旧也走闸门 (回的是 "没有这个工具").
 fn mcp_computes(message: &serde_json::Value) -> bool {
-    let name = message["params"]["name"].as_str();
-    mcp::needs_context(message) && !matches!(name, Some("get_contract" | "market"))
+    mcp::needs_context(message) && mcp::Tool::called_by(message).is_none_or(mcp::Tool::computes)
 }
 
 /// 回一批 MCP 消息, 并给其中算成了的询价精算存档 (`store`: 线上为 [`quotes::store`], 与
@@ -1483,8 +1664,9 @@ async fn load_mcp_context(
     pool: &PgPool,
     messages: &[serde_json::Value],
 ) -> Result<mcp::Context, sqlx::Error> {
-    let wanted = |tool: &str| messages.iter().any(|message| mcp::calls(message, tool));
-    let coal_prices = if wanted("find_coal") {
+    let called: Vec<mcp::Tool> = messages.iter().filter_map(mcp::Tool::called_by).collect();
+    let wanted = |needs: fn(mcp::Tool) -> bool| called.iter().copied().any(needs);
+    let coal_prices = if wanted(mcp::Tool::needs_coal_prices) {
         coal_prices::latest_snapshot(pool)
             .await
             .unwrap_or_else(|error| {
@@ -1494,7 +1676,7 @@ async fn load_mcp_context(
     } else {
         None
     };
-    let market = if wanted("market") {
+    let market = if wanted(mcp::Tool::needs_market) {
         mcci::stored_overview(pool)
             .await
             .map_err(|error| tracing::warn!(%error, "读取指数行情失败, market 工具取不到数据"))
@@ -1522,15 +1704,32 @@ async fn load_mcp_context(
         rank_k: state.rank_k(),
         coal_prices,
         market,
-        today: chrono::Utc::now()
-            .with_timezone(&mcci::beijing())
-            .date_naive(),
+        today: mcci::beijing_today(),
     })
+}
+
+/// 源文件里的生产代码: 去掉文件末尾的测试模块 —— 从第一个顶格的 `#[cfg(test)]` + `mod`
+/// (中间可以隔一行 `#[path = …]`) 起. 夹在中间的 `#[cfg(test)]` 函数与 impl 留着一起看.
+#[cfg(test)]
+fn production_source(source: &str) -> &str {
+    const TEST_MODULES: [&str; 2] = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\n#[path = "];
+    let end = TEST_MODULES
+        .iter()
+        .filter_map(|marker| source.find(marker))
+        .min()
+        .unwrap_or(source.len());
+    &source[..end]
 }
 
 #[cfg(test)]
 #[path = "reliability_tests.rs"]
 mod reliability_tests;
+
+#[cfg(test)]
+mod test_db;
+
+#[cfg(test)]
+mod db_smoke_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1848,7 +2047,7 @@ mod tests {
         let response = test_app()
             .oneshot(session_request(
                 "GET",
-                "/api/version",
+                "/api/master",
                 "admin-session-token-0123456789abcdef",
                 Body::empty(),
             ))
@@ -2189,9 +2388,9 @@ mod tests {
             .unwrap()
     }
 
-    // 密钥现在存在数据库里 (管理端生成/销毁), 所以"密钥有效"这条路径需要真库,
-    // 留给部署后的手工验证。以下用例覆盖的是**不需要库也必须成立**的部分:
-    // 缺密钥、会话冒充、畸形请求体不得绕过鉴权。
+    // 密钥存在数据库里 (管理端生成/销毁), 所以"密钥有效"与"用途不符进不来"这两条路径需要真库,
+    // 在库测试里 (`db_smoke_tests.rs` 的 `test_key_scopes_open_only_their_own_door`)。以下用例覆盖的是
+    // **不需要库也必须成立**的部分: 缺密钥、会话冒充、畸形请求体不得绕过鉴权。
 
     /// MCP: 没带密钥 401 (碰库之前); 网页会话 Cookie 不算; GET 不开推送流, 回 405.
     #[tokio::test]
@@ -2221,6 +2420,576 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    fn auth_from(pairs: &[(&str, &str)], on_railway: bool) -> Result<AuthConfig, String> {
+        AuthConfig::from_lookup(on_railway, |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    /// 没显式配置 AUTH_* (用上了内置默认口令) 只监听本机回环; 三项都配了才对外监听.
+    #[test]
+    fn test_default_credentials_listen_on_loopback_only() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let explicit = [
+            ("AUTH_USERNAME", "someone"),
+            ("AUTH_PASSWORD", "a-real-password"),
+            (
+                "AUTH_SESSION_TOKEN",
+                "a-long-random-session-token-0123456789",
+            ),
+        ];
+        let config = auth_from(&explicit, false).unwrap();
+        assert!(!config.default_credentials);
+        assert_eq!(config.listen_ip(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
+        let config = auth_from(&[], false).unwrap();
+        assert!(config.default_credentials);
+        assert_eq!(config.listen_ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+        // 少配任何一项, 那一项就是内置默认值: 同样不对外.
+        for missing in 0..explicit.len() {
+            let mut partial = explicit.to_vec();
+            partial.remove(missing);
+            let config = auth_from(&partial, false).unwrap();
+            assert!(config.default_credentials, "少了 {}", explicit[missing].0);
+            assert_eq!(config.listen_ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        }
+
+        // 代码里显式给的凭据 (测试、嵌入) 不算默认口令.
+        let config = AuthConfig::new("tester", "secret", "test-session-token", false);
+        assert_eq!(config.listen_ip(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    /// 变量在而值是空串 / 只有空白, 等于没设: 本机退回默认口令只听回环, Railway 上起不来.
+    /// (曾经当成"显式配置了": 对外监听, 而且空的会话令牌和空 Cookie 对得上, 谁都算已登录.)
+    #[test]
+    fn test_blank_credentials_count_as_unset() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let good = [
+            ("AUTH_USERNAME", "someone"),
+            ("AUTH_PASSWORD", "a-real-password"),
+            (
+                "AUTH_SESSION_TOKEN",
+                "a-long-random-session-token-0123456789",
+            ),
+        ];
+        for blank in ["", "   ", "\t"] {
+            for index in 0..good.len() {
+                let mut pairs = good.to_vec();
+                pairs[index].1 = blank;
+                let name = pairs[index].0;
+                let config = auth_from(&pairs, false).unwrap();
+                assert!(config.default_credentials, "{name}={blank:?}");
+                assert_eq!(config.listen_ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+                assert!(!config.session_token.trim().is_empty());
+                assert!(!config.username.trim().is_empty());
+                assert!(!config.password.trim().is_empty());
+                let error = auth_from(&pairs, true).err().unwrap();
+                assert!(error.contains(name), "{name}={blank:?}: {error}");
+            }
+        }
+        // 管理员三项里有空的: 管理端停用, 不拿空令牌当管理员令牌.
+        let mut pairs = good.to_vec();
+        pairs.extend([
+            ("ADMIN_USERNAME", "boss"),
+            ("ADMIN_PASSWORD", "admin-secret"),
+            ("ADMIN_SESSION_TOKEN", ""),
+        ]);
+        assert!(auth_from(&pairs, true).unwrap().admin.is_none());
+    }
+
+    /// 空的会话 Cookie 永远不算登录 —— 哪怕代码里把令牌配成了空串.
+    #[tokio::test]
+    async fn test_empty_session_cookie_never_authenticates() {
+        let configs = [
+            AuthConfig::new("tester", "secret", "", false),
+            AuthConfig::new("tester", "secret", "test-session-token", false),
+        ];
+        for auth in configs {
+            let headers = |cookie: &str| {
+                let mut headers = HeaderMap::new();
+                headers.insert(header::COOKIE, HeaderValue::from_str(cookie).unwrap());
+                headers
+            };
+            for cookie in [
+                "doudou_session=",
+                "doudou_session=; other=1",
+                "doudou_session",
+            ] {
+                assert!(
+                    session_role(&headers(cookie), &auth).is_none(),
+                    "{cookie:?} 不该算登录"
+                );
+            }
+            let response = app_with_auth(PathBuf::from("missing-public"), auth)
+                .oneshot(session_request("GET", "/api/master", "", Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    /// Railway 上的行为不变: 三项必须都配, 缺了起不来; 配齐了对外监听、Cookie 带 Secure.
+    #[test]
+    fn test_railway_requires_explicit_credentials() {
+        let error = auth_from(&[("AUTH_USERNAME", "someone")], true)
+            .err()
+            .unwrap();
+        assert!(error.contains("AUTH_PASSWORD"), "{error}");
+        let config = auth_from(
+            &[
+                ("AUTH_USERNAME", "someone"),
+                ("AUTH_PASSWORD", "a-real-password"),
+                (
+                    "AUTH_SESSION_TOKEN",
+                    "a-long-random-session-token-0123456789",
+                ),
+            ],
+            true,
+        )
+        .unwrap();
+        assert!(config.secure_cookie && !config.default_credentials);
+        assert!(config.listen_ip().is_unspecified());
+    }
+
+    /// 把这个线程上的 span 与事件的字段全收下来 (不分级别), 给访问日志的测试看.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl tracing::field::Visit for CapturedLog {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let line = format!("{}={value:?}", field.name());
+            self.0.lock().unwrap().push(line);
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturedLog {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            attrs.record(&mut self.clone());
+        }
+
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            event.record(&mut self.clone());
+        }
+    }
+
+    /// 访问日志只记路由模板: `/mcp/{key}` 路径里的密钥, 日志开到最细也不进日志;
+    /// 没匹配上路由的地址 (多写了一段) 同样不记.
+    #[tokio::test]
+    async fn test_access_log_never_contains_the_key_in_the_path() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let logged = || captured.0.lock().unwrap().join("\n");
+        // 别的测试线程可能正好在首次登记访问日志的 span (那一刻还看不到这里的订阅者, 被记成
+        // "没人要"), 所以重建登记后重发, 直到 span 确实被收下来 —— 否则下面 "不含密钥" 是空话.
+        for _ in 0..200 {
+            tracing::callsite::rebuild_interest_cache();
+            for uri in ["/mcp/dk_secret-in-the-path", "/mcp/dk_secret-in-the-path/x"] {
+                let request = key_request("POST", uri, None, Body::from("{}"));
+                test_app().oneshot(request).await.unwrap();
+            }
+            if logged().contains("route=") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        drop(guard);
+        let log = logged();
+        assert!(
+            log.contains("route=\"/mcp/{key}\""),
+            "span 应带路由模板: {log}"
+        );
+        assert!(log.contains("route=\"-\""), "没匹配上的地址记 -: {log}");
+        assert!(!log.contains("dk_secret"), "密钥进了日志: {log}");
+    }
+
+    /// 明确公开的路由. 往这里加一条要有理由: 不在这里的路由, 不带凭据一律 401.
+    const PUBLIC_ROUTES: [(Verb, &str); 7] = [
+        (Verb::Get, "/api/health"),
+        (Verb::Get, "/api/coal-index"),
+        (Verb::Get, "/api/auth/session"),
+        (Verb::Post, "/api/auth/login"),
+        (Verb::Post, "/api/auth/logout"),
+        (Verb::Get, "/mcp"),
+        (Verb::Get, "/mcp/{key}"),
+    ];
+
+    /// 路由表里的每一条, 不带任何凭据去请求 (写接口带一个畸形 JSON 体): 除了明确公开的,
+    /// 一律 401 —— 不是 422 / 400 (先解析了请求体) 也不是 200 (忘了鉴权). 清单取自路由表本身,
+    /// 新加的路由自动在内; 想公开一条新路由, 得同时改上面的清单.
+    #[tokio::test]
+    async fn test_every_route_without_credentials_gets_401() {
+        let table: Vec<(Access, Verb, &str)> = routes()
+            .iter()
+            .map(|def| (def.access, def.verb, def.path))
+            .collect();
+        let public: Vec<(Verb, &str)> = table
+            .iter()
+            .filter(|(access, ..)| *access == Access::Public)
+            .map(|(_, verb, path)| (*verb, *path))
+            .collect();
+        assert_eq!(public, PUBLIC_ROUTES, "公开路由清单变了");
+
+        let guarded: Vec<_> = table
+            .into_iter()
+            .filter(|(access, ..)| *access != Access::Public)
+            .collect();
+        assert!(guarded.len() >= 30, "路由表不该只剩 {} 条", guarded.len());
+        for (access, verb, path) in guarded {
+            // 路径参数随便填一个值.
+            let uri: String = path
+                .split('/')
+                .map(|segment| {
+                    if segment.starts_with('{') {
+                        "x"
+                    } else {
+                        segment
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            for app in [test_app(), app_without_admin()] {
+                let body = match verb {
+                    Verb::Get => Body::empty(),
+                    Verb::Post | Verb::Put | Verb::Patch | Verb::Delete => Body::from("{not json"),
+                };
+                let request = Request::builder()
+                    .method(verb.method())
+                    .uri(&uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap();
+                // `/mcp/{key}` 的路径本身就是凭据: 填的是一把假密钥, 这里没配数据库验不了, 回 503
+                // (同样在读请求体之前); 配了库时假密钥回 401, 见库测试.
+                let expected = if path.contains("{key}") {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::UNAUTHORIZED
+                };
+                let response = app.oneshot(request).await.unwrap();
+                assert_eq!(response.status(), expected, "{verb:?} {path} ({access:?})");
+                let value: Value = serde_json::from_str(&response_text(response).await).unwrap();
+                assert_eq!(value["ok"], false, "{verb:?} {path}");
+            }
+        }
+    }
+
+    /// 路由表里每一条按它登记的 Access, 分别用 "不带凭据 / 普通会话 / 管理员会话" 去敲门, 看放不放行.
+    /// handler 换成一个只回 "到了" 的桩, 所以结果只取决于鉴权这一层, 不用数据库.
+    /// (上面那条测试只管 "不带凭据 → 401", 管不到 "普通会话进了管理接口".)
+    #[tokio::test]
+    async fn test_each_access_class_admits_only_its_own_credentials() {
+        const USER: &str = "test-session-token";
+        const ADMIN: &str = "admin-session-token-0123456789abcdef";
+        let state = AppState {
+            auth: AuthConfig::new("tester", "secret", USER, false).with_admin(
+                "boss",
+                "admin-secret",
+                ADMIN,
+            ),
+            database: None,
+            rank_k: Arc::default(),
+        };
+        let ok = StatusCode::OK;
+        let no = StatusCode::UNAUTHORIZED;
+        for def in routes() {
+            // 期望: [不带凭据, 普通会话, 管理员会话]. 穷尽 match: 新加一类 Access 必须写它的矩阵.
+            let expected = match def.access {
+                Access::Public => [ok, ok, ok],
+                Access::Session => [no, ok, ok],
+                Access::Admin => [no, StatusCode::FORBIDDEN, ok],
+                // 普通会话不是钥匙: 没带 X-API-Key 就是 401.
+                Access::DataWriter => [no, no, ok],
+                // 会话 Cookie 进不了 MCP, 管理员的也不行 —— 只认 mcp 用途的密钥.
+                Access::McpKey => [no, no, no],
+            };
+            // 路径本身带密钥的 (`/mcp/{key}`) 要查库验密钥, 这里没有库, 由库测试覆盖.
+            if def.path.contains("{key}") {
+                continue;
+            }
+            let uri: String = def
+                .path
+                .split('/')
+                .map(|part| if part.starts_with('{') { "x" } else { part })
+                .collect::<Vec<_>>()
+                .join("/");
+            let stub = on(def.verb.filter(), || async { "到了" });
+            let router = Router::new()
+                .route(def.path, def.access.guard(stub, &state))
+                .with_state(state.clone());
+            for (who, token, want) in [
+                ("不带凭据", None, expected[0]),
+                ("普通会话", Some(USER), expected[1]),
+                ("管理员会话", Some(ADMIN), expected[2]),
+            ] {
+                let request = match token {
+                    Some(token) => {
+                        session_request(def.verb.method().as_str(), &uri, token, Body::empty())
+                    }
+                    None => key_request(def.verb.method().as_str(), &uri, None, Body::empty()),
+                };
+                let response = router.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    want,
+                    "{:?} {} ({:?}) · {who}",
+                    def.verb,
+                    def.path,
+                    def.access
+                );
+            }
+        }
+    }
+
+    /// 路径说了算的约定: 路由登记成哪一类不能和它的路径矛盾. 把管理接口登记成 "会话" 这类笔误,
+    /// 上面两条测试都看不出来 (它们信路由表自己写的 Access), 这里按路径另算一遍.
+    #[test]
+    fn test_route_access_matches_its_path() {
+        for def in routes() {
+            let required = if def.path.starts_with("/api/admin/") {
+                Some(Access::Admin)
+            } else if def.path.starts_with("/api/master/") {
+                // 煤库的写入与覆盖值清单 (`/api/master` 本身是只读的内置数据, 会话可读).
+                Some(Access::DataWriter)
+            } else if def.path.starts_with("/mcp") && def.verb != Verb::Get {
+                Some(Access::McpKey)
+            } else {
+                None
+            };
+            if let Some(required) = required {
+                assert_eq!(
+                    def.access, required,
+                    "{:?} {}: 这个路径下的路由必须登记成 {required:?}",
+                    def.verb, def.path
+                );
+            }
+            // 反过来: 会改数据的方法不许公开 (登录、登出除外).
+            if def.access == Access::Public && def.verb != Verb::Get {
+                assert!(
+                    def.path.starts_with("/api/auth/"),
+                    "{:?} {}: 写接口不能公开",
+                    def.verb,
+                    def.path
+                );
+            }
+        }
+    }
+
+    /// 鉴权只管匹配上的 (路径, 方法): 路径在、方法不对照旧回 405 并列出可用的方法, 不变成 401.
+    #[tokio::test]
+    async fn test_wrong_method_on_a_guarded_path_is_still_405() {
+        for (method, uri, allow) in [
+            ("GET", "/api/solve", "POST"),
+            ("DELETE", "/api/storage", "GET,HEAD,PUT"),
+            ("PUT", "/mcp", "GET,HEAD,POST"),
+        ] {
+            let response = test_app()
+                .oneshot(key_request(method, uri, None, Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {uri}"
+            );
+            let mut allowed: Vec<&str> = response.headers()[header::ALLOW]
+                .to_str()
+                .unwrap()
+                .split(',')
+                .map(str::trim)
+                .collect();
+            allowed.sort_unstable();
+            assert_eq!(allowed.join(","), allow, "{method} {uri}");
+        }
+    }
+
+    /// 路由只能经路由表挂上去: 绕过它直接挂的路由不在任何鉴权分组里, 上面的路由表测试也看不到.
+    #[test]
+    fn test_routes_are_only_mounted_through_the_table() {
+        let production = production_source(include_str!("lib.rs"));
+        assert_eq!(
+            production.matches(".route(").count(),
+            1,
+            "lib.rs 里只有 api_router 可以调 .route(): 新路由加进 routes() 并写明 Access"
+        );
+        for bypass in [".route_service(", ".nest(", ".merge(", "::route(", "::nest"] {
+            assert_eq!(
+                production.matches(bypass).count(),
+                0,
+                "{bypass} 会绕过路由表: 新路由加进 routes() 并写明 Access"
+            );
+        }
+        // 静态资源是唯一挂在路由表之外的服务, 而且不在 /api 与 /mcp 下.
+        assert_eq!(
+            production.matches(".nest_service(").count(),
+            1,
+            ".nest_service() 只给 /assets 用: 接口加进 routes() 并写明 Access"
+        );
+        assert!(production.contains(r#".nest_service("/assets", assets)"#));
+    }
+
+    /// `CLAUDE.md` 的规矩写成测试: MCP 的协议分派与排版、今日请求的组装是纯函数 —— 不查库、
+    /// 不联网、不碰异步运行时与文件, 所以能全部用固定数据单测.
+    #[test]
+    fn test_pure_modules_do_no_io() {
+        const PURE: [(&str, &str); 5] = [
+            ("mcp.rs", include_str!("mcp.rs")),
+            ("mcp_market.rs", include_str!("mcp_market.rs")),
+            ("mcp_quote.rs", include_str!("mcp_quote.rs")),
+            ("today.rs", include_str!("today.rs")),
+            ("today_overrides.rs", include_str!("today_overrides.rs")),
+        ];
+        // "tokio" 不带 "::": `use tokio as rt;` 也得拦下; "std::{" 拦 `use std::{fs, …}` 这种合并写法.
+        const FORBIDDEN: [&str; 12] = [
+            "sqlx",
+            "PgPool",
+            "reqwest",
+            "tokio",
+            "block_on",
+            "std::{",
+            ".await",
+            "async fn",
+            "std::fs",
+            "std::net",
+            "std::env",
+            "std::process",
+        ];
+        // 清单是手写的 (include_str! 只收字面量), 所以和代码对一遍账: 这些文件用 #[path] 拉进来的
+        // 子模块必须也在清单里 —— 否则新拆出去的子模块不受这条测试管.
+        for (file, source) in PURE {
+            for line in production_source(source).lines() {
+                let Some(child) = line
+                    .trim()
+                    .strip_prefix("#[path = \"")
+                    .and_then(|rest| rest.strip_suffix("\"]"))
+                else {
+                    continue;
+                };
+                assert!(
+                    PURE.iter().any(|(listed, _)| *listed == child),
+                    "{file} 用 #[path] 拉进了 {child}: 把它加进这条测试的 PURE 清单"
+                );
+            }
+        }
+        for (file, source) in PURE {
+            let production = production_source(source);
+            assert!(production.len() > 1000, "{file} 的生产代码没读到");
+            // 截掉的只能是文件末尾的测试模块: 后面再出现顶格的函数, 就是把生产代码也截掉了.
+            let cut_off = &source[production.len()..];
+            let top_level_fn = |line: &str| {
+                let line = line
+                    .trim_start_matches("pub ")
+                    .trim_start_matches("pub(crate) ");
+                let line = line.trim_start_matches("pub(super) ");
+                line.starts_with("fn ") || line.starts_with("async fn ")
+            };
+            assert!(
+                !cut_off.lines().any(top_level_fn),
+                "{file}: 测试模块后面还有生产代码, 没查到"
+            );
+            for (at, line) in production.lines().enumerate() {
+                // 注释里提到这些词不算.
+                let code = line.split("//").next().unwrap_or(line);
+                for word in FORBIDDEN {
+                    assert!(
+                        !code.contains(word),
+                        "{file}:{} 出现了 `{word}`。规矩: mcp.rs 及其子模块、today.rs、\
+                         today_overrides.rs 不查库不联网; 要用的线上数据加到 `mcp::Context`, \
+                         在 lib.rs 的 `load_mcp_context` 里装好再传进来; 落库放在 lib.rs \
+                         (如询价存档走 `quotes::store`)。",
+                        at + 1
+                    );
+                }
+            }
+        }
+        // 这条测试本身管用: 查库的模块按同样的办法查得出来.
+        let impure = production_source(include_str!("quotes.rs"));
+        assert!(impure.contains("sqlx") && impure.contains(".await"));
+    }
+
+    /// handler 要身份、路由却没挂在对应的鉴权组里 (没有中间件放身份): 当作没登录, 不放行.
+    #[tokio::test]
+    async fn test_identity_extractor_fails_closed_outside_its_group() {
+        async fn needs_user(Authed(user): Authed<SessionUser>) -> String {
+            user.username
+        }
+        let router = Router::new().route("/open", on(MethodFilter::GET, needs_user));
+        let response = router
+            .oneshot(session_request(
+                "GET",
+                "/open",
+                "test-session-token",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// 未登录的写接口: 鉴权先于请求体解析, 一律 401, 不把字段名回显给访客.
+    #[tokio::test]
+    async fn test_unauthenticated_writes_get_401_before_body_parsing() {
+        for (method, uri) in [
+            ("PUT", "/api/storage"),
+            ("POST", "/api/history"),
+            ("POST", "/api/history/import"),
+            ("PATCH", "/api/history/x/measured"),
+            ("POST", "/api/admin/keys"),
+        ] {
+            let response = test_app()
+                .oneshot(key_request(method, uri, None, Body::from("{}")))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+            let text = response_text(response).await;
+            assert!(!text.contains("missing field"), "不得回显字段名: {text}");
+        }
+    }
+
+    /// MCP 先验密钥再读请求体: 没带密钥时, 超过上限的请求体也回 401 而不是 413.
+    #[tokio::test]
+    async fn test_mcp_checks_key_before_reading_body() {
+        for uri in ["/mcp", "/mcp/"] {
+            let oversized = Body::from(vec![b' '; 3 * 1024 * 1024]);
+            let response = test_app()
+                .oneshot(key_request("POST", uri, None, oversized))
+                .await
+                .unwrap();
+            let expected = if uri == "/mcp" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                // 路径里的密钥是空的: 对不上 `/mcp/{key}`, 落到静态资源兜底.
+                StatusCode::METHOD_NOT_ALLOWED
+            };
+            assert_eq!(response.status(), expected, "{uri}");
+        }
+        let oversized = Body::from(vec![b' '; 3 * 1024 * 1024]);
+        let response = test_app()
+            .oneshot(key_request("POST", "/mcp/wrong-key", None, oversized))
+            .await
+            .unwrap();
+        // 带了密钥但没配数据库: 验不了, 503; 同样发生在读请求体之前.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// 没带 X-API-Key 一律 401, 且必须发生在碰库之前.
@@ -2485,24 +3254,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_master_and_version_endpoints() {
-        let router = test_app();
-        let master_response = router
-            .clone()
+    async fn test_master_endpoint() {
+        let master_response = test_app()
             .oneshot(authenticated_request("GET", "/api/master", Body::empty()))
             .await
             .unwrap();
-        let version_response = router
-            .oneshot(authenticated_request("GET", "/api/version", Body::empty()))
-            .await
-            .unwrap();
-
         let master: Value = serde_json::from_str(&response_text(master_response).await).unwrap();
         assert!(master.is_object());
-        assert_eq!(
-            response_text(version_response).await,
-            env!("CARGO_PKG_VERSION")
-        );
     }
 
     #[tokio::test]

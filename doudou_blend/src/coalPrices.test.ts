@@ -5,7 +5,9 @@ import type { CoalPriceSnapshot, CoalValue, MasterCoalEntry } from "./types";
 
 const base: MasterCoalEntry = {
   name: "测试煤", status: "verified", props: { S: 1.0, Y: 20 },
-  coal_type: "主焦煤", form: "精煤", region: "山西", fob: 9999, frt: 888,
+  coal_type: "主焦煤", form: "精煤", region: "山西",
+  // master 里残留的价格 (类型已不允许, 旧数据仍可能带) 不该进估价请求.
+  ...({ fob: 9999, frt: 888 } as object),
 };
 const coal = resolveCoal(base, null, "master");
 const snapshot: CoalPriceSnapshot = {

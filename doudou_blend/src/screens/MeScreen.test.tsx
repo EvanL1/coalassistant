@@ -9,6 +9,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { emit } from "../events";
 import { logout } from "../auth";
 import { logoutConfirmText, MeScreen } from "./MeScreen";
 
@@ -129,7 +130,7 @@ describe("MeScreen 历史数据", () => {
         .mockResolvedValueOnce(4)
         .mockImplementationOnce(() => eventCount.promise),
       clearHistory: vi.fn(async () => {
-        window.dispatchEvent(new CustomEvent("doudou:history_changed"));
+        emit("history_changed");
       }),
     };
     mocks.getBackend.mockResolvedValue(backend);

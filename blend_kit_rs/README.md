@@ -131,7 +131,7 @@ CIF 是派生量, 不存储为字段, 由 `Coal::cif()` 函数计算: `fob + frt
 | tons | 实物吨数 (total_quantity × ratio) |
 | fob_amount / frt_amount / cif_amount | 各项金额 |
 
-按配比降序排列, 只含配比 > 1e-5 的煤.
+按配比降序排列, 默认只含配比 > 1e-5 的煤; 达标离不开的零头煤也会留下.
 
 ### 视图 C - IndicatorCheck 列表 (给质检/销售)
 

@@ -11,9 +11,9 @@ import {
   setRankInteractionK,
   type Calibration,
 } from "../../admin";
+import { errorMessage } from "../../http";
 import {
   cellStyle,
-  errorMessage,
   errorText,
   formatDate,
   hintText,

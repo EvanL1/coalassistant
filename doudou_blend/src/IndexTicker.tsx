@@ -9,8 +9,8 @@
  */
 import { useEffect, useState } from "react";
 import { IndexChartDialog } from "./IndexChartDialog";
+import { ChangeText, changeColor, STALE_AFTER_DAYS } from "./ChangeText";
 import { changeOver, fetchMcci, staleDays } from "./mcci";
-import { ChangeText, STALE_AFTER_DAYS } from "./screens/McciCard";
 import type { McciSeries } from "./types";
 
 /** sparkline 取最近这么多个交易日. */
@@ -46,9 +46,7 @@ function SeriesItem({ series, onOpen }: { series: McciSeries; onOpen: () => void
   const latest = points[points.length - 1];
   const pct = changeOver(points, 0);
   const rounded = pct == null ? 0 : Number(pct.toFixed(2));
-  // 国内习惯: 红涨绿跌; 平盘中性灰
-  const color =
-    rounded === 0 ? "var(--c-text-3)" : rounded > 0 ? "var(--c-danger)" : "var(--c-success)";
+  const color = changeColor(rounded);
   const stale = staleDays(latest.date) > STALE_AFTER_DAYS;
 
   return (

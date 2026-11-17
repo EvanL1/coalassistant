@@ -1,38 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { listen } from "./events";
+import { makeStorage } from "./test/makeStorage";
 import { forceBackend } from "./backend";
-
-function makeStorage(): Storage {
-  const values = new Map<string, string>();
-  return {
-    get length() {
-      return values.size;
-    },
-    clear: () => values.clear(),
-    getItem: (key) => values.get(key) ?? null,
-    key: (index) => [...values.keys()][index] ?? null,
-    removeItem: (key) => {
-      values.delete(key);
-    },
-    setItem: (key, value) => {
-      values.set(key, value);
-    },
-  };
-}
 
 beforeEach(() => {
   vi.stubGlobal("window", new EventTarget());
   vi.stubGlobal("localStorage", makeStorage());
   vi.stubGlobal("fetch", vi.fn());
-  if (typeof CustomEvent === "undefined") {
-    vi.stubGlobal(
-      "CustomEvent",
-      class extends Event {
-        constructor(type: string) {
-          super(type);
-        }
-      },
-    );
-  }
 });
 
 afterEach(() => {
@@ -51,7 +25,7 @@ describe("Backend 历史契约", () => {
     const backend = await forceBackend();
 
     await expect(backend.countHistory()).resolves.toBe(2);
-    expect(fetch).toHaveBeenCalledWith("/api/history/count", undefined);
+    expect(fetch).toHaveBeenCalledWith("/api/history/count", { credentials: "same-origin" });
   });
 
   it("Web 保存历史后派发统一变更事件", async () => {
@@ -63,7 +37,7 @@ describe("Backend 历史契约", () => {
     );
     const backend = await forceBackend();
     let changes = 0;
-    window.addEventListener("doudou:history_changed", () => {
+    listen(["history_changed"], () => {
       changes += 1;
     });
     const result = {
@@ -86,6 +60,7 @@ describe("Backend 历史契约", () => {
 
     expect(changes).toBe(1);
     expect(fetch).toHaveBeenCalledWith("/api/history", {
+      credentials: "same-origin",
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -109,6 +84,7 @@ describe("Backend 历史契约", () => {
 
     await expect(backend.solveJson(input)).resolves.toBe('{"ok":true}');
     expect(fetchMock).toHaveBeenCalledWith("/api/solve", {
+      credentials: "same-origin",
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: input,

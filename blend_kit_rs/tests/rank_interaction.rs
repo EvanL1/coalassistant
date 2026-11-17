@@ -1,3 +1,10 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 //! 煤阶交互罚项: CSR配 = Σxᵢ·CSRᵢ − k·D, D = 配比加权的煤阶 (Ro) 方差.
 //! 表达"单做各 65、双做降到 60"这类配煤不相容; k 默认不传 = 不启用, 结果与现在完全一致.
 //!
@@ -62,7 +69,7 @@ fn true_csr(result: &BlendResult, coals: &[Coal], k: f64) -> f64 {
     base - k * var
 }
 
-fn half_half() -> Option<std::collections::HashMap<String, f64>> {
+fn half_half() -> Option<std::collections::BTreeMap<String, f64>> {
     Some(
         [("低挥发", 1.0), ("高挥发", 1.0)]
             .into_iter()

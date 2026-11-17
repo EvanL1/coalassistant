@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { estimateRequest, loadPriceFactor, loadPriceFactorWithStatus, quoteRequest, type BlendBase } from "./blendRequest";
+import { currentContract, estimateRequest, loadPriceFactorWithStatus, quoteRequest, type BlendBase } from "./blendRequest";
 import { resolveCoal, toEstimateCoal } from "./resolvedCoal";
 import type { MasterPriceFactor } from "../types";
 
 const mocks = vi.hoisted(() => ({ benchmarks: vi.fn(), index: vi.fn() }));
 vi.mock("../benchmarks", async (original) => ({ ...(await original<typeof import("../benchmarks")>()), fetchBenchmarks: mocks.benchmarks }));
 vi.mock("../coal_index", () => ({ fetchLatestCoalIndex: mocks.index }));
-const resolvedA = resolveCoal({ name: "A", status: "verified", props: { S: 0.6 }, fob: 9999, frt: 999 }, null, "master");
+const resolvedA = resolveCoal({ name: "A", status: "verified", props: { S: 0.6 }, ...({ fob: 9999, frt: 999 } as object) }, null, "master");
 const resolvedB = resolveCoal({ name: "B", status: "verified", props: { S: 0.8 } }, null, "master");
 const base: BlendBase = { specs: [], totalQuantity: 900, shovelTons: 3, priceFactor: { adjusts: [] } };
 beforeEach(() => { vi.resetAllMocks(); mocks.benchmarks.mockResolvedValue([]); mocks.index.mockResolvedValue(1800); });
@@ -40,9 +40,18 @@ describe("请求拼装", () => {
     expect(request.truncate_decimal).toBe(true);
   });
 
+  it("当前合同: 用户改过用用户的, 否则用 master 默认合同", () => {
+    const master = { default_contract: { name: "默认合同", specs: [{ indicator: "S", direction: "Upper" as const, max: 0.8 }] } };
+    expect(currentContract(null, master)).toEqual({ specs: master.default_contract.specs, name: "默认合同" });
+    const mine = [{ indicator: "A", direction: "Upper" as const, max: 10 }];
+    expect(currentContract(mine, master)).toEqual({ specs: mine, name: "用户自定义合同" });
+    // 用户存了空合同也算用户的, 不退回默认.
+    expect(currentContract([], master)).toEqual({ specs: [], name: "用户自定义合同" });
+  });
+
   it("当前基准优先, 去掉 master 说明字段", async () => {
     mocks.benchmarks.mockResolvedValue([{ name: "当前", props: { S: 0.6 }, price: 2000, date: "2026-10-31", current_price: 2100 }]);
-    const factor = await loadPriceFactor({ adjusts: [], description: "说明" } as MasterPriceFactor);
+    const { priceFactor: factor } = await loadPriceFactorWithStatus({ adjusts: [], description: "说明" } as MasterPriceFactor);
     expect(factor.benchmarks?.[0].current_price).toBe(2100);
     expect(factor).not.toHaveProperty("description");
     expect(mocks.index).not.toHaveBeenCalled();
@@ -50,9 +59,9 @@ describe("请求拼装", () => {
 
   it("取不到当前基准用 master, 都没有才用指数", async () => {
     const benchmark = { name: "默认", props: { S: 0.6 }, price: 2000, date: "2026-10-30" };
-    expect((await loadPriceFactor({ adjusts: [], benchmarks: [benchmark] })).benchmarks).toEqual([benchmark]);
+    expect((await loadPriceFactorWithStatus({ adjusts: [], benchmarks: [benchmark] })).priceFactor.benchmarks).toEqual([benchmark]);
     expect(mocks.index).not.toHaveBeenCalled();
-    expect((await loadPriceFactor({ adjusts: [] })).market_price).toBe(1800);
+    expect((await loadPriceFactorWithStatus({ adjusts: [] })).priceFactor.market_price).toBe(1800);
   });
 
   it("基准报价取不到时退回内置基准并标出来, 取到了 (哪怕为空) 不标", async () => {

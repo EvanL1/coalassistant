@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
-import {
-  getSyncState,
-  resolveSyncConflict,
-  retrySync,
-  SYNC_STATUS_EVENT,
-} from "./cloudStorage";
+import { getSyncState, resolveSyncConflict, retrySync } from "./cloudStorage";
+import { listen } from "./events";
 
 /** 云端同步的常驻提示: 写回失败给重试; 云端被别人改过时让用户二选一. */
 export function SyncBanner() {
@@ -14,9 +10,9 @@ export function SyncBanner() {
 
   useEffect(() => {
     const refresh = () => setState(getSyncState());
-    window.addEventListener(SYNC_STATUS_EVENT, refresh);
+    const stop = listen(["sync_status_changed"], refresh);
     refresh();
-    return () => window.removeEventListener(SYNC_STATUS_EVENT, refresh);
+    return stop;
   }, []);
 
   async function resolve(choice: "local" | "cloud") {

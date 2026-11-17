@@ -2,7 +2,7 @@
  * 后台卡片 3 - 煤库数据维护 (覆盖层).
  *
  * 只填空: 基线 master 已有的指标服务端会拒绝, 拒绝理由原样展示.
- * 任何改动后都要 invalidateMaster(), 否则其他屏还拿着旧的 master 缓存.
+ * master 缓存失效已收进 admin.ts 的写接口 (成功或失败都失效), 这里只管刷新列表.
  */
 import { useEffect, useState } from "react";
 import {
@@ -15,10 +15,10 @@ import {
   type OverrideConfidence,
   type OverrideField,
 } from "../../admin";
-import { invalidateMaster, loadMaster } from "../../master_loader";
+import { errorMessage } from "../../http";
+import { loadMaster } from "../../master_loader";
 import {
   cellStyle,
-  errorMessage,
   errorText,
   formatDate,
   hintText,
@@ -62,14 +62,13 @@ export function CoalOverridesCard() {
     };
   }, []);
 
-  /** 写操作统一收口: 防重入 → 执行 → 失效 master 缓存 → 重拉列表. */
+  /** 写操作统一收口: 防重入 → 执行 (写接口内部失效 master 缓存) → 重拉列表. */
   async function mutate(action: () => Promise<void>): Promise<boolean> {
     if (busy) return false;
     setBusy(true);
     setError(null);
     try {
       await action();
-      invalidateMaster();
       setOverrides(await listOverrides());
       return true;
     } catch (e: unknown) {

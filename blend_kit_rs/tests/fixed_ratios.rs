@@ -1,9 +1,16 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 //! 验算模式 (`BlendRequest.fixed_ratios`): 给定配比, 不求最优, 直接出成本与 8 项体检.
 //!
 //! 全部走公开 JSON 契约同一个入口 `solve`, 数据都是 fixture, 不读 master.
 
 use blend_kit::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// 顺序: (S, A, V, G, Y, petro, CSR, M, FOB, FRT)
 fn four_coals() -> Vec<Coal> {
@@ -27,7 +34,7 @@ fn four_coals() -> Vec<Coal> {
     ]
 }
 
-fn shares(pairs: &[(&str, f64)]) -> Option<HashMap<String, f64>> {
+fn shares(pairs: &[(&str, f64)]) -> Option<BTreeMap<String, f64>> {
     Some(
         pairs
             .iter()
@@ -39,7 +46,7 @@ fn shares(pairs: &[(&str, f64)]) -> Option<HashMap<String, f64>> {
 fn request(
     coals: Vec<Coal>,
     specs: Vec<Spec>,
-    fixed: Option<HashMap<String, f64>>,
+    fixed: Option<BTreeMap<String, f64>>,
 ) -> BlendRequest {
     BlendRequest {
         coals,

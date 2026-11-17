@@ -332,7 +332,7 @@ pub struct BlendRequest {
     /// 直接按这个配比出成本与 8 项体检; 超标逐项报 Fail, 不回"不可行".
     /// None = 正常求最低成本配方.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fixed_ratios: Option<HashMap<String, f64>>,
+    pub fixed_ratios: Option<BTreeMap<String, f64>>,
     /// 煤阶交互罚项 (配煤不相容). None 或 k = 0 = 不启用, 结果与不传完全相同.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank_interaction: Option<RankInteraction>,
@@ -344,16 +344,16 @@ pub struct BlendRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_robustness: Option<PriceRobustness>,
     /// 一铲多少吨: 现场铲车配煤, 一铲是最小单位. 与 `total_quantity` 同给时每种煤要么不用、
-    /// 要么至少一铲且按整铲配 (见 [`crate::shovel`]). None = 比例连续, 结果与不传完全相同.
+    /// 要么至少一铲且按整铲配 (见 `shovel` 模块). None = 比例连续, 结果与不传完全相同.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shovel_tons: Option<f64>,
     /// 单煤配比下限: 煤名 → 占比 (0~1). 给了的煤一定入选且不低于此比例.
     /// 一铲最小量的分支定界靠它强制"至少一铲"; 空 = 不限, 结果与不传完全相同.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub min_ratios: HashMap<String, f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub min_ratios: BTreeMap<String, f64>,
 }
 
-/// 价格稳健性分析配置. 见 [`crate::robustness`].
+/// 价格稳健性分析配置. 见 `robustness` 模块.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PriceRobustness {
     /// 成本相差多少元/吨以内算"差不多": 更稳的配方最多比最低成本贵这么多.
@@ -374,7 +374,7 @@ fn default_swing_range() -> f64 {
 
 /// 煤阶交互: CSR配 = Σxᵢ·CSRᵢ − k·D, D = 配比加权的煤阶 (镜质组反射率 Ro) 方差.
 /// 两种煤煤阶差得越远、比例越接近对半, D 越大 —— 表达"单做各 65、双做降到 60".
-/// Ro 优先取煤岩数据的均值, 没有时由挥发换算 (见 [`crate::rank_interaction`]).
+/// Ro 优先取煤岩数据的均值, 没有时由挥发换算 (见 `rank_interaction` 模块).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RankInteraction {
     /// 交互强度 (CSR / %²). 须 ≥ 0; 文献无现成值, 要用本厂实测标定.
@@ -657,7 +657,7 @@ pub struct PriceSwing {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RobustRecipe {
     /// 煤名 → 配比.
-    pub recipe: HashMap<String, f64>,
+    pub recipe: BTreeMap<String, f64>,
     /// 按当前煤价算的吨成本 (元/吨).
     pub cost: f64,
     /// 比最低成本配方多花多少 (元/吨).
@@ -723,7 +723,7 @@ pub struct OrderItem {
     /// `#[serde(default)]`: 兼容扣款条款上线前存量 OrderItem 记录 (无此字段).
     #[serde(default)]
     pub cif_eff_amount: Option<f64>,
-    /// 按整铲配时这种煤配几铲 (见 [`crate::shovel`]); 未按铲配为 None.
+    /// 按整铲配时这种煤配几铲 (见 `shovel` 模块); 未按铲配为 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shovels: Option<u32>,
 }
@@ -890,8 +890,9 @@ pub struct BlendResult {
     /// 本来可行, 界面不该引导用户去放宽. 只在为真时序列化, 其余结果的输出不变.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub undetermined: bool,
-    /// 配方: 煤名 → 配比. 仅含 > 1e-5 的煤.
-    pub recipe: HashMap<String, f64>,
+    /// 配方: 煤名 → 配比. 默认只含占比 > 1e-5 的煤; 达标离不开的零头煤也会留下
+    /// (见 optimizer 的 `output_grain`).
+    pub recipe: BTreeMap<String, f64>,
     /// 视图 A.
     pub cost: Option<CostBreakdown>,
     /// 视图 B (按配比降序).
@@ -937,7 +938,7 @@ pub struct BlendResult {
     pub price_robustness: Option<RobustnessReport>,
     /// 配煤价值 (盈亏平衡到厂价, 元/吨), 煤名 → 值. 只在内部从求解传给价格因子评估, 不序列化.
     #[serde(skip)]
-    pub blend_values: HashMap<String, f64>,
+    pub blend_values: BTreeMap<String, f64>,
 }
 
 impl BlendResult {
@@ -947,7 +948,7 @@ impl BlendResult {
             reason: Some(reason.into()),
             infeasible_bounds: Vec::new(),
             undetermined: false,
-            recipe: HashMap::new(),
+            recipe: BTreeMap::new(),
             cost: None,
             orders: Vec::new(),
             indicator_check: Vec::new(),
@@ -963,7 +964,7 @@ impl BlendResult {
             market_price: None,
             market_price_from_group: false,
             price_robustness: None,
-            blend_values: HashMap::new(),
+            blend_values: BTreeMap::new(),
         }
     }
 

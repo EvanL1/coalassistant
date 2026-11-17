@@ -9,6 +9,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { emit } from "../events";
 import type { HistoryRecord } from "../types";
 import { HistoryScreen } from "./HistoryScreen";
 
@@ -92,7 +93,7 @@ describe("HistoryScreen 刷新顺序", () => {
         .mockImplementationOnce(() => staleRefresh.promise)
         .mockResolvedValueOnce([]),
       clearHistory: vi.fn(async () => {
-        window.dispatchEvent(new CustomEvent("doudou:history_changed"));
+        emit("history_changed");
       }),
       setMeasuredQuality: vi.fn(),
     };
@@ -102,7 +103,7 @@ describe("HistoryScreen 刷新顺序", () => {
     await screen.findByText("旧合同");
 
     act(() => {
-      window.dispatchEvent(new CustomEvent("doudou:history_changed"));
+      emit("history_changed");
     });
     await waitFor(() => expect(backend.listHistory).toHaveBeenCalledTimes(2));
 

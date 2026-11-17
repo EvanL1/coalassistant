@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 37f83a61d8e0e783b373cb91b2f1732d6b883003d5ca1e4f8c6f104b46392de6 # shrinks to PlantedCase { pool: [Assay { s: 1.12, a: 8.52, v: 26.06, g: 95.27, y: 8.0, csr: 40.0, m: 7.0, fob: 1668.0, frt: 148.0 }, Assay { s: 0.5, a: 13.16, v: 26.76, g: 69.33, y: 9.3, csr: 40.0, m: 7.0, fob: 2183.0, frt: 68.0 }, Assay { s: 1.4, a: 6.66, v: 23.3, g: 65.83, y: 17.41, csr: 40.0, m: 7.0, fob: 1543.0, frt: 136.0 }, Assay { s: 1.31, a: 10.77, v: 29.41, g: 75.74, y: 10.57, csr: 40.0, m: 7.0, fob: 1531.0, frt: 141.0 }, Assay { s: 1.41, a: 6.56, v: 16.77, g: 96.34, y: 10.39, csr: 40.0, m: 7.0, fob: 952.0, frt: 172.0 }, Assay { s: 2.2, a: 6.0, v: 27.02, g: 99.35, y: 18.39, csr: 40.0, m: 7.0, fob: 1757.0, frt: 126.0 }], weights: [19, 0, 0, 0, 9, 12, 0], truncate_decimal: false, slots: [PlantedSlot { on: true, rule: Inherit, slack_low: 0, slack_high: 0 }, PlantedSlot { on: true, rule: Round(1), slack_low: 0, slack_high: 0 }, PlantedSlot { on: true, rule: Truncate(3), slack_low: 0, slack_high: 0 }, PlantedSlot { on: true, rule: Inherit, slack_low: 0, slack_high: 0 }, PlantedSlot { on: true, rule: Truncate(0), slack_low: 0, slack_high: 0 }, PlantedSlot { on: false, rule: Inherit, slack_low: 0, slack_high: 0 }] }

@@ -168,7 +168,7 @@ describe("AdminScreen CSR 回归模型", () => {
 });
 
 describe("AdminScreen 煤库数据维护", () => {
-  it("新增后失效 master 缓存并刷新列表", async () => {
+  it("新增后刷新列表 (master 缓存失效在 admin 写接口内部)", async () => {
     render(<AdminScreen />);
     await screen.findByRole("option", { name: "柳林" });
 
@@ -178,11 +178,10 @@ describe("AdminScreen 煤库数据维护", () => {
     fireEvent.change(screen.getByLabelText("来源"), { target: { value: " 报告 B " } });
     fireEvent.click(screen.getByRole("button", { name: "添加" }));
 
-    await waitFor(() => expect(mocks.invalidateMaster).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mocks.listOverrides).toHaveBeenCalledTimes(2));
     expect(mocks.addOverrides).toHaveBeenCalledWith([
       { coal: "柳林", field: "G", value: 78, source: "报告 B", confidence: "medium" },
     ]);
-    expect(mocks.listOverrides).toHaveBeenCalledTimes(2);
   });
 
   it("来源为空时前端拦下", async () => {
@@ -196,7 +195,7 @@ describe("AdminScreen 煤库数据维护", () => {
     expect(mocks.addOverrides).not.toHaveBeenCalled();
   });
 
-  it("服务端拒绝时显示理由, 不失效缓存", async () => {
+  it("服务端拒绝时显示理由", async () => {
     mocks.addOverrides.mockRejectedValue(new Error("临北.CSR 基线已有值"));
     render(<AdminScreen />);
     await screen.findByRole("option", { name: "柳林" });
@@ -206,7 +205,6 @@ describe("AdminScreen 煤库数据维护", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加" }));
 
     await screen.findByText("临北.CSR 基线已有值");
-    expect(mocks.invalidateMaster).not.toHaveBeenCalled();
   });
 
   it("确认后删除一行覆盖值", async () => {
@@ -217,7 +215,7 @@ describe("AdminScreen 煤库数据维护", () => {
     fireEvent.click(within(row).getByRole("button", { name: "删除 临北 CSR" }));
 
     await waitFor(() => expect(mocks.deleteOverride).toHaveBeenCalledWith("临北", "CSR"));
-    await waitFor(() => expect(mocks.invalidateMaster).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mocks.listOverrides).toHaveBeenCalledTimes(2));
   });
 
   it("取消确认则不删除", async () => {

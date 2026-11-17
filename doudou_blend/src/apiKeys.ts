@@ -5,7 +5,7 @@
  * 复制, 页面刷新就再也取不回来了.
  */
 
-import { apiFetch, readOk } from "./http";
+import { apiJson } from "./http";
 
 /** 密钥用途: data = 写煤库 (调研录入), mcp = 手机 Agent 查询 + 求解 + 询价存档. */
 export type KeyScope = "data" | "mcp";
@@ -20,17 +20,8 @@ export interface ApiKey {
   revoked_at: string | null;
 }
 
-async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const text = await readOk(
-    await apiFetch(`/api/admin/${path}`, { credentials: "same-origin", ...init }),
-  );
-  return text ? JSON.parse(text) : null;
-}
-
 export async function listApiKeys(): Promise<ApiKey[]> {
-  const result = (await request("keys", { cache: "no-store" })) as {
-    keys?: ApiKey[];
-  };
+  const result = await apiJson<{ keys?: ApiKey[] }>("/api/admin/keys", { cache: "no-store" });
   return result.keys ?? [];
 }
 
@@ -39,14 +30,13 @@ export async function createApiKey(
   name: string,
   scope: KeyScope = "data",
 ): Promise<{ key: ApiKey; plaintext: string }> {
-  const result = (await request("keys", {
+  return apiJson<{ key: ApiKey; plaintext: string }>("/api/admin/keys", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, scope }),
-  })) as { key: ApiKey; plaintext: string };
-  return result;
+  });
 }
 
 export async function revokeApiKey(id: string): Promise<void> {
-  await request(`keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await apiJson(`/api/admin/keys/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

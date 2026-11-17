@@ -5,7 +5,7 @@ import { ForecastNote } from "./ForecastNote";
 import { changeOver, lastDays, seriesSpec } from "./mcci";
 import { PriceChart } from "./PriceChart";
 import { isAhead } from "./priceForecast";
-import { ChangeText } from "./screens/McciCard";
+import { ChangeText } from "./ChangeText";
 import type { McciSeries } from "./types";
 
 export function IndexChartDialog({ series, onClose }: { series: McciSeries; onClose: () => void }) {

@@ -1,3 +1,10 @@
+// 集成测试整体是测试代码: 断言失败本来就要炸, 逐一写 let-else 只会稀释测试意图.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 //! 回归: 有解的合同被报成"约束冲突, LP 不可行".
 //!
 //! 两种煤, S≤2.5 且 G≥80, 单用荣欣就满足. App 固定传 truncate_decimal=true

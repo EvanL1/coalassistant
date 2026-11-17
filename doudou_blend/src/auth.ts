@@ -1,13 +1,10 @@
 /**
  * 认证由 Rust 服务端通过 HttpOnly Cookie 管理, 密码不进前端产物.
  */
+import { emit } from "./events";
 import { reasonFromBody } from "./http";
 import { resetSyncState } from "./cloudStorage";
 import { claimLocalData, clearLocalAppData, getLocalOwner } from "./localAccount";
-
-function notifyAuthChanged(): void {
-  window.dispatchEvent(new CustomEvent("doudou:auth_changed"));
-}
 
 export interface Session {
   authenticated: boolean;
@@ -96,7 +93,7 @@ export async function tryLogin(
     // 必须在通知界面之前: 界面一切换就开始同步, 那时本机数据得已经属于这个账号.
     claimLocalData(name);
   }
-  notifyAuthChanged();
+  emit("auth_changed");
   return true;
 }
 
@@ -112,6 +109,6 @@ export async function logout(): Promise<void> {
     adminSession = false;
     if (!wasAdmin) clearLocalAppData();
     resetSyncState();
-    notifyAuthChanged();
+    emit("auth_changed");
   }
 }
