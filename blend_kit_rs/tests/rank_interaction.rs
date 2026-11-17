@@ -311,3 +311,63 @@ fn test_no_csr_in_check_reports_nothing() {
     assert!(result.ok);
     assert!(result.csr_interaction_penalty.is_none());
 }
+
+/// 不可行时的放宽建议 ("合同上这一项改成这个数就能配出来") 要在计入煤阶交互之后兑现。
+///
+/// 这两种煤: 硫 ≤0.6 做不到, 不计交互时放宽到 1.1064 刚好够; 计入交互后 CSR 被扣分,
+/// 同一个数就不够了。诊断是在不计交互的问题上做的, 建议数曾经原样给出, 照着改了仍然
+/// "计入煤阶交互后无可行配方"。现在给的数必须是带着交互真解得出的。
+#[test]
+fn test_relax_to_holds_with_rank_interaction() {
+    let coals = || {
+        vec![
+            coal_from_tuple(
+                "低硫弱粘",
+                (0.3, 6.0, 15.0, 50.0, 8.0, 0.1, 40.0, 7.0, 900.0, 0.0),
+            ),
+            coal_from_tuple(
+                "高硫强粘",
+                (
+                    1.18, 6.0, 15.02, 73.49, 12.27, 0.1, 56.61, 7.0, 1650.0, 126.0,
+                ),
+            ),
+        ]
+    };
+    let specs = |sulfur: f64| {
+        vec![
+            Spec::upper("S", sulfur),
+            Spec::lower("G", 71.52),
+            Spec::lower("CSR", 55.22),
+        ]
+    };
+    let advice = |k: Option<f64>| {
+        let result = solve(&request(coals(), specs(0.6), k));
+        assert!(!result.ok, "硫 ≤0.6 在这两种煤里做不到");
+        let sulfur = result
+            .infeasible_bounds
+            .iter()
+            .find(|bound| bound.indicator == "S")
+            .expect("应指认硫这一项");
+        sulfur.relax_to.expect("应给得出硫该放宽到几")
+    };
+
+    let plain = advice(None);
+    assert!(
+        solve(&request(coals(), specs(plain), None)).ok,
+        "不计交互: 改成 {plain} 应解得出"
+    );
+    assert!(
+        !solve(&request(coals(), specs(plain), Some(10.0))).ok,
+        "这个例子要求: 不计交互时的建议数, 计入交互后不够 (否则测不到要测的东西)"
+    );
+
+    let with_interaction = advice(Some(10.0));
+    assert!(
+        with_interaction > plain,
+        "计入交互后要放宽得更多: {with_interaction} 对 {plain}"
+    );
+    assert!(
+        solve(&request(coals(), specs(with_interaction), Some(10.0))).ok,
+        "计入交互: 改成 {with_interaction} 必须真的解得出"
+    );
+}

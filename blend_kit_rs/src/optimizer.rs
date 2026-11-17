@@ -107,6 +107,7 @@ pub fn solve(request: &BlendRequest) -> BlendResult {
     let lp_request = priced.as_ref().unwrap_or(request);
     // 一铲最小量 (shovel_tons) 在这里套一层分支定界与凑整铲; 没给时就是一次普通求解.
     let mut result = crate::shovel::solve(lp_request, &solve_internal);
+    confirm_relax_targets(lp_request, &mut result);
     result.warnings.extend(note);
     if let Some(config) = &request.price_robustness {
         // 验算模式没有"最优"可言; 无解也无从谈稳不稳.
@@ -536,6 +537,128 @@ fn relax_target(
         }
     }
     None
+}
+
+/// 逐项诊断里的放宽建议, 按用户实际走的那条流程再兑现一遍.
+///
+/// 诊断与 [`relax_target`] 的逐档试解都发生在最里层: 那里的请求已经被拿掉了煤阶交互
+/// ([`crate::rank_interaction::solve`] 先不计交互解一遍), 也不按整铲配 (整铲的分支定界
+/// 套在外面)。所以 "改成这个数就能解出" 只对那个简化问题成立 —— 计入煤阶交互后 CSR 更低,
+/// 凑成整铲后还可能顶破别的项, 照着建议改完重新求解仍然没有配方。
+///
+/// 这里在最外层把每条建议放回完整流程真解一次; 解不出就往外找, 找到真能解出的最小一档
+/// 才给, 找不到就给 None。两样都没开的请求, 里层试解走的已经是完整流程, 不重复验。
+fn confirm_relax_targets(request: &BlendRequest, result: &mut BlendResult) {
+    let rank_interaction = request
+        .rank_interaction
+        .as_ref()
+        .is_some_and(|setting| setting.k > 0.0);
+    if result.ok || !(rank_interaction || request.shovel_tons.is_some()) {
+        return;
+    }
+    // 每次试解都是一遍完整流程 (整铲的分支定界套煤阶交互的换中心), 线上规模的煤池一次要几十
+    // 毫秒。给整个请求一个试解次数的总预算: 用完了剩下的建议就说给不出。按次数而不按时间限,
+    // 是因为同一个请求的输出不能随机器快慢变。
+    let budget = std::cell::Cell::new(RELAX_CONFIRM_BUDGET);
+    let solves = |trial: &BlendRequest| -> Option<bool> {
+        budget.set(budget.get().checked_sub(1)?);
+        let plain = |inner: &BlendRequest, _diagnose: bool| solve_internal(inner, false);
+        Some(crate::shovel::solve(trial, &plain).ok)
+    };
+    for bound in &mut result.infeasible_bounds {
+        let Some(first) = bound.relax_to else {
+            continue;
+        };
+        bound.relax_to = request
+            .specs
+            .iter()
+            .find(|spec| spec.enabled && spec.indicator == bound.indicator)
+            .and_then(|spec| widen_until_solved(spec, request, bound.direction, first, &solves));
+    }
+}
+
+/// 一个请求里, 兑现放宽建议最多试解多少次 (所有问题项合计)。
+///
+/// 多数建议第一次试解就成立; 要往外找的, 两位小数的项探到头再二分收回约 20 次。
+const RELAX_CONFIRM_BUDGET: u32 = 48;
+
+/// 往外找放宽档位至少探多少格。
+const RELAX_WIDEN_MIN_CELLS: f64 = 256.0;
+
+/// 往外找放宽档位至少探多远 (占建议数自身量级的比例)。只按格数算的话, 小数位细的项探不了
+/// 多远 (三位小数的 256 格只有 0.256), 而煤阶交互一扣就是好几点 CSR。
+const RELAX_WIDEN_REACH: f64 = 0.2;
+
+/// 按原值判定的项没有格子: 往外找时按合同上常见的写法, 0.01 一步.
+const RAW_RELAX_SCALE: f64 = 100.0;
+
+/// 从 `first` 起往放宽的方向找第一个 "完整流程真解得出" 的档位。
+///
+/// 先试 `first` 本身 (多数建议本来就成立, 只多解这一次); 不成立就按格翻倍往外探, 探到
+/// 解得出的一档后二分收回, 给最小的那一档。返回的数一定是真解过的; 探到头都解不出、或试解
+/// 预算在探到之前用完, 给 None。`solves` 返回 None 表示预算用完。
+fn widen_until_solved(
+    spec: &Spec,
+    request: &BlendRequest,
+    direction: Direction,
+    first: f64,
+    solves: &impl Fn(&BlendRequest) -> Option<bool>,
+) -> Option<f64> {
+    let attempt = |bound: f64| solves(&request_with_bound(request, spec, direction, bound));
+    if attempt(first)? {
+        return Some(first);
+    }
+    let sign = match direction {
+        Direction::Upper => 1.0,
+        Direction::Lower => -1.0,
+        Direction::Range => return None,
+    };
+    let rule = acceptance_rule(spec, request.truncate_decimal);
+    // 档位用 "整数格 / 每单位格数" 算, 不用 first + 步长 × n: 后者会攒出浮点零头.
+    let (scale, base) = match rule.decimals.filter(|_| rule.mode != AcceptanceMode::Raw) {
+        // first 是 relax_target 在格线上取的.
+        Some(_) => {
+            let scale = (1.0 / quantum(&rule)).round();
+            (scale, (first * scale).round())
+        }
+        // 按原值: first 一般不在 0.01 的格上, 起点取它里侧最近的一格, 往外第一步就越过它.
+        None => {
+            let scaled = first * RAW_RELAX_SCALE;
+            let inner = if sign > 0.0 {
+                scaled.floor()
+            } else {
+                scaled.ceil()
+            };
+            (RAW_RELAX_SCALE, inner)
+        }
+    };
+    let candidate = |steps: f64| (base + sign * steps) / scale;
+    let farthest =
+        RELAX_WIDEN_MIN_CELLS.max((RELAX_WIDEN_REACH * first.abs().max(1.0) * scale).ceil());
+
+    // 翻倍往外探: 1, 2, 4, … 格, 最后一档正好落在最远处.
+    let (mut failed, mut steps) = (0.0, 1.0);
+    let mut solved = loop {
+        if attempt(candidate(steps))? {
+            break steps;
+        }
+        if steps >= farthest {
+            return None;
+        }
+        failed = steps;
+        steps = (steps * 2.0).min(farthest);
+    };
+    // 二分只在 "这一档解得出" 时才往里收, 所以留下的那一档一定真解过; 预算用完就停在已经
+    // 解出的那一档 (不是最小的, 但照着改确实解得出).
+    while solved - failed > 1.0 {
+        let middle = failed + ((solved - failed) / 2.0).floor();
+        match attempt(candidate(middle)) {
+            Some(true) => solved = middle,
+            Some(false) => failed = middle,
+            None => break,
+        }
+    }
+    Some(candidate(solved))
 }
 
 /// 放宽档位最多往外试几档. 判定规则本身最多差两档 (Round 最坏情况

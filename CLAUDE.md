@@ -224,7 +224,8 @@ npm run check:rules  # 前端分层约定 (见下 "机器检查的约定")
   且占比极小 —— 可行域薄到求解精度以下的反例单列在 `#[ignore]` 里);
   输出的配方回放后结论一致; 超出合同一格必判不达标; 整铲之和等于总铲数; 可选开关缺省时输出逐字节相同;
   估价对基准价齐次; 计价项的拒收线与合同界按同一条判定规则判, 求解给出的配方回放后不判越线 (安全余量只留在
-  LP 一侧)。执行界、判定一格、放行量只在 `quality.rs` 各有一个函数 (`executed_upper/lower`、`quantum`、
+  LP 一侧); 不可行时给出的放宽建议 (`relax_to`) 照着改必须真解得出, 含开了煤阶交互、按整铲配的请求。
+  执行界、判定一格、放行量只在 `quality.rs` 各有一个函数 (`executed_upper/lower`、`quantum`、
   `judging_allowance`), 不要在别处再写一遍公式。
 - **输出逐字节确定**: 会序列化的映射用 `BTreeMap`, 不用 `HashMap` (`tests/deterministic_output.rs`)。
 - **服务端鉴权在路由表里**: 新路由加进 `lib.rs` 的 `routes()` 并写明 `Access` (公开 / 会话 / 管理员 / 写煤库密钥 /

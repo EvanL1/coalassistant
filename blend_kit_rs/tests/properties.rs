@@ -1442,3 +1442,79 @@ fn p8_priced_recipe_stays_within_the_reject_line_on_replay() {
         "应有配方顶在拒收线那一格里的例子"
     );
 }
+
+/// P9 每例: 一次求解, 报出放宽建议时每条建议再解一次.
+const CASES_RELAX: u32 = 1500;
+
+/// P9 给出的放宽建议照着改, 必须真的解得出配方.
+///
+/// 不可行时逐项诊断里的 `relax_to` 是在对用户说 "合同上这一项改成这个数就能配出来"。
+/// 这句话要按用户实际走的那条流程兑现: 开了煤阶交互、按整铲配的请求, 照着改完重新求解
+/// 也得有配方 —— 不能只在拿掉这两样之后的简化问题上成立。说不出该填几就给 None, 不给假数。
+#[test]
+fn p9_relax_to_solves_when_applied() {
+    let (advised, with_rank, with_shovel) = (Cell::new(0u32), Cell::new(0u32), Cell::new(0u32));
+    let strategy = (
+        random_case(),
+        prop::sample::select(vec![0.0, 0.0, 10.0, 30.0, 66.0]),
+        prop::option::weighted(0.3, (1..=50u32, shovel_size())),
+    );
+    let cases = run(CASES_RELAX, &strategy, |(case, k, shovel)| {
+        let mut request = random_request(&case);
+        if k > 0.0 {
+            request.rank_interaction = Some(RankInteraction { k });
+        }
+        if let Some((hundreds, tons)) = shovel {
+            request.total_quantity = Some(f64::from(hundreds) * 100.0);
+            request.shovel_tons = Some(tons);
+        }
+        let result = solve(&request);
+        if result.ok {
+            return Ok(());
+        }
+        for bound in &result.infeasible_bounds {
+            let Some(relax_to) = bound.relax_to else {
+                continue;
+            };
+            advised.set(advised.get() + 1);
+            if k > 0.0 {
+                with_rank.set(with_rank.get() + 1);
+            }
+            if shovel.is_some() {
+                with_shovel.set(with_shovel.get() + 1);
+            }
+            let mut relaxed = request.clone();
+            for spec in relaxed
+                .specs
+                .iter_mut()
+                .filter(|spec| spec.enabled && spec.indicator == bound.indicator)
+            {
+                match bound.direction {
+                    Direction::Upper => spec.max = Some(relax_to),
+                    Direction::Lower => spec.min = Some(relax_to),
+                    Direction::Range => {}
+                }
+            }
+            let after = solve(&relaxed);
+            prop_assert!(
+                after.ok,
+                "建议把{}改成 {relax_to}, 照着改了仍解不出: {:?}\n{}",
+                bound.label_zh,
+                after.reason,
+                to_json(&request)
+            );
+        }
+        Ok(())
+    });
+    eprintln!(
+        "P9: {cases} 例, 给出放宽建议 {} 条, 其中开了煤阶交互 {} 条, 按整铲配 {} 条",
+        advised.get(),
+        with_rank.get(),
+        with_shovel.get()
+    );
+    assert!(cases < 100 || advised.get() > 0, "应有给出放宽建议的例子");
+    assert!(
+        cases < 1000 || (with_rank.get() > 0 && with_shovel.get() > 0),
+        "煤阶交互与整铲两条路都应覆盖到"
+    );
+}
