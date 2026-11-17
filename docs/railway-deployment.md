@@ -23,7 +23,10 @@
 数据更新密钥**不走环境变量**——用后台账号登录后生成、命名、销毁，存在数据库里。
 详见 `docs/coal-data-api.md`。
 
-Railway 自动注入 `PORT`，服务监听 `0.0.0.0:$PORT`。`.railway/railway.ts`
+Railway 自动注入 `PORT`，服务监听 `0.0.0.0:$PORT`。`AUTH_USERNAME` / `AUTH_PASSWORD` / `AUTH_SESSION_TOKEN`
+三项没配齐时（只可能发生在 Railway 之外：本机开发，或直接 `docker run` 这个镜像、E2B 环境），服务用内置默认口令，
+并且只监听 `127.0.0.1`；要对外访问必须显式设置这三项。变量在而值是空串（或只有空白）按没设处理：
+Railway 上会启动失败并在日志里指出是哪一项，不会带着空口令对外服务。`.railway/railway.ts`
 将 `/api/health` 配置为部署健康检查；服务启动时自动执行
 `blend_kit_server/migrations/` 中的数据库迁移。
 

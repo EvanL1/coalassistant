@@ -47,6 +47,10 @@ jobs:
       - name: Check master data
         run: node scripts/check_master_data.mjs
 
+      # 前端分层约定 (fetch / Web 存储 / 事件名收口, 询价不写偏好…) 的机器检查; 报错里写了根因与改法.
+      - name: Check frontend rules
+        run: node scripts/check_frontend_rules.mjs
+
       - name: Test frontend (with coverage thresholds)
         working-directory: doudou_blend
         run: npm run test:coverage
@@ -67,6 +71,7 @@ jobs:
           workspaces: |
             blend_kit_rs
             blend_kit_server
+            blend_kit_wasm
 
       - name: Test blend_kit
         working-directory: blend_kit_rs
@@ -75,10 +80,6 @@ jobs:
       - name: Build blend_kit demo
         working-directory: blend_kit_rs
         run: cargo run --release --locked --example demo
-
-      - name: Build blend_kit master_demo
-        working-directory: blend_kit_rs
-        run: cargo run --release --locked --example master_demo
 
       - name: Test Web server
         working-directory: blend_kit_server
@@ -107,20 +108,32 @@ jobs:
           cargo test --locked --lib -- --ignored --skip live --test-threads=1 2>&1 | tee "$RUNNER_TEMP/db_tests.log"
           grep -Eq 'test result: ok\. [1-9]' "$RUNNER_TEMP/db_tests.log"
 
+      # blend_kit_wasm 应用不用, 但一致性检查要求它与核心同步; 至少保证它还编得过.
+      - name: Check blend_kit_wasm compiles
+        working-directory: blend_kit_wasm
+        run: cargo check --locked
+
+      # 注释里指向不存在符号的文档链接算错误: 代码改名后注释跟着过期, 这里拦住.
+      - name: Check blend_kit doc links
+        working-directory: blend_kit_rs
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"
+        run: cargo doc --no-deps --locked
+
       - name: Format check
         run: |
           cargo fmt --manifest-path blend_kit_rs/Cargo.toml -- --check
           cargo fmt --manifest-path blend_kit_server/Cargo.toml -- --check
 
-      # clippy 1.88 把 uninlined_format_args 临时列为默认 lint (之后的版本又移回 pedantic),
-      # 现有代码按新版 clippy 写, 这里放行这一条, 其余 lint 照常拦.
+      # 放行与禁止的 lint 都写在各 crate 的 Cargo.toml [lints.clippy] 里 (本地 cargo clippy 与这里一致):
+      # 生产代码禁 unwrap / expect / panic; clippy 1.88 临时列为默认的 uninlined_format_args 放行.
       - name: Clippy (blend_kit)
         working-directory: blend_kit_rs
-        run: cargo clippy --release --locked -- -D warnings -A clippy::uninlined_format_args
+        run: cargo clippy --release --all-targets --locked -- -D warnings
 
       - name: Clippy (Web server)
         working-directory: blend_kit_server
-        run: cargo clippy --all-targets --locked -- -D warnings -A clippy::uninlined_format_args
+        run: cargo clippy --all-targets --locked -- -D warnings
 
   audit:
     runs-on: ubuntu-latest

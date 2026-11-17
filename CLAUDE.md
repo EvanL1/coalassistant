@@ -1,6 +1,7 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents working in this repository. `AGENTS.md` is a symlink to it, so
+Claude Code, droid, Codex and others all read the same text — edit this file only.
 
 ## What this is
 
@@ -20,9 +21,8 @@ server.
 
 Each crate has its own `Cargo.toml` and `Cargo.lock`; build them from inside their own directory.
 
-Repo-root loose files: `schema.sql` / `mines.db` / `migrate_json_to_sqlite.mjs` were the design artifacts for
-the mines wide-table migration in the (now removed) Tauri/SQLite backend. They are **orphaned** — nothing
-builds or reads them. `mockup/` is the original HTML visual mockup of the six screens.
+`mockup/` is the original HTML visual mockup of the six screens. A local untracked `mines.db` (if present) is a
+leftover of the removed Tauri/SQLite backend; nothing reads it.
 
 ## Architecture — the parts that span files
 
@@ -35,7 +35,7 @@ Keeping every boundary at "JSON string in, JSON string out" is what keeps the co
 Don't add typed cross-boundary APIs; extend the JSON request/result shapes instead.
 
 **Single backend seam.** `doudou_blend/src/backend.ts` exposes one async interface (`solveJson` /
-`getMasterJson` / `getVersion`, plus blend history: `saveHistory` / `countHistory` / `listHistory` /
+`getMasterJson`, plus blend history: `saveHistory` / `countHistory` / `listHistory` /
 `setMeasuredQuality` / `clearHistory`) over same-origin `fetch('/api/...')`, so screen code never touches
 transport details. History persists to PostgreSQL through the server and normalizes to a uniform
 `HistoryRecord` DTO (the TS adapter derives recipe + the 6 mixed indicators from the stored result; the Rust
@@ -167,20 +167,22 @@ observations are not yet fed into `solve_json`** (deferred until enough accumula
 **Core algorithm** (most common loop — fast, no system deps):
 ```bash
 cd blend_kit_rs
-cargo test --release                          # all tests (live in lib.rs + per-module #[cfg(test)])
+cargo test --release                          # all tests (lib.rs + per-module #[cfg(test)] + tests/, incl. 性质测试)
 cargo test --release test_basic_solve         # a single test by name
-cargo run --release --example master_demo     # demo against the full master DB
 cargo run --release --example demo
 cargo run --release --bin blend -- eval < request.json   # 命令行 (给 agent/脚本): solve 求最优 / eval 按 fixed_ratios 验算 / master 输出内置数据
-cargo clippy --release -- -D warnings
+cargo clippy --release --all-targets -- -D warnings   # lint 的放行与禁止写在 Cargo.toml [lints.clippy]
 cargo fmt
+PROPTEST_CASES=200000 cargo test --release --test properties   # 性质测试深跑 (默认每条几千例, 不到 1 秒)
+cargo test --release --test properties -- --ignored            # 已知的极薄可行域反例 (如实报"没算出结论")
 ```
 
 **Web server** (`cd blend_kit_server`):
 ```bash
 cargo test --locked
-cargo clippy --release -- -D warnings
-cargo run                                      # needs AUTH_* + DATABASE_URL env (see docs/railway-deployment.md)
+cargo clippy --all-targets -- -D warnings      # 生产代码禁 unwrap / expect / panic, 见 Cargo.toml [lints.clippy]
+DATABASE_URL=... cargo test --locked --lib -- --ignored --skip live --test-threads=1   # 库测试 (支架 src/test_db.rs)
+cargo run                                      # needs DATABASE_URL; 没配齐 AUTH_* 时用内置默认口令且只监听 127.0.0.1
 cargo run --release --bin doudou -- --profile admin login <账号>   # 线上命令行, 见下
 ```
 
@@ -217,7 +219,38 @@ npm run dev          # Vite dev server; proxies /api to the local blend_kit_serv
 npm run build        # tsc && vite build → dist/
 npm test             # vitest
 npm run check:data   # master 数据自检
+npm run check:rules  # 前端分层约定 (见下 "机器检查的约定")
 ```
+
+## 机器检查的约定 (改代码前先看, 违反了 CI 会红)
+
+下面这些以前只是口头约定, 现在各有一条检查守着; 报错信息里写了根因与改法。要改约定本身, 就连检查一起改。
+
+- **求解与判定同一条线** (`blend_kit_rs/tests/properties.rs`, proptest): 预埋可行解的合同不许报冲突 (解不出时只能是如实的"没算出结论",
+  且占比极小 —— 可行域薄到求解精度以下的反例单列在 `#[ignore]` 里);
+  输出的配方回放后结论一致; 超出合同一格必判不达标; 整铲之和等于总铲数; 可选开关缺省时输出逐字节相同;
+  估价对基准价齐次。执行界、判定一格、放行量只在 `quality.rs` 各有一个函数 (`executed_upper/lower`、`quantum`、
+  `judging_allowance`), 不要在别处再写一遍公式。
+- **输出逐字节确定**: 会序列化的映射用 `BTreeMap`, 不用 `HashMap` (`tests/deterministic_output.rs`)。
+- **服务端鉴权在路由表里**: 新路由加进 `lib.rs` 的 `routes()` 并写明 `Access` (公开 / 会话 / 管理员 / 写煤库密钥 /
+  MCP 密钥)。鉴权是按 `Access` 套在路由上的中间件, 在读请求体之前做完, 所以未登录一律 401, 不会先解析
+  请求体; handler 里用 `Authed<…>` 提取器取身份。三条路由表测试守着: 不带凭据的一律 401; 每类 `Access`
+  只放行自己那种凭据 (普通会话进不了管理接口); 路径与登记的类别不能矛盾 (`/api/admin/*` 必须是管理员,
+  `/api/master/*` 必须是写煤库, `/mcp` 的 POST 必须是 MCP 密钥)。`AUTH_*` 设成空串按没设处理。
+- **MCP 工具是枚举**: 新工具加进 `mcp.rs` 的 `tools!`; 是否过求解闸门、要不要装行情数据、会不会存档都是对它的
+  穷尽 `match`, 漏了编不过。
+- **纯函数模块**: `mcp.rs`、`mcp_market.rs`、`mcp_quote.rs`、`today.rs`、`today_overrides.rs` 里出现
+  `sqlx` / `reqwest` / `tokio::` / `.await` 会被单元测试拦下; 查库联网放 `lib.rs` 的 `load_mcp_context`。
+- **前端分层** (`scripts/check_frontend_rules.mjs`): 只有 `http.ts` / `auth.ts` 直接调 `fetch`, 数据模块用
+  `apiJson` / `apiJsonOrNull`; 屏幕与组件不导入 `apiFetch` 之类; `localStorage` / `sessionStorage` 只在
+  `storage.ts`、`cloudStorage.ts`、`penaltyStorage.ts`、`localAccount.ts`、`coal_index.ts`、`domain/quoteDraft.ts`;
+  事件名只写在 `events.ts` (用 `emit` / `listen` / `useAppEvents`); 询价页只从存储模块导入 `get*` 与类型;
+  旧价格键只在 `storage.ts` 剔除。
+- **Rust 与 TypeScript 两边各写一份的常量** (`scripts/check_repository_consistency.mjs`): 除结构体字段名、枚举、
+  指标顺序外, 还比对 `MASTER_ONLY_KEYS`、煤状态列表、报价上限、回填量程、一铲默认吨数、冲突原因原文等;
+  新加一对这样的常量就在脚本里登记。
+- **云端同步的判断是纯函数** (`cloudStorage.ts` 的 `decideInit` / `decidePersist` / `decideWrite`), 有穷举表测试
+  (`cloudStorage.decisions.test.ts`); 改同步规则先改表。
 
 ## Critical gotchas
 
@@ -235,8 +268,9 @@ npm run check:data   # master 数据自检
   uses both bounds. There are regression tests pinning this (`test_direction_upper_ignores_min`).
 ## CI / deploy
 
-- `ci.yml` (push/PR) is the only workflow: consistency + master-data checks, frontend test/build,
-  `blend_kit` tests + examples, `blend_kit_server` tests, fmt and clippy.
+- `ci.yml` (push/PR) is the only workflow: consistency + master-data + frontend-rules checks, frontend
+  test/build, `blend_kit` tests (incl. property tests) + example + doc-link check, `blend_kit_server` tests
+  (incl. DB tests), `blend_kit_wasm` compile check, fmt and clippy.
 - Production deploy is **Railway + Supabase** via the repo-root `Dockerfile` (Node stage builds React, Rust
   stage builds `blend_kit_server`, final image ships the server + static assets). See
   `docs/railway-deployment.md` for the required `AUTH_*` / `DATABASE_URL` env vars.
