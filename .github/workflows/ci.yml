@@ -71,7 +71,6 @@ jobs:
           workspaces: |
             blend_kit_rs
             blend_kit_server
-            blend_kit_wasm
 
       - name: Test blend_kit
         working-directory: blend_kit_rs
@@ -107,11 +106,6 @@ jobs:
         run: |
           cargo test --locked --lib -- --ignored --skip live --test-threads=1 2>&1 | tee "$RUNNER_TEMP/db_tests.log"
           grep -Eq 'test result: ok\. [1-9]' "$RUNNER_TEMP/db_tests.log"
-
-      # blend_kit_wasm 应用不用, 但一致性检查要求它与核心同步; 至少保证它还编得过.
-      - name: Check blend_kit_wasm compiles
-        working-directory: blend_kit_wasm
-        run: cargo check --locked
 
       # 注释里指向不存在符号的文档链接算错误: 代码改名后注释跟着过期, 这里拦住.
       - name: Check blend_kit doc links

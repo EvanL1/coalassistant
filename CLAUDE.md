@@ -10,13 +10,12 @@ indicators + an FOB/FRT price split) plus quality specs, and solves a linear pro
 ratio that satisfies every constraint. Ships as a browser web app: a React frontend against a Rust HTTP
 server.
 
-## Repository layout (three independent Rust crates — NOT a cargo workspace)
+## Repository layout (two independent Rust crates — NOT a cargo workspace)
 
 | Path | Crate / package | Role |
 |------|-----------------|------|
-| `blend_kit_rs/` | `blend_kit` | Pure LP core. Clarabel solver, embedded master data. Zero web/WASM deps. |
+| `blend_kit_rs/` | `blend_kit` | Pure LP core. Clarabel solver, embedded master data. Zero web deps. |
 | `blend_kit_server/` | `blend_kit_server` | Axum HTTP server. Serves `/api/*`, PostgreSQL persistence, auth. Depends on `blend_kit` by path. |
-| `blend_kit_wasm/` | `blend_kit_wasm` | Thin `wasm-bindgen` wrapper. Depends on `blend_kit` by path. **Currently unused by the app** — the frontend talks to the server, not WASM. Kept as a standalone build target. |
 | `doudou_blend/src/` | (npm) `doudou_blend` | React 19 + TypeScript + Vite frontend. |
 
 Each crate has its own `Cargo.toml` and `Cargo.lock`; build them from inside their own directory.
@@ -28,8 +27,8 @@ leftover of the removed Tauri/SQLite backend; nothing reads it.
 
 **One algorithm, two callers.** The entire core is reached through a single string-in/string-out function,
 `blend_kit::solve_json(&str) -> String` (`blend_kit_rs/src/lib.rs`). It is invoked:
-- directly in tests/examples and by the server (`POST /api/solve`),
-- via `wasm-bindgen` as `solveJson` (`blend_kit_wasm/src/lib.rs`) — built, but not wired into the app.
+- directly in tests/examples and the `blend` CLI,
+- by the server (`POST /api/solve`, and the MCP tools).
 
 Keeping every boundary at "JSON string in, JSON string out" is what keeps the core independent of transport.
 Don't add typed cross-boundary APIs; extend the JSON request/result shapes instead.
@@ -49,7 +48,8 @@ effects from oven effects).
 `optimizer.rs` (builds the Clarabel LP: minimize Σ cif·xᵢ s.t. Σxᵢ=1 and per-spec weighted ≤/≥ bounds; also
 computes slack + `binding` flags) →
 result is post-processed into three business views: cost breakdown, physical orders, indicator check.
-`seed.rs` loads the embedded master DB + status state machine; `predict.rs` is optional CSR regression.
+`seed.rs` loads the embedded master DB + status state machine; `predict.rs` holds the measured-CSR
+regression fit (only for the admin status page) and the stamp-charging CSR estimate — neither feeds the solver.
 `rank_interaction.rs` is the opt-in blend-incompatibility term (`BlendRequest.rank_interaction`: CSR − k·Var(Ro),
 linearized per round so the LP stays linear); absent or k = 0 must leave results byte-identical.
 `pricing.rs` is the standalone **estimation module** (估价模块): quality index (1000-point premiums/discounts from
@@ -76,8 +76,9 @@ benchmark whose props are the standard product in master `price_factor.index_ser
 has no fixed spec, so it sits in `price_factor.display_series`: fetched and shown first in the ticker, never a
 benchmark or drift source. Older quotes are drifted into
 `current_price` by the MCCI series nearest by the same distance (picked through `estimate_json`; a quote without V only
-considers same-coal-type series) when it can, else by CCP. CCP is index points
-(2017-01 = 1000) — never use it as a price. Master-only `price_factor` keys (`*_note`, `index_series`) are stripped before
+considers same-coal-type series). When no series can drift a quote (no V and no same-coal-type series, or the series
+has no usable point before/after the quote date), it is not drifted: no `current_price`, priced at the quoted value.
+Index-generated benchmarks are never drifted. Master-only `price_factor` keys (`*_note`, `index_series`) are stripped before
 reaching the core (`MASTER_ONLY_KEYS`, mirrored in `doudou_blend/src/benchmarks.ts`).
 `blend_kit_server/src/coal_prices.rs` 在服务启动后每小时重算当天 (北京时间) 的共享煤库估价快照, 并在启动时与每过零点
 按"当天能拿到的指数与报价" (`benchmarks::as_of`) 补算今天以前缺的 (日期, 煤) —— 存下就不改, 只补空 (`source` 区分
@@ -100,9 +101,8 @@ results byte-identical.
 `shovel.rs` is the **一铲最小量** (`BlendRequest.shovel_tons`, with `total_quantity`): loaders blend by the shovel, so
 each coal is either unused or ≥ 1 shovel, in whole shovels (one shovel = 1/N, N = round(total / shovel)).
 Branch-and-bound over "drop it / floor it at one shovel" (floors go into the LP as `BlendRequest.min_ratios` rows),
-then largest-remainder rounding to whole shovels (`OrderItem.shovels`) evaluated through the fixed-ratio path plus the
-exact petrography review (`optimizer::review_petrography`, shared with the LP path), with a one-shovel-swap repair if
-rounding breaks a spec. 合同按「保留 1 位小数、截断」判定 (用户确认的真实规则), LP 把上限用到下一格减 ε, 配方常顶在
+then largest-remainder rounding to whole shovels (`OrderItem.shovels`) evaluated through the fixed-ratio path, with a
+one-shovel-swap repair if rounding breaks a spec. 合同按「保留 1 位小数、截断」判定 (用户确认的真实规则), LP 把上限用到下一格减 ε, 配方常顶在
 合同界上、一点余地都没有, 挪一铲也救不回; 这时给被凑整顶破的那几项加安全余量 (`Spec::margin`, 按判定步长的
 `HEADROOM_STEPS` 逐级加大) 重新分支定界再凑整, 凑整后的验算仍按原合同, 成功时置 `BlendResult.shovel_extra_cost`
 (比不凑整多花的元/吨, 只在有值时序列化); 都不行才退回未凑整的配方并提示。Blend values come from the root LP; price-robustness re-solves also go through the shovel
@@ -159,8 +159,9 @@ master 或偏好里的价格键, 启用煤放进 `price_factor.extra_coals`, `co
 `BlendResult` JSON. The History screen lets the user backfill the lab-measured coke CSR onto a past blend —
 pairing that blend's mixed indicators (regression **X**, recovered from the stored result) with the measured
 CSR (regression **y**) into a `CsrObservation`. This is the data-collection half of the loop; **the
-observations are not yet fed into `solve_json`** (deferred until enough accumulate), at which point
-`predict.rs`'s gated regression activates.
+observations are not fed into `solve_json`**. The solver-side half (a gated regression inside the LP) was removed
+on 2026-11-17 as unreachable code; the admin page only reports the sample count and fit quality
+(`CsrPredictor::fit`). Feeding observations back into the solver would be new work, not a switch to flip.
 
 ## Build & test commands
 
@@ -205,13 +206,6 @@ cargo run --release --bin doudou -- --profile admin login <账号>   # 线上命
 `market` 给指数现值、涨跌与预测 (`src/mcp_market.rs`; 预测只作参考, 不进求解)。`mcp.rs` 及其子模块保持纯函数:
 不查库不联网, 新数据加到 `Context`, 在 `lib.rs` 的 `load_mcp_context` 里装。接入说明见 `docs/mcp-agent.md`。
 
-**WASM package** (standalone — not needed for the app):
-```bash
-cd blend_kit_wasm
-wasm-pack build --target web --out-dir pkg --release
-node test_wasm_solve.mjs                       # smoke-test the built .wasm
-```
-
 **Frontend** (`cd doudou_blend`, needs Node 22+):
 ```bash
 npm install
@@ -229,7 +223,8 @@ npm run check:rules  # 前端分层约定 (见下 "机器检查的约定")
 - **求解与判定同一条线** (`blend_kit_rs/tests/properties.rs`, proptest): 预埋可行解的合同不许报冲突 (解不出时只能是如实的"没算出结论",
   且占比极小 —— 可行域薄到求解精度以下的反例单列在 `#[ignore]` 里);
   输出的配方回放后结论一致; 超出合同一格必判不达标; 整铲之和等于总铲数; 可选开关缺省时输出逐字节相同;
-  估价对基准价齐次。执行界、判定一格、放行量只在 `quality.rs` 各有一个函数 (`executed_upper/lower`、`quantum`、
+  估价对基准价齐次; 计价项的拒收线与合同界按同一条判定规则判, 求解给出的配方回放后不判越线 (安全余量只留在
+  LP 一侧)。执行界、判定一格、放行量只在 `quality.rs` 各有一个函数 (`executed_upper/lower`、`quantum`、
   `judging_allowance`), 不要在别处再写一遍公式。
 - **输出逐字节确定**: 会序列化的映射用 `BTreeMap`, 不用 `HashMap` (`tests/deterministic_output.rs`)。
 - **服务端鉴权在路由表里**: 新路由加进 `lib.rs` 的 `routes()` 并写明 `Access` (公开 / 会话 / 管理员 / 写煤库密钥 /
@@ -243,7 +238,7 @@ npm run check:rules  # 前端分层约定 (见下 "机器检查的约定")
   `sqlx` / `reqwest` / `tokio::` / `.await` 会被单元测试拦下; 查库联网放 `lib.rs` 的 `load_mcp_context`。
 - **前端分层** (`scripts/check_frontend_rules.mjs`): 只有 `http.ts` / `auth.ts` 直接调 `fetch`, 数据模块用
   `apiJson` / `apiJsonOrNull`; 屏幕与组件不导入 `apiFetch` 之类; `localStorage` / `sessionStorage` 只在
-  `storage.ts`、`cloudStorage.ts`、`penaltyStorage.ts`、`localAccount.ts`、`coal_index.ts`、`domain/quoteDraft.ts`;
+  `storage.ts`、`cloudStorage.ts`、`penaltyStorage.ts`、`localAccount.ts`、`domain/quoteDraft.ts`;
   事件名只写在 `events.ts` (用 `emit` / `listen` / `useAppEvents`); 询价页只从存储模块导入 `get*` 与类型;
   旧价格键只在 `storage.ts` 剔除。
 - **Rust 与 TypeScript 两边各写一份的常量** (`scripts/check_repository_consistency.mjs`): 除结构体字段名、枚举、
@@ -255,22 +250,20 @@ npm run check:rules  # 前端分层约定 (见下 "机器检查的约定")
 ## Critical gotchas
 
 - **`blend_kit_rs/data/coal_master.json` is the only Master source.** `blend_kit::master_json()` serves the
-  same embedded bytes to the server (`GET /api/master`) and the WASM wrapper. Do not add a frontend static copy.
+  same embedded bytes to the server (`GET /api/master`) and the `blend` CLI. Do not add a frontend static copy.
 - **Data changes must not require code changes.** Rust tests use fixtures and never assert master contents;
   data invariants live in `scripts/check_master_data.mjs` (`npm run check:data`). If a data update turns a
   Rust test red, fix the test's coupling, not the data.
 - **`doudou_blend/src/types.ts` mirrors the Rust schema.** Change a shared Rust struct, serde field, enum, or
   indicator ordering together with its TypeScript definition. Run `npm run check:consistency` from
   `doudou_blend/`; CI compares shared fields, enum values, indicator order, versions, documentation, and license.
-- **`blend_kit_wasm` disables `wasm-opt`** (bundled version is too old for Rust 1.82+ bulk-memory). Don't
-  re-enable it. Size is already controlled via `opt-level="z"` + LTO.
 - **`Direction::Upper` ignores `spec.min`; `Direction::Lower` ignores `spec.max`** by design — only `Range`
   uses both bounds. There are regression tests pinning this (`test_direction_upper_ignores_min`).
 ## CI / deploy
 
 - `ci.yml` (push/PR) is the only workflow: consistency + master-data + frontend-rules checks, frontend
   test/build, `blend_kit` tests (incl. property tests) + example + doc-link check, `blend_kit_server` tests
-  (incl. DB tests), `blend_kit_wasm` compile check, fmt and clippy.
+  (incl. DB tests), fmt and clippy.
 - Production deploy is **Railway + Supabase** via the repo-root `Dockerfile` (Node stage builds React, Rust
   stage builds `blend_kit_server`, final image ships the server + static assets). See
   `docs/railway-deployment.md` for the required `AUTH_*` / `DATABASE_URL` env vars.

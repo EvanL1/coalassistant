@@ -3,7 +3,6 @@
 **/target
 **/node_modules
 **/dist
-blend_kit_wasm/pkg
 doudou_blend/src-tauri/gen
 *.db
 *.sqlite
