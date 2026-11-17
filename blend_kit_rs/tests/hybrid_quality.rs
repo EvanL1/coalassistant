@@ -5,9 +5,7 @@
     clippy::panic,
     clippy::float_cmp
 )]
-use blend_kit::{
-    solve_json, solve_with_evaluators, BlendRequest, EvaluatorSet, GObservation, ModelPolicy,
-};
+use blend_kit::solve_json;
 use serde_json::{json, Value};
 
 fn solve(request: Value) -> Value {
@@ -197,43 +195,6 @@ fn test_invalid_quantity_and_duplicate_names_are_rejected() {
 }
 
 #[test]
-fn test_hard_g_model_cannot_optimize_outside_training_domain() {
-    let observations: Vec<GObservation> = (0..20)
-        .map(|index| {
-            let linear = 70.0 + index as f64 * 0.5;
-            GObservation {
-                g_linear: linear,
-                g_measured: linear * 0.9,
-            }
-        })
-        .collect();
-    let policy = ModelPolicy {
-        min_g_samples: 20,
-        min_csr_samples: 30,
-        max_g_cv_mae: 0.1,
-        max_csr_cv_mae: 5.0,
-        extrapolation_ratio: 0.0,
-        ridge_lambda: 0.001,
-    };
-    let evaluators = EvaluatorSet::train(&observations, &[], &policy).expect("G 评估器应训练成功");
-    let request: BlendRequest = serde_json::from_value(json!({
-        "coals": [coal("训练域外煤", 2.0, 10.0, 100.0, 1000.0)],
-        "specs": [{
-            "indicator": "G",
-            "direction": "Lower",
-            "min": 85.0,
-            "enforcement": "Hard",
-            "acceptance": {"mode": "Raw", "tolerance": 0.0}
-        }],
-        "truncate_decimal": false
-    }))
-    .expect("请求应可反序列化");
-    let result = solve_with_evaluators(&request, &evaluators);
-
-    assert!(!result.ok, "Hard G 不得利用训练域外的外推值满足约束");
-}
-
-#[test]
 fn test_hard_petro_scalar_does_not_require_detail_input() {
     let result = solve(json!({
         "coals": [coal("标量岩相煤", 2.0, 10.0, 80.0, 1000.0)],
@@ -259,65 +220,39 @@ fn test_hard_petro_scalar_does_not_require_detail_input() {
     assert_eq!(petro["status"], "Unverified");
 }
 
+/// 煤岩明细 (`petrography`: 反射率直方图 / μ、σ) 已不是输入: 旧请求里带着它也照常求解,
+/// 与其他不认识的字段一样被忽略, 岩相只按八项里的 `petro` 标量加权.
 #[test]
-fn test_hard_petrography_exact_violation_does_not_return_recipe() {
-    let mut low = coal("低反射", 2.0, 10.0, 70.0, 1000.0);
-    low["props"]["petro"] = json!(0.05);
-    low["petrography"] = json!({
-        "hist": [[0.85, 1.0], [0.95, 1.0]],
-        "vitrinite_pct": 80.0
-    });
-    let mut high = coal("高反射", 2.0, 10.0, 100.0, 1100.0);
-    high["props"]["petro"] = json!(0.05);
-    high["petrography"] = json!({
-        "hist": [[1.55, 1.0], [1.65, 1.0]],
-        "vitrinite_pct": 80.0
-    });
-    let result = solve(json!({
-        "coals": [low, high],
-        "specs": [
-            {"indicator": "G", "direction": "Lower", "min": 85.0},
-            {
-                "indicator": "petro",
-                "direction": "Upper",
-                "max": 0.2,
-                "enforcement": "Hard",
-                "acceptance": {"mode": "Raw", "tolerance": 0.0}
-            }
-        ],
-        "truncate_decimal": false
-    }));
-
+fn test_legacy_petrography_input_is_ignored() {
+    let request = |with_detail: bool| {
+        let mut low = coal("低反射", 2.0, 10.0, 70.0, 1000.0);
+        let mut high = coal("高反射", 2.0, 10.0, 100.0, 1100.0);
+        low["props"]["petro"] = json!(0.05);
+        high["props"]["petro"] = json!(0.05);
+        if with_detail {
+            low["petrography"] = json!({"hist": [[0.85, 1.0], [0.95, 1.0]], "vitrinite_pct": 80.0});
+            high["petrography"] =
+                json!({"hist": [[1.55, 1.0], [1.65, 1.0]], "vitrinite_pct": 80.0});
+        }
+        json!({
+            "coals": [low, high],
+            "specs": [
+                {"indicator": "G", "direction": "Lower", "min": 85.0},
+                {"indicator": "petro", "direction": "Upper", "max": 0.2}
+            ],
+            "truncate_decimal": false
+        })
+        .to_string()
+    };
+    let plain = solve_json(&request(false));
     assert_eq!(
-        result["ok"], false,
-        "精确岩相修复失败后不得把违约候选当成功配方"
+        solve_json(&request(true)),
+        plain,
+        "带不带煤岩明细, 输出应逐字节相同"
     );
-}
-
-#[test]
-fn test_hard_petrography_exact_lower_violation_does_not_return_recipe() {
-    let mut coal = coal("岩相代理偏高煤", 2.0, 10.0, 80.0, 1000.0);
-    coal["props"]["petro"] = json!(0.30);
-    coal["petrography"] = json!({
-        "hist": [[1.00, 1.0], [1.10, 1.0]],
-        "vitrinite_pct": 80.0
-    });
-    let result = solve(json!({
-        "coals": [coal],
-        "specs": [{
-            "indicator": "petro",
-            "direction": "Lower",
-            "min": 0.20,
-            "enforcement": "Hard",
-            "acceptance": {"mode": "Raw", "tolerance": 0.0}
-        }],
-        "truncate_decimal": false
-    }));
-
-    assert_eq!(
-        result["ok"], false,
-        "岩相代理通过但精确 σ 低于 Hard 下限时不得返回配方"
-    );
+    let result: Value = serde_json::from_str(&plain).unwrap();
+    assert_eq!(result["ok"], true, "{:?}", result["reason"]);
+    assert!(result.get("petrography_check").is_none());
 }
 
 #[test]

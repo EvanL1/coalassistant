@@ -25,9 +25,9 @@ pub enum Confidence {
     /// 所以按边界取值对配方是保守的 —— 煤显得比实际差, 不会配出不合格焦炭,
     /// 但可能被错误排除、成本被高估.
     ///
-    /// ⚠ `Y` 和 `M` 同时是 `predict.rs` CSR 回归的输入特征. 拿边界值当实测值
-    /// 喂回归, 偏差会被吸收进系数, 再以"模型学到的规律"出现在每次预测里 ——
-    /// 回归上线前必须按本标记把它们排除或加权.
+    /// ⚠ `Y` 和 `M` 同时是实测 CSR 回归 (`predict.rs`, 后台状态页) 的输入特征. 拿边界值
+    /// 当实测值喂回归, 偏差会被吸收进系数 —— 哪天要用回归的结果, 得先按本标记把它们
+    /// 排除或加权.
     Spec,
 }
 
@@ -169,7 +169,6 @@ impl CoalMasterEntry {
             props: self.props.clone(),
             fob,
             frt,
-            petrography: None, // master 数据尚无煤岩直方图字段
             purchase_terms: None,
             coal_type: self.coal_type.clone(),
             form: self.form.clone(),

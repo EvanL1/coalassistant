@@ -95,25 +95,11 @@ export interface Spec {
   penalty?: Penalty | null;
 }
 
-/** 单煤煤岩数据 (MT/T 507 化验单: 反射率直方图 + 镜质组含量). */
-export interface Petrography {
-  /** [bin 中值 R(%), 频率] 列表, 频率可未归一化. */
-  hist?: [number, number][];
-  /** 镜质组体积含量 (%), 混合权重修正用. */
-  vitrinite_pct: number;
-  /** 没有直方图时可提供平均反射率. */
-  mean?: number | null;
-  /** 没有直方图时可提供反射率标准差. */
-  std_dev?: number | null;
-}
-
 export interface Coal {
   name: string;
   props: Partial<Record<string, number>>;
   fob: number;
   frt: number;
-  /** 可选煤岩数据; 提供时混煤 σ 走直方图精确计算. */
-  petrography?: Petrography | null;
   purchase_terms?: PurchaseTerms | null;
   /** 煤种 (焦煤/肥煤/1/3焦煤/瘦煤…). 不进 LP; 用于展示、估价对标与按煤种取估价误差. */
   coal_type?: string | null;
@@ -235,7 +221,7 @@ export interface Benchmark {
   /** 报价日 YYYY-MM-DD. */
   date: string;
   source?: string | null;
-  /** 按焦煤现货指数从报价日推算到今天的价 (服务端算). */
+  /** 按钢铁网指数从报价日推算到今天的价 (服务端算); 推算不了的旧报价没有这一项, 按报价原值. */
   current_price?: number | null;
 }
 
@@ -246,7 +232,7 @@ export interface BenchmarkEntry extends Benchmark {
   id?: string;
   index_ratio?: number;
   index_date?: string;
-  /** 推算用的指数: 指标最接近的指数序列的名字, 或 "CCP". */
+  /** 推算用的指数: 指标最接近的钢铁网指数序列的名字. */
   index_source?: string;
   /** origin=mcci 时的钢铁网品种代码. */
   index_code?: string;
@@ -512,22 +498,6 @@ export interface IndicatorCheck {
   penalty_per_ton?: number | null;
 }
 
-/** 岩相凹口检测结果. */
-export interface Notch {
-  r: number;
-  depth_ratio: number;
-}
-
-/** 岩相精确校验 (直方图合成 + 全方差定律), 与线性代理值不同. */
-export interface PetrographyCheck {
-  mean: number;
-  sigma: number;
-  sigma_max?: number | null;
-  sigma_ok?: boolean | null;
-  notch?: Notch | null;
-  refine_iterations: number;
-}
-
 /**
  * 不可行时的逐项诊断: 其余约束都成立的前提下, 该指标最好能做到多少.
  * 刻意不复用 IndicatorCheck —— 那里的 value 是"混合后的实际值", 不可行时没有配方.
@@ -578,8 +548,6 @@ export interface BlendResult {
   cost?: CostBreakdown | null;
   orders: OrderItem[];
   indicator_check: IndicatorCheck[];
-  /** 参配煤缺煤岩数据时无此字段. */
-  petrography_check?: PetrographyCheck | null;
   warnings: string[];
   /** 以下字段由混合质量引擎写入；旧历史结果可能缺失. */
   quality_status?: QualityStatus;

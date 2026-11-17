@@ -190,7 +190,7 @@ fn test_invalid_k_is_ignored_with_warning() {
     }
 }
 
-/// 有煤既没挥发也没反射率, 算不出煤阶: 不启用, 加警告, 结果照常.
+/// 有煤没有挥发, 算不出煤阶: 不启用, 加警告, 结果照常.
 #[test]
 fn test_missing_rank_input_skips_with_warning() {
     let mut coals = low_rank_gap_pair();
@@ -203,25 +203,6 @@ fn test_missing_rank_input_skips_with_warning() {
         "{:?}",
         result.warnings
     );
-}
-
-/// 有反射率时用反射率均值, 不用挥发换算.
-#[test]
-fn test_petrography_mean_preferred_over_vdaf() {
-    let mut coals = low_rank_gap_pair();
-    for (coal, mean) in coals.iter_mut().zip([1.30, 1.10]) {
-        coal.petrography = Some(Petrography {
-            hist: Vec::new(),
-            vitrinite_pct: 70.0,
-            mean: Some(mean),
-            std_dev: Some(0.06),
-        });
-    }
-    let mut req = request(coals, vec![Spec::lower("CSR", 50.0)], Some(100.0));
-    req.fixed_ratios = half_half();
-    let result = solve(&req);
-    let var = 0.25 * 0.2_f64.powi(2);
-    assert!((result.rank_variance.unwrap() - var).abs() < 1e-12);
 }
 
 /// 单用任一种煤就达标 (各 65 ≥ 63): 计交互不能把它误判成无解.

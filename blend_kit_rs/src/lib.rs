@@ -5,13 +5,11 @@
 //!
 //! 数据流程:
 //!   业务侧 4 张表 (化验/合同/煤价/物流) → 归一为 COALS + SPECS
-//!   → 逐指标判定与可选评估器 → Clarabel 最低成本候选
-//!   → 非线性岩相复验/修复
+//!   → Clarabel 最低成本配方 → 逐指标按合同判定规则体检
 //!   → 3 个业务视图 (成本结构 / 实物订单 / 指标体检)
 pub mod model;
 pub mod optimizer;
 mod penalty;
-pub mod petrography;
 pub mod predict;
 pub mod price_factor;
 pub mod pricing;
@@ -20,18 +18,17 @@ mod rank_interaction;
 mod robustness;
 pub mod seed;
 mod shovel;
-pub use petrography::{Notch, Petrography};
-pub use predict::{CsrObservation, CsrPredictor, EvaluatorSet};
+pub use predict::{CsrObservation, CsrPredictor};
 pub use rank_interaction::{coal_rank, fit_k, rank_moments, KFit, MIN_CALIBRATION_SAMPLES};
 pub use seed::{CoalMaster, CoalMasterEntry, Confidence, DefaultContract, MasterStatus};
 
 pub use model::*;
-pub use optimizer::{solve, solve_with_evaluators};
+pub use optimizer::solve;
 pub use pricing::estimate_json;
 
 /// 返回编译进核心 crate 的 Master JSON 原文.
 ///
-/// WASM 与 HTTP 服务端都必须通过这个入口读取，避免维护静态副本.
+/// HTTP 服务端与命令行都必须通过这个入口读取，避免维护静态副本.
 pub fn master_json() -> &'static str {
     include_str!("../data/coal_master.json")
 }
@@ -64,7 +61,6 @@ pub fn coal_from_tuple(name: &str, t: (f64, f64, f64, f64, f64, f64, f64, f64, f
         props,
         fob,
         frt,
-        petrography: None,
         purchase_terms: None,
         coal_type: None,
         form: None,
@@ -428,33 +424,7 @@ mod tests {
         assert!(s_check.binding, "S 约束应该 binding");
     }
 
-    // ===== CSR 预测接入 (A 步) =====
-
-    /// 生成满足 CSR = 30 + S + 0.5A + 0.8V + 0.3G + 0.6Y + 0.4M 的线性可拟合观测.
-    /// 用 sin/cos 拉开 6 个特征的相关性, 保证 XᵀX 非奇异 (同 predict.rs 测试手法).
-    fn perfect_csr_obs(n: usize) -> Vec<CsrObservation> {
-        (0..n)
-            .map(|i| {
-                let t = i as f64;
-                let s = 1.5 + (t * 0.7).sin().abs() * 1.2;
-                let a = 6.0 + (t * 1.3).cos().abs() * 2.5;
-                let v = 18.0 + (t * 0.5 + 1.0).sin().abs() * 8.0;
-                let g = 75.0 + (t * 0.9).cos().abs() * 18.0;
-                let y = 10.0 + (t * 1.7).sin().abs() * 9.0;
-                let m = 8.0 + (t * 0.3 + 0.5).cos().abs() * 3.0;
-                let csr = 30.0 + s + 0.5 * a + 0.8 * v + 0.3 * g + 0.6 * y + 0.4 * m;
-                CsrObservation {
-                    s,
-                    a,
-                    v,
-                    g,
-                    y,
-                    m,
-                    csr_measured: csr,
-                }
-            })
-            .collect()
-    }
+    // ===== 录入的 CSR =====
 
     fn linbei() -> Coal {
         coal_from_tuple(
@@ -471,95 +441,7 @@ mod tests {
             .value
     }
 
-    fn permissive_csr_policy() -> ModelPolicy {
-        ModelPolicy {
-            min_csr_samples: 8,
-            max_csr_cv_mae: 1.0,
-            ..ModelPolicy::default()
-        }
-    }
-
-    /// 提供通过交叉验证门控的观测时, 在混合层计算 CSR 回归值. 单煤池 →
-    /// 混合 CSR ≈ 95.1 (录入值 70 仅作为线性代理展示).
-    /// 95.1 = 30 + 2 + 3 + 17.6 + 27.9 + 10.2 + 4.4.
-    #[test]
-    fn test_csr_prediction_overrides_recorded() {
-        let observations = perfect_csr_obs(10);
-        let evaluators = EvaluatorSet::train(&[], &observations, &permissive_csr_policy()).unwrap();
-        let req = BlendRequest {
-            coals: vec![linbei()],
-            specs: vec![],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve_with_evaluators(&req, &evaluators);
-        assert!(r.ok, "{:?}", r.reason);
-        let csr = csr_value(&r);
-        assert!(
-            (csr - 95.1).abs() < 0.1,
-            "预测 CSR 应 ≈95.1 (录入 70 被覆盖), 实际 {}",
-            csr
-        );
-    }
-
-    /// CSR 的六项特征固定使用方案保存时的线性代理口径；G 校准是独立模型，
-    /// 不能让同一批 CSR 样本在训练和推断时使用不同的 G 定义.
-    #[test]
-    fn test_csr_feature_contract_is_independent_from_g_calibration() {
-        let g_observations: Vec<GObservation> = (0..20)
-            .map(|index| {
-                let g_linear = 75.0 + index as f64;
-                GObservation {
-                    g_linear,
-                    g_measured: g_linear * 0.5,
-                }
-            })
-            .collect();
-        let policy = ModelPolicy {
-            min_g_samples: 20,
-            min_csr_samples: 8,
-            max_g_cv_mae: 0.1,
-            max_csr_cv_mae: 1.0,
-            ..ModelPolicy::default()
-        };
-        let csr_observations = perfect_csr_obs(10);
-        let evaluators = EvaluatorSet::train(&g_observations, &csr_observations, &policy).unwrap();
-        let req = BlendRequest {
-            coals: vec![linbei()],
-            specs: vec![],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-
-        let result = solve_with_evaluators(&req, &evaluators);
-        assert!(result.ok, "{:?}", result.reason);
-        let g = result
-            .indicator_check
-            .iter()
-            .find(|check| check.indicator == "G")
-            .expect("应输出 G");
-        assert_eq!(g.method, EvaluationMethod::AffineCalibration);
-        assert!((g.value - 46.5).abs() < 0.1, "G 校准应生效: {}", g.value);
-        assert!(
-            (csr_value(&result) - 95.1).abs() < 0.1,
-            "CSR 应继续使用 G_linear=93 的固定特征口径，实际 {}",
-            csr_value(&result)
-        );
-    }
-
-    /// 不提供观测 → 行为不变, 保留录入 CSR=70.
+    /// 体检里的 CSR 是各煤录入值按配比加权: 单煤池就是录入的 70.
     #[test]
     fn test_no_observations_keeps_recorded_csr() {
         let req = BlendRequest {
@@ -577,131 +459,6 @@ mod tests {
         let r = solve(&req);
         assert!(r.ok);
         assert!((csr_value(&r) - 70.0).abs() < 1e-6, "无观测应保留 CSR=70");
-    }
-
-    /// 样本不足 (<7) → 拟合失败, 回退录入 CSR 并加警告, 不静默吞掉.
-    #[test]
-    fn test_insufficient_observations_warns_and_falls_back() {
-        let observations = perfect_csr_obs(5);
-        let evaluators = EvaluatorSet::train(&[], &observations, &ModelPolicy::default()).unwrap();
-        let req = BlendRequest {
-            coals: vec![linbei()],
-            specs: vec![],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve_with_evaluators(&req, &evaluators);
-        assert!(r.ok);
-        assert!((csr_value(&r) - 70.0).abs() < 1e-6, "样本不足应回退 CSR=70");
-        assert!(
-            r.warnings.iter().any(|w| w.contains("CSR")),
-            "应有 CSR 跳过警告: {:?}",
-            r.warnings
-        );
-    }
-
-    /// 生成线性关系极弱的观测: CSR 在 40/95 间高频交替, 平滑特征拟合不出.
-    fn noisy_csr_obs(n: usize) -> Vec<CsrObservation> {
-        (0..n)
-            .map(|i| {
-                let t = i as f64;
-                let s = 1.5 + (t * 0.7).sin().abs() * 1.2;
-                let a = 6.0 + (t * 1.3).cos().abs() * 2.5;
-                let v = 18.0 + (t * 0.5 + 1.0).sin().abs() * 8.0;
-                let g = 75.0 + (t * 0.9).cos().abs() * 18.0;
-                let y = 10.0 + (t * 1.7).sin().abs() * 9.0;
-                let m = 8.0 + (t * 0.3 + 0.5).cos().abs() * 3.0;
-                let csr = if i % 2 == 0 { 40.0 } else { 95.0 };
-                CsrObservation {
-                    s,
-                    a,
-                    v,
-                    g,
-                    y,
-                    m,
-                    csr_measured: csr,
-                }
-            })
-            .collect()
-    }
-
-    /// 样本够但交叉验证误差高 → 不信任预测, 回退录入 CSR 并附 MAE 警告.
-    #[test]
-    fn test_low_r2_falls_back_with_warning() {
-        let observations = noisy_csr_obs(24);
-        let policy = ModelPolicy {
-            min_csr_samples: 8,
-            max_csr_cv_mae: 5.0,
-            ..ModelPolicy::default()
-        };
-        let evaluators = EvaluatorSet::train(&[], &observations, &policy).unwrap();
-        let req = BlendRequest {
-            coals: vec![linbei()],
-            specs: vec![],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve_with_evaluators(&req, &evaluators);
-        assert!(r.ok);
-        assert!(
-            (csr_value(&r) - 70.0).abs() < 1e-6,
-            "高交叉验证误差应回退 CSR=70, 实际 {}",
-            csr_value(&r)
-        );
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("交叉验证") && w.contains("MAE")),
-            "应有交叉验证误差警告: {:?}",
-            r.warnings
-        );
-    }
-
-    /// 拟合成功但某煤缺输入指标 → 该煤保留录入 CSR, 并逐煤点名警告 (不静默).
-    #[test]
-    fn test_coal_missing_input_keeps_csr_and_warns() {
-        let mut no_g = linbei();
-        no_g.name = "缺G".into();
-        no_g.props.remove("G"); // 缺 G 输入 → 无法预测 CSR
-        let observations = perfect_csr_obs(10);
-        let evaluators = EvaluatorSet::train(&[], &observations, &permissive_csr_policy()).unwrap();
-        let req = BlendRequest {
-            coals: vec![no_g],
-            specs: vec![], // 无 CSR spec, 该煤不会被剔除
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve_with_evaluators(&req, &evaluators);
-        assert!(r.ok);
-        assert!(
-            (csr_value(&r) - 70.0).abs() < 1e-6,
-            "缺输入应保留录入 CSR=70"
-        );
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("缺G") && w.contains("CSR")),
-            "应逐煤点名警告: {:?}",
-            r.warnings
-        );
     }
 
     // ===== 安全余量 margin (调研 2026-07-04 阶段 0) =====
@@ -799,86 +556,9 @@ mod tests {
         assert!(s.margin.is_none());
     }
 
-    // ===== 岩相精确校验 (调研 2026-07-04 阶段 1) =====
+    // ===== 岩相: 八项里的一个普通指标 =====
 
-    use crate::petrography::Petrography;
-
-    /// 造带煤岩数据的煤: hist = [[R 中值, 频率]], 镜质组含量统一 80%.
-    fn coal_with_petro(
-        name: &str,
-        t: (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64),
-        hist: Vec<[f64; 2]>,
-    ) -> Coal {
-        let mut c = coal_from_tuple(name, t);
-        c.petrography = Some(Petrography {
-            hist,
-            vitrinite_pct: 80.0,
-            mean: None,
-            std_dev: None,
-        });
-        c
-    }
-
-    /// 参配煤全带煤岩数据且 σ 达标 → 挂 petrography_check, sigma_ok = true, 一次通过.
-    #[test]
-    fn test_petro_check_attached_when_sigma_ok() {
-        let coals = vec![coal_with_petro(
-            "a",
-            (2.0, 8.0, 22.0, 90.0, 15.0, 0.05, 65.0, 8.0, 1100.0, 30.0),
-            vec![[1.15, 1.0], [1.25, 1.0]], // μ=1.2, σ=0.05
-        )];
-        let req = BlendRequest {
-            coals,
-            specs: vec![Spec::upper("petro", 0.15)],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve(&req);
-        assert!(r.ok, "{:?}", r.reason);
-        let check = r.petrography_check.expect("应挂岩相校验");
-        assert!((check.mean - 1.2).abs() < 1e-6);
-        assert!((check.sigma - 0.05).abs() < 1e-6);
-        assert_eq!(check.sigma_ok, Some(true));
-        assert_eq!(check.refine_iterations, 0);
-    }
-
-    /// 煤缺 petro 标量但带直方图 → 用直方图 σ 自动补齐, 不被剔除.
-    #[test]
-    fn test_petro_scalar_derived_from_hist() {
-        let mut c = coal_with_petro(
-            "只有直方图",
-            (2.0, 8.0, 22.0, 90.0, 15.0, 0.0, 65.0, 8.0, 1100.0, 30.0),
-            vec![[1.15, 1.0], [1.25, 1.0]],
-        );
-        c.props.remove("petro");
-        let req = BlendRequest {
-            coals: vec![c],
-            specs: vec![Spec::upper("petro", 0.15)],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve(&req);
-        assert!(
-            r.ok,
-            "带直方图的煤不应因缺 petro 标量被剔除: {:?}",
-            r.reason
-        );
-        assert!(r.recipe.contains_key("只有直方图"));
-    }
-
-    /// 没有煤岩明细时仍按八项中的 petro 标量求解，并标为线性代理。
+    /// 岩相按八项中的 petro 标量加权, 标为线性估算 (未验证)。
     #[test]
     fn test_petro_no_data_is_unverified() {
         let coals = vec![coal_from_tuple(
@@ -901,7 +581,6 @@ mod tests {
         };
         let r = solve(&req);
         assert!(r.ok);
-        assert!(r.petrography_check.is_none());
         let check = r
             .indicator_check
             .iter()
@@ -910,325 +589,6 @@ mod tests {
         assert_eq!(check.method, EvaluationMethod::ProvisionalLinear);
         assert_eq!(check.status, EvaluationStatus::Unverified);
         assert!(r.warnings.is_empty());
-    }
-
-    /// 部分参配煤有煤岩数据、部分没有 → 跳过校验并点名警告 (不静默).
-    #[test]
-    fn test_petro_partial_data_warns_with_names() {
-        let coals = vec![
-            coal_with_petro(
-                "有煤岩",
-                (2.0, 8.0, 22.0, 70.0, 15.0, 0.05, 65.0, 8.0, 1000.0, 30.0),
-                vec![[1.15, 1.0], [1.25, 1.0]],
-            ),
-            coal_from_tuple(
-                "无煤岩",
-                (2.0, 8.5, 23.0, 100.0, 16.0, 0.05, 66.0, 7.5, 1100.0, 30.0),
-            ),
-        ];
-        let mut petro_spec = Spec::upper("petro", 0.15);
-        petro_spec.enforcement = Enforcement::Advisory;
-        let req = BlendRequest {
-            coals,
-            // G ≥ 85 强制两煤混配, 保证"无煤岩"参配
-            specs: vec![Spec::lower("G", 85.0), petro_spec],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve(&req);
-        assert!(r.ok, "{:?}", r.reason);
-        assert!(r.petrography_check.is_none());
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("岩相") && w.contains("无煤岩")),
-            "应点名缺数据的煤: {:?}",
-            r.warnings
-        );
-    }
-
-    /// petrography 存在但无效 (直方图空/全零频率) → 视同缺数据, 点名警告而非静默算出"部分煤的精确 σ".
-    #[test]
-    fn test_petro_invalid_petrography_treated_as_missing() {
-        let mut empty_hist = coal_from_tuple(
-            "空直方图",
-            (2.0, 8.5, 23.0, 100.0, 16.0, 0.05, 66.0, 7.5, 1100.0, 30.0),
-        );
-        empty_hist.petrography = Some(Petrography {
-            hist: vec![],
-            vitrinite_pct: 80.0,
-            mean: None,
-            std_dev: None,
-        });
-        let coals = vec![
-            coal_with_petro(
-                "有煤岩",
-                (2.0, 8.0, 22.0, 70.0, 15.0, 0.05, 65.0, 8.0, 1000.0, 30.0),
-                vec![[1.15, 1.0], [1.25, 1.0]],
-            ),
-            empty_hist,
-        ];
-        let mut petro_spec = Spec::upper("petro", 0.15);
-        petro_spec.enforcement = Enforcement::Advisory;
-        let req = BlendRequest {
-            coals,
-            specs: vec![Spec::lower("G", 85.0), petro_spec],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve(&req);
-        assert!(r.ok, "{:?}", r.reason);
-        assert!(
-            r.petrography_check.is_none(),
-            "空直方图不应参与'精确'校验: {:?}",
-            r.petrography_check
-        );
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("岩相") && w.contains("空直方图")),
-            "应点名无效数据的煤: {:?}",
-            r.warnings
-        );
-    }
-
-    /// 线性代理低估 σ 的场景 (μ 相同、单煤 σ 差异大): 初解超标 → 自动收紧代理 → 收敛达标.
-    /// A: μ=1.2 σ=0.05 贵; B: μ=1.2 σ=0.4 便宜. 代理 Σxσ ≤ 0.25 允许 x_B=0.571,
-    /// 但真实 σ=0.304 超标; 收紧后应落到 σ ≤ 0.25.
-    #[test]
-    fn test_petro_refine_converges() {
-        let coals = vec![
-            coal_with_petro(
-                "纯煤贵",
-                (2.0, 8.0, 22.0, 90.0, 15.0, 0.05, 65.0, 8.0, 1100.0, 30.0),
-                vec![[1.15, 1.0], [1.25, 1.0]], // σ=0.05
-            ),
-            coal_with_petro(
-                "混煤便宜",
-                (2.0, 8.5, 23.0, 92.0, 16.0, 0.4, 66.0, 7.5, 1000.0, 30.0),
-                vec![[0.8, 1.0], [1.6, 1.0]], // μ=1.2, σ=0.4
-            ),
-        ];
-        let req = BlendRequest {
-            coals,
-            specs: vec![Spec::upper("petro", 0.25)],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve(&req);
-        assert!(r.ok, "{:?}", r.reason);
-        let check = r.petrography_check.expect("应挂岩相校验");
-        assert_eq!(
-            check.sigma_ok,
-            Some(true),
-            "收紧后 σ 应达标, σ={}",
-            check.sigma
-        );
-        assert!(check.sigma <= 0.25 + 1e-6, "σ={} 应 ≤ 0.25", check.sigma);
-        assert!(check.refine_iterations >= 1, "初解超标, 应至少收紧一轮");
-    }
-
-    /// 生产配置 (truncate_decimal=true, App 固定传 true) 下收紧迭代同样必须收敛:
-    /// 一位小数截断规则是给百分比量纲指标的, 不适用于两位小数量纲的岩相 σ ——
-    /// 若把 eps=0.0999 加到 petro 上限, 0.25 实际变 0.3499, 收紧永远够不到目标.
-    #[test]
-    fn test_petro_refine_converges_with_truncate() {
-        let coals = vec![
-            coal_with_petro(
-                "纯煤贵",
-                (2.0, 8.0, 22.0, 90.0, 15.0, 0.05, 65.0, 8.0, 1100.0, 30.0),
-                vec![[1.15, 1.0], [1.25, 1.0]],
-            ),
-            coal_with_petro(
-                "混煤便宜",
-                (2.0, 8.5, 23.0, 92.0, 16.0, 0.4, 66.0, 7.5, 1000.0, 30.0),
-                vec![[0.8, 1.0], [1.6, 1.0]],
-            ),
-        ];
-        let req = BlendRequest {
-            coals,
-            specs: vec![Spec::upper("petro", 0.25)],
-            total_quantity: None,
-            truncate_decimal: true, // 生产路径固定 true
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve(&req);
-        assert!(r.ok, "{:?}", r.reason);
-        let check = r.petrography_check.expect("应挂岩相校验");
-        assert_eq!(
-            check.sigma_ok,
-            Some(true),
-            "生产配置下也应收敛, σ={}",
-            check.sigma
-        );
-        assert!(check.sigma <= 0.25 + 1e-6, "σ={} 应 ≤ 0.25", check.sigma);
-    }
-
-    /// 岩相修复失败这条路**不带**逐项诊断.
-    ///
-    /// 走到这里说明按合同界建的 LP 本来有解, 无解的是修复时收紧代理上限之后的 LP ——
-    /// 诊断"整体不可行 ⇒ 子问题最优值必然越界"的前提在这条路上不成立. 硬跑的话,
-    /// 越界判定拿的是收紧后的代理界 (这里约 0.04), 展示的却是合同界 0.1, 于是报出
-    /// "岩相 ≤0.1 达不到, 最好只能到 0.05" —— 0.05 明明比 0.1 好, 用户读到的是
-    /// 工具自相矛盾. 真凶已由 reason 与 warnings 指名为岩相.
-    #[test]
-    fn test_petro_repair_failure_carries_no_diagnosis() {
-        let coals = vec![
-            coal_with_petro(
-                "纯煤贵",
-                (2.0, 8.0, 22.0, 90.0, 15.0, 0.05, 65.0, 8.0, 1100.0, 30.0),
-                vec![[1.15, 1.0], [1.25, 1.0]], // σ=0.05
-            ),
-            coal_with_petro(
-                "混煤便宜",
-                (2.0, 8.5, 23.0, 92.0, 16.0, 0.4, 66.0, 7.5, 1000.0, 30.0),
-                vec![[0.8, 1.0], [1.6, 1.0]], // σ=0.4
-            ),
-        ];
-        let result = solve(&BlendRequest {
-            coals,
-            specs: vec![Spec::upper("petro", 0.1)],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        });
-
-        assert!(!result.ok, "代理达标但精确 σ 超标, 收紧后应无解");
-        assert_eq!(
-            result.reason.as_deref(),
-            Some("岩相精确 Hard 复核未找到可行配方")
-        );
-        assert!(
-            result.infeasible_bounds.is_empty(),
-            "这条路不满足诊断前提, 不该指认任何一项: {:?}",
-            result.infeasible_bounds
-        );
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("岩相")),
-            "真凶应由 warnings 指名: {:?}",
-            result.warnings
-        );
-    }
-
-    /// 放宽这一项是必要的、却不足以解出配方时, relax_to 必须交白卷.
-    ///
-    /// 这一单里灰分够不到合同 (整单 LP 无解, 所以诊断指认灰分是对的), 但把灰分逐档
-    /// 放宽之后, LP 虽然通了, 岩相精确复核每一档都过不去 —— 没有哪个灰分值真能解出
-    /// 配方. 这时宁可给 None, 也不能拿一个没试过的数去兑现界面上那句"改成这个数就能
-    /// 求出配方".
-    #[test]
-    fn test_relax_to_is_none_when_no_bound_actually_solves() {
-        let coals = vec![
-            coal_with_petro(
-                "纯煤贵",
-                (2.0, 12.0, 22.0, 90.0, 15.0, 0.05, 65.0, 8.0, 1100.0, 30.0),
-                vec![[1.15, 1.0], [1.25, 1.0]], // σ=0.05
-            ),
-            coal_with_petro(
-                "混煤便宜",
-                (2.0, 12.5, 23.0, 92.0, 16.0, 0.4, 66.0, 7.5, 1000.0, 30.0),
-                vec![[0.8, 1.0], [1.6, 1.0]], // σ=0.4
-            ),
-        ];
-        let result = solve(&BlendRequest {
-            coals,
-            specs: vec![Spec::upper("A", 10.0), Spec::upper("petro", 0.1)],
-            total_quantity: None,
-            truncate_decimal: true,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        });
-
-        assert!(!result.ok, "煤池最低灰 12.0, 够不到合同 10");
-        let ash = result
-            .infeasible_bounds
-            .iter()
-            .find(|bound| bound.indicator == "A")
-            .expect("灰分是 LP 无解的真凶, 应被指认");
-        assert_eq!(
-            ash.relax_to, None,
-            "每一档都解不出配方时不许给数, 实得 {:?}",
-            ash.relax_to
-        );
-        // 指认本身仍然成立: 灰分确实够不到.
-        assert!(ash.achievable > ash.enforced);
-    }
-
-    /// 线性代理高估低价煤的 σ 时，下界初解可能通过代理却未通过精确复核。
-    /// A 的录入代理为 0.30、直方图 σ=0.28；B 的代理与直方图 σ 均为 0.40。
-    /// 初解全选 A，精确 σ=0.28 不达下界 0.30；抬高代理下界后应引入 B 并收敛。
-    #[test]
-    fn test_petro_lower_refine_converges() {
-        let coals = vec![
-            coal_with_petro(
-                "低离散便宜",
-                (2.0, 8.0, 22.0, 90.0, 15.0, 0.30, 65.0, 8.0, 1000.0, 30.0),
-                vec![[0.92, 1.0], [1.48, 1.0]], // μ=1.2, σ=0.28
-            ),
-            coal_with_petro(
-                "高离散贵",
-                (2.0, 8.5, 23.0, 92.0, 16.0, 0.40, 66.0, 7.5, 1100.0, 30.0),
-                vec![[0.8, 1.0], [1.6, 1.0]], // μ=1.2, σ=0.40
-            ),
-        ];
-        let req = BlendRequest {
-            coals,
-            specs: vec![Spec::lower("petro", 0.30)],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve(&req);
-        assert!(r.ok, "{:?}", r.reason);
-        let check = r.petrography_check.expect("应挂岩相校验");
-        assert_eq!(
-            check.sigma_ok,
-            Some(true),
-            "抬高代理下界后精确 σ 应达标, σ={}",
-            check.sigma
-        );
-        assert!(check.sigma >= 0.30 - 1e-6, "σ={} 应 ≥ 0.30", check.sigma);
-        assert!(check.refine_iterations >= 1, "初解低于下界，应至少修复一轮");
     }
 
     /// 负 margin 会反向放宽约束产出违约配比 → 必须拒绝请求.
@@ -1269,73 +629,6 @@ mod tests {
         );
     }
 
-    /// 代理盲区场景 (单煤 σ 相同、μ 相距远, G 约束强制混配): 收紧无杠杆 →
-    /// Hard 岩相约束必须返回不可行，不能把违约候选当作成功配方.
-    #[test]
-    fn test_petro_blind_proxy_reports_violation_and_notch() {
-        let coals = vec![
-            coal_with_petro(
-                "低反射",
-                (2.0, 8.0, 22.0, 70.0, 15.0, 0.05, 65.0, 8.0, 1000.0, 30.0),
-                vec![[0.85, 1.0], [0.95, 1.0]], // μ=0.9, σ=0.05
-            ),
-            coal_with_petro(
-                "高反射",
-                (2.0, 8.5, 23.0, 100.0, 16.0, 0.05, 66.0, 7.5, 1100.0, 30.0),
-                vec![[1.55, 1.0], [1.65, 1.0]], // μ=1.6, σ=0.05
-            ),
-        ];
-        let req = BlendRequest {
-            coals,
-            // G ≥ 85 强制 x_高反射 ≥ 0.5 → 真实 σ ≈ 0.35 无法通过收紧消除
-            specs: vec![Spec::lower("G", 85.0), Spec::upper("petro", 0.2)],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve(&req);
-        assert!(!r.ok, "Hard 岩相违约不得返回配方");
-        assert!(
-            r.reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("岩相")),
-            "应有岩相未达标原因: {:?}",
-            r.reason
-        );
-    }
-
-    /// 无 petro 约束但煤岩数据齐全 → 仍挂校验 (μ/σ/凹口信息有价值), sigma_ok=None.
-    #[test]
-    fn test_petro_check_without_spec() {
-        let coals = vec![coal_with_petro(
-            "a",
-            (2.0, 8.0, 22.0, 90.0, 15.0, 0.05, 65.0, 8.0, 1100.0, 30.0),
-            vec![[1.15, 1.0], [1.25, 1.0]],
-        )];
-        let req = BlendRequest {
-            coals,
-            specs: vec![Spec::upper("S", 3.0)],
-            total_quantity: None,
-            truncate_decimal: false,
-            fixed_ratios: None,
-            rank_interaction: None,
-            price_factor: None,
-            price_robustness: None,
-            shovel_tons: None,
-            min_ratios: Default::default(),
-        };
-        let r = solve(&req);
-        assert!(r.ok);
-        let check = r.petrography_check.expect("数据齐全应挂校验");
-        assert_eq!(check.sigma_ok, None);
-        assert_eq!(check.sigma_max, None);
-    }
-
     /// 基础 JSON 求解不读取训练样本；旧调用方残留的字段会被兼容忽略。
     #[test]
     fn test_solve_json_ignores_training_fields() {
@@ -1352,8 +645,10 @@ mod tests {
             min_ratios: Default::default(),
         };
         let mut input = serde_json::to_value(&req).unwrap();
-        input["csr_observations"] = serde_json::to_value(perfect_csr_obs(8)).unwrap();
-        input["model_policy"] = serde_json::to_value(permissive_csr_policy()).unwrap();
+        input["csr_observations"] = serde_json::json!([
+            {"s": 1.5, "a": 8.5, "v": 24.7, "g": 93.0, "y": 10.0, "m": 10.6, "csr_measured": 95.0}
+        ]);
+        input["model_policy"] = serde_json::json!({"min_csr_samples": 8, "max_csr_cv_mae": 1.0});
         let out = solve_json(&input.to_string());
         let r: BlendResult = serde_json::from_str(&out).unwrap();
         assert!(r.ok);
@@ -2595,7 +1890,7 @@ mod tests {
         );
     }
 
-    /// 买入侧修正必须穿过 solve_json 的字符串契约 —— 这是 server/WASM 实际走的唯一入口.
+    /// 买入侧修正必须穿过 solve_json 的字符串契约 —— 这是服务端与命令行实际走的唯一入口.
     ///
     /// 上面几条测的是 Rust 结构体路径; 存量测试只覆盖了 purchase_terms **缺席**的老 JSON,
     /// 它**在场**时的 serde 字段名从未被验证过. 任一字段名对不上, 结构体路径全绿而

@@ -75,8 +75,8 @@ pub(crate) fn cif_eff(coal: &Coal) -> Result<f64, CullReason> {
             Direction::Upper => (value - clause.guarantee, value > clause.penalty.reject),
             Direction::Lower => (clause.guarantee - value, value < clause.penalty.reject),
             // Range 已被 quality::validate_purchase_terms 的 Direction::Range 分支拒在门外,
-            // 这里走不到. 跳过而非 panic: 本 crate 自己的 release profile 与 wasm 包都是
-            // panic = "abort", 真被走到时 `blend` 命令行会整个进程中止, wasm 里是 trap.
+            // 这里走不到. 跳过而非 panic: 本 crate 的 release profile 是 panic = "abort",
+            // 真被走到时 `blend` 命令行会整个进程中止.
             // (server 按它自己的 profile 编, 是 panic = "unwind", 那里只失败这一次请求.)
             Direction::Range => continue,
         };
@@ -148,7 +148,6 @@ mod tests {
             props: map,
             fob: 1000.0,
             frt: 100.0,
-            petrography: None,
             purchase_terms: terms,
             coal_type: None,
             form: None,

@@ -163,7 +163,6 @@ function collectSourceFiles(directory) {
 
 const rustModelSource = readRepositoryFile("blend_kit_rs/src/model.rs");
 const rustSeedSource = readRepositoryFile("blend_kit_rs/src/seed.rs");
-const rustPetrographySource = readRepositoryFile("blend_kit_rs/src/petrography.rs");
 const rustOptimizerSource = readRepositoryFile("blend_kit_rs/src/optimizer.rs");
 const rustAdminSource = readRepositoryFile("blend_kit_server/src/admin.rs");
 const rustBenchmarksSource = readRepositoryFile("blend_kit_server/src/benchmarks.rs");
@@ -200,7 +199,6 @@ const sharedStructs = [
   [rustModelSource, "OrderItem", "OrderItem"],
   [rustModelSource, "ModelSummary", "ModelSummary"],
   [rustModelSource, "IndicatorCheck", "IndicatorCheck"],
-  [rustModelSource, "PetrographyCheck", "PetrographyCheck"],
   [rustModelSource, "InfeasibleBound", "InfeasibleBound"],
   [rustModelSource, "BlendResult", "BlendResult"],
   [rustModelSource, "PenaltyTier", "PenaltyTier"],
@@ -211,8 +209,6 @@ const sharedStructs = [
   [rustModelSource, "PriceFactor", "PriceFactor"],
   [rustModelSource, "PricePart", "PricePart"],
   [rustModelSource, "CoalValue", "CoalValue"],
-  [rustPetrographySource, "Petrography", "Petrography"],
-  [rustPetrographySource, "Notch", "Notch"],
   [rustModelSource, "PriceRobustness", "PriceRobustness"],
   [rustModelSource, "MatchConfig", "MatchConfig"],
   [rustModelSource, "Benchmark", "Benchmark"],
@@ -400,7 +396,6 @@ if (!tsResultNotesSource.includes(conflictReason)) {
 
 const versionEntries = [
   ["blend_kit_rs/Cargo.toml", readCargoPackageVersion("blend_kit_rs/Cargo.toml")],
-  ["blend_kit_wasm/Cargo.toml", readCargoPackageVersion("blend_kit_wasm/Cargo.toml")],
   ["blend_kit_server/Cargo.toml", readCargoPackageVersion("blend_kit_server/Cargo.toml")],
   ["doudou_blend/package.json", JSON.parse(readRepositoryFile("doudou_blend/package.json")).version],
 ];
@@ -420,14 +415,10 @@ if (existsSync(staticMasterPath)) {
 }
 
 const coreLibrarySource = readRepositoryFile("blend_kit_rs/src/lib.rs");
-const wasmLibrarySource = readRepositoryFile("blend_kit_wasm/src/lib.rs");
 const serverLibrarySource = readRepositoryFile("blend_kit_server/src/lib.rs");
 const backendSource = readRepositoryFile("doudou_blend/src/backend.ts");
 if (!/pub\s+fn\s+master_json\s*\(/.test(coreLibrarySource)) {
   recordFailure("blend_kit 未提供统一 master_json() 入口");
-}
-if (!/blend_kit::master_json\s*\(/.test(wasmLibrarySource)) {
-  recordFailure("WASM 未复用 blend_kit::master_json()");
 }
 if (!/blend_kit::master_json\s*\(/.test(serverLibrarySource)) {
   recordFailure("Web 服务端未复用 blend_kit::master_json()");
@@ -447,18 +438,11 @@ if (!existsSync(licensePath)) {
   if (!licenseSource.includes("MIT License") || !licenseSource.includes("Permission is hereby granted")) {
     recordFailure("LICENSE 不是完整的 MIT License 文本");
   }
-  const wasmLicensePath = join(repositoryRoot, "blend_kit_wasm/LICENSE");
-  if (!existsSync(wasmLicensePath)) {
-    recordFailure("blend_kit_wasm 缺少随发布包分发的 LICENSE");
-  } else if (readFileSync(wasmLicensePath, "utf8") !== licenseSource) {
-    recordFailure("blend_kit_wasm/LICENSE 与仓库根 LICENSE 不一致");
-  }
 }
 const packageManifest = JSON.parse(readRepositoryFile("doudou_blend/package.json"));
 const packageLock = JSON.parse(readRepositoryFile("doudou_blend/package-lock.json"));
 const licenseEntries = [
   ["blend_kit_rs/Cargo.toml", readCargoPackageLicense("blend_kit_rs/Cargo.toml")],
-  ["blend_kit_wasm/Cargo.toml", readCargoPackageLicense("blend_kit_wasm/Cargo.toml")],
   [
     "blend_kit_server/Cargo.toml",
     readCargoPackageLicense("blend_kit_server/Cargo.toml"),

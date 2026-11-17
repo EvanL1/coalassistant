@@ -2,8 +2,8 @@
 //!
 //! 核心分离:
 //! - `AcceptanceRule`: 合同如何判定报告值；
-//! - `margin`: 模型不确定性导致的内部收紧；
-//! - `MetricFormula`: LP 代理和最终评估共用的表达式。
+//! - `margin`: 内部留的安全余量, 只收紧 LP；
+//! - `MetricFormula`: 建 LP 行与体检共用的表达式。
 
 use crate::model::*;
 
@@ -44,28 +44,31 @@ const BINDING_TOL: f64 = 0.05;
 /// 2026-09-27 重测 (判定改为"容限在量化之前加"之后): 样本数比上一版多了约 3.2 万条,
 /// 多出来的是以前被判定掉格误杀、现在救回的解, 残差上限也随之变大。
 ///
-/// | 口径 | 线性行 | 仿射/回归行 |
-/// |---|---|---|
-/// | 最大 `residual/(1+复核量级)` | **5.9871e-8** | **6.5808e-8** |
-/// | └ 本值留出的余量 | 1.7 倍 | 1.5 倍 |
-/// | 最大 `residual/(1+LP 行量级)` | **9.6727e-8** | **9.9948e-8** |
-/// | └ `FEASIBILITY_TOLERANCE` 留出的余量 | 1.03 倍 | **1.0005 倍** |
-/// | 最小 `复核量级/LP 行量级` (顶界行) | **1.0716** | **1.0716** |
-/// | └ 同上, 全部带界行 | 0.925 | 0.921 |
-/// | 最大绝对残差 (指标单位) | 1.5594e-7 | **1.3144e-6** |
-/// | 复核侧放行量 (指标单位) | 9.40e-6 | 9.87e-6 |
-/// | LP 侧放行量 (指标单位) | 2.03e-6 | 3.67e-6 |
-/// | 残差样本 / 量级样本 | 11.8 万 / 29.7 万 | 7.6 万 / 28.5 万 |
+/// | 口径 | 线性行 |
+/// |---|---|
+/// | 最大 `residual/(1+复核量级)` | **5.9871e-8** |
+/// | └ 本值留出的余量 | 1.7 倍 |
+/// | 最大 `residual/(1+LP 行量级)` | **9.6727e-8** |
+/// | └ `FEASIBILITY_TOLERANCE` 留出的余量 | **1.03 倍** |
+/// | 最小 `复核量级/LP 行量级` (顶界行) | **1.0716** |
+/// | └ 同上, 全部带界行 | 0.925 |
+/// | 最大绝对残差 (指标单位) | 1.5594e-7 |
+/// | 复核侧放行量 (指标单位) | 9.40e-6 |
+/// | LP 侧放行量 (指标单位) | 2.03e-6 |
+/// | 残差样本 / 量级样本 | 11.8 万 / 29.7 万 |
+///
+/// 这张表原先还有"仿射/回归行"一列 (G 仿射校准、CSR 回归进 LP 时的行), 2026-11-17 随
+/// 评估器一起删了: 求解只剩线性行.
 ///
 /// 两个"放行量"**不是同一个量, 别互相抄**: 复核侧是 `本值 × (1 + max(|实测值|,
 /// |执行界|))`, 量级取界本身 (灰分 ≈11); LP 侧是
 /// `FEASIBILITY_TOLERANCE × (1 + Σ|aᵢxᵢ|)`, 量级取行系数相对绑定值的平均绝对偏差
 /// (灰分行 ≈2)。两个常量相等, 两个放行量差着四五倍。
 ///
-/// 对照化验 0.01 的分辨率: 复核侧最大 9.87e-6 ⇒ 约 **3 个数量级**;
-/// LP 侧最大 3.67e-6 ⇒ 约 **3.4 个数量级**。合同界仍是硬墙。
+/// 对照化验 0.01 的分辨率: 复核侧最大 9.40e-6 ⇒ 约 **3 个数量级**;
+/// LP 侧最大 2.03e-6 ⇒ 约 **3.7 个数量级**。合同界仍是硬墙。
 ///
-/// ## "复核不会比 LP 严"要分行型看, 别当成恒等式
+/// ## "复核不会比 LP 严"不是恒等式
 ///
 /// 两边共用一个常量, 但**量级口径不同**: 复核取 `max(|实测值|,|执行界|)`, LP 行取
 /// `Σ|aᵢxᵢ|`。
@@ -75,18 +78,11 @@ const BINDING_TOL: f64 = 0.05;
 /// 的行 —— 实测值离界很远, LP 行量级 `Σ|执行界−propᵢ|xᵢ` 随之变大, 比值自然小于 1。
 /// 那种行的余量以"档"计, 容限差几倍毫无后果, 不是安全问题。
 ///
-/// - **线性行** (`formula_for` 的加权平均, 今天 `solve` 走的全部 Hard 行):
-///   `aᵢ = propᵢ − 执行界`, 最优解处 `Σ(propᵢ−界)xᵢ ≈ 0` ⇒ 正负偏差等量, 又因化验
-///   值非负, 负向偏差 ≤ 界 ⇒ `Σ|aᵢxᵢ| ≤ 2×界`。所以复核**最多比 LP 严 2 倍**。
-///   实测余量 1.7 倍**已盖不住**这个理论上界; 眼下的保障是实测 —— 顶界行上比值
-///   ≥ 1.0716, 复核从没比 LP 严过。这是观测, 不是证明。
-/// - **仿射 / 回归行** (`build_formulas` 里 G 的 `AffineCalibration`、CSR 的
-///   `Regression`): `numerators` 是回归系数而非化验值, `intercept ≠ 0` 使
-///   `shifted = 界 − intercept`。行量级由**各煤分子系数的离散度**决定, 与合同界无关,
-///   上面那个 2 倍上界**不存在**, 只有实测余量。
-///   上表这一列用的是测量测试里**合成**的评估器 (G 仿射 slope 0.9/intercept 4.0 +
-///   六特征 CSR 拟合)。`predict.rs` 接上真实拟合系数那天**必须重跑**: 系数一换,
-///   离散度就变, 这一列不保证还成立。
+/// LP 行是 `formula_for` 的加权平均: `aᵢ = propᵢ − 执行界`, 最优解处
+/// `Σ(propᵢ−界)xᵢ ≈ 0` ⇒ 正负偏差等量, 又因化验值非负, 负向偏差 ≤ 界 ⇒
+/// `Σ|aᵢxᵢ| ≤ 2×界`。所以复核**最多比 LP 严 2 倍**。实测余量 1.7 倍**已盖不住**这个
+/// 理论上界; 眼下的保障是实测 —— 顶界行上比值 ≥ 1.0716, 复核从没比 LP 严过。
+/// 这是观测, 不是证明。
 ///
 /// 这份实测记录是本值的唯一依据, 勿在没有重跑上面那条命令的情况下改动。
 ///
@@ -134,7 +130,7 @@ const BINDING_TOL: f64 = 0.05;
 /// 走不到复核跟前 —— 复核是 LP 下游的冗余安全网, 不是墙。
 ///
 /// 自己动手验: 把本值临时放大四个数量级, 重跑上面那条 `--ignored` 命令, 上表的
-/// "最大绝对残差"纹丝不动 (线性行仍是 1.56e-7)。拦人的从来是 LP。
+/// "最大绝对残差"纹丝不动 (仍是 1.56e-7)。拦人的从来是 LP。
 /// 于是调紧只有一个效果: 把 LP 认下的正确解否掉。旧的绝对 1e-8 就是这样, 它从来
 /// 没挡下过任何真越界, 只制造了"可行合同报不可行"。
 pub(crate) const ACCEPT_TOLERANCE: f64 = crate::optimizer::FEASIBILITY_TOLERANCE;
@@ -159,38 +155,37 @@ pub(crate) fn judging_allowance(value: f64, executed: f64, rule: &AcceptanceRule
     accept_slack(value, executed).min(quantum(rule) * MAX_ALLOWANCE_CELLS)
 }
 
+/// 一项指标按配比算出来的式子: `intercept + Σ分子·x / Σ分母·x`.
+///
+/// 现在八项指标都是按配比线性加权 ([`formula_for`]): `intercept` 恒为 0, 分母恒为 1.
+/// 这两样留着不删, 是因为去掉它们会改变浮点运算的次序 (`0.0 + x`、`x / Σ配比`),
+/// 结果的末位不保证不变.
 #[derive(Debug, Clone)]
 pub(crate) struct MetricFormula {
-    /// 兼容展示的简单加权代理系数.
-    pub proxy_coefficients: Vec<f64>,
-    /// 最终评估的分子系数.
+    /// 分子系数 (各煤的指标值; 煤阶交互会平移 CSR 这一行).
     pub numerators: Vec<f64>,
-    /// 最终评估的分母系数.
+    /// 分母系数.
     pub denominators: Vec<f64>,
     pub intercept: f64,
     pub method: EvaluationMethod,
     pub verified: bool,
-    pub uncertainty: Option<f64>,
-    pub model: Option<ModelSummary>,
 }
 
 impl MetricFormula {
     pub fn linear(coefficients: Vec<f64>, method: EvaluationMethod, verified: bool) -> Self {
         let n = coefficients.len();
         Self {
-            proxy_coefficients: coefficients.clone(),
             numerators: coefficients,
             denominators: vec![1.0; n],
             intercept: 0.0,
             method,
             verified,
-            uncertainty: None,
-            model: None,
         }
     }
 
+    /// 简单加权值 `Σ分子·x` (不除以 Σ配比), 体检行的 `proxy_value`.
     pub fn proxy_value(&self, ratios: &[f64]) -> f64 {
-        dot(&self.proxy_coefficients, ratios)
+        dot(&self.numerators, ratios)
     }
 
     pub fn evaluate(&self, ratios: &[f64]) -> Option<f64> {
@@ -354,6 +349,29 @@ pub(crate) fn executed_lower(bound: f64, rule: &AcceptanceRule, margin: f64) -> 
     effective_lower(bound, rule) + margin
 }
 
+/// 判定值要比的那条线 (上界): 合同界 + 允许偏差, 非 Raw 规则下贴到不超过它的最近格线上。
+///
+/// 判定值都在格线上, 所以 "判定值 ≤ 界" 与 "判定值 ≤ 不超过界的最近格线" 是一回事。贴格是为了
+/// 吸掉 界 ± 偏差 的浮点零头 (0.7 + 0.1 = 0.7999999999999999): LP 的执行界 ([`effective_upper`])
+/// 用的就是这条贴过格的线, 判定这一侧不贴, LP 认的解这里就不认。
+fn judged_limit_upper(bound: f64, rule: &AcceptanceRule) -> f64 {
+    let accepted = bound + rule.tolerance.max(0.0);
+    match rule.mode {
+        AcceptanceMode::Raw => accepted,
+        AcceptanceMode::Truncate | AcceptanceMode::Round => grid_floor(accepted, rule),
+    }
+}
+
+/// 判定值要比的那条线 (下界): 合同界 − 允许偏差, 非 Raw 规则下贴到不低于它的最近格线上。
+/// 见 [`judged_limit_upper`]。
+fn judged_limit_lower(bound: f64, rule: &AcceptanceRule) -> f64 {
+    let accepted = bound - rule.tolerance.max(0.0);
+    match rule.mode {
+        AcceptanceMode::Raw => accepted,
+        AcceptanceMode::Truncate | AcceptanceMode::Round => grid_ceil(accepted, rule),
+    }
+}
+
 pub(crate) struct CheckOutcome {
     pub judged: f64,
     pub slack: Option<f64>,
@@ -391,7 +409,7 @@ pub(crate) fn check_value(
             let executed = effective_upper(maximum, &rule);
             let allow = judging_allowance(value, executed, &rule);
             let distance = executed - value;
-            let limit = maximum + rule.tolerance.max(0.0);
+            let limit = judged_limit_upper(maximum, &rule);
             // 先按原值判. 原值判不过、而它离执行界不超过放行量时, 才当它是求解器残差,
             // 在量化之前往里推一个放行量再判: 截断/四舍五入是跳一整格的, 量化之后再加
             // 容限, 救不回已被残差推过格线的那一格.
@@ -414,7 +432,7 @@ pub(crate) fn check_value(
             let executed = effective_lower(minimum, &rule);
             let allow = judging_allowance(value, executed, &rule);
             let distance = value - executed;
-            let limit = minimum - rule.tolerance.max(0.0);
+            let limit = judged_limit_lower(minimum, &rule);
             // 与上界同理: 原值判不过、且离执行界不超过放行量时才往里推.
             let plain = judged_value(value, &rule);
             let lenient = if plain < limit && distance >= -allow {
@@ -470,7 +488,7 @@ pub(crate) fn formula_for(indicator: &str, coals: &[&Coal]) -> Option<MetricForm
     let (method, verified) = match indicator {
         // 这三项在求解器中按质量加权，算法本身可精确复算。
         "S" | "A" | "M" => (EvaluationMethod::Linear, true),
-        // 其余指标保留线性代理，但不把代理冒充已验证的非线性结果。
+        // 其余指标混合后并不严格线性, 加权值只是估算, 不冒充已验证的结果。
         "V" | "G" | "Y" | "petro" | "CSR" => (EvaluationMethod::ProvisionalLinear, false),
         _ => (EvaluationMethod::Unavailable, false),
     };
@@ -833,6 +851,87 @@ mod tests {
         assert_eq!(outcome.status, EvaluationStatus::Fail, "界外一格必须 Fail");
         assert_eq!(outcome.judged, 10.01, "判 Fail 时展示的判定值不能还在界内");
     }
+    /// 带 "允许偏差" 的界: 界 ± 偏差算出来常带浮点零头 (0.7161 + 0.1 = 0.8160999999999999,
+    /// 17.44 − 0.7 = 16.740000000000002)。LP 的执行界是贴过格的, 判定这一侧也得贴 —— 否则
+    /// LP 认的解体检不认, 可行的合同被报成 "没算出结论"。
+    #[test]
+    fn test_tolerance_bound_with_float_fuzz_is_judged_on_the_grid() {
+        let status = |value: f64, spec: &Spec| check_value(value, Some(spec), false, true).status;
+        let mut fuzzy = 0;
+        for mode in [AcceptanceMode::Truncate, AcceptanceMode::Round] {
+            for decimals in 1..=4u8 {
+                for tolerance in [0.01, 0.05, 0.1, 0.5, 0.7] {
+                    let rule = AcceptanceRule {
+                        mode,
+                        decimals: Some(decimals),
+                        tolerance,
+                    };
+                    let scale = scale(&rule);
+                    let cells = tolerance * scale;
+                    if (cells - cells.round()).abs() > 1e-9 {
+                        continue; // 偏差比判定的一格还细: 不在这条测试的范围.
+                    }
+                    let cells = cells.round();
+                    for base in [
+                        0.07, 0.29, 0.7161, 0.849, 1.13, 2.5, 10.49, 17.44, 28.0, 80.0, 99.9,
+                    ] {
+                        let grid = (base * scale).round();
+                        let bound = grid / scale;
+                        let label = format!("{mode:?} {decimals} 位, 界 {bound} ± {tolerance}");
+                        // 合同认可的最后一格 (整数算出来的, 没有零头) 与它外面一格.
+                        let last_up = (grid + cells) / scale;
+                        let last_down = (grid - cells) / scale;
+                        if bound + tolerance != last_up || bound - tolerance != last_down {
+                            fuzzy += 1;
+                        }
+
+                        let mut upper = Spec::upper("A", bound);
+                        upper.acceptance = Some(rule.clone());
+                        let mut lower = Spec::lower("A", bound);
+                        lower.acceptance = Some(rule.clone());
+
+                        assert_ne!(
+                            status(last_up, &upper),
+                            EvaluationStatus::Fail,
+                            "{label}: 压在上界 + 偏差上 ({last_up})"
+                        );
+                        assert_ne!(
+                            status(effective_upper(bound, &rule), &upper),
+                            EvaluationStatus::Fail,
+                            "{label}: 顶在上界执行界"
+                        );
+                        assert_eq!(
+                            status((grid + cells + 1.0) / scale, &upper),
+                            EvaluationStatus::Fail,
+                            "{label}: 上界 + 偏差外一格"
+                        );
+                        if last_down > 0.0 {
+                            assert_ne!(
+                                status(last_down, &lower),
+                                EvaluationStatus::Fail,
+                                "{label}: 压在下界 − 偏差上 ({last_down})"
+                            );
+                            assert_ne!(
+                                status(effective_lower(bound, &rule), &lower),
+                                EvaluationStatus::Fail,
+                                "{label}: 顶在下界执行界"
+                            );
+                            assert_eq!(
+                                status((grid - cells - 1.0) / scale, &lower),
+                                EvaluationStatus::Fail,
+                                "{label}: 下界 − 偏差外一格"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            fuzzy > 50,
+            "这条测试要扫到带浮点零头的界, 实际只有 {fuzzy} 个"
+        );
+    }
+
     /// 判定格线: 合同界外一格 (及更远) 的值, 任何判定规则下都必须判 Fail; 正好压在
     /// 合同界上、或顶在执行界上的值不许判 Fail.
     ///
@@ -1096,7 +1195,6 @@ mod tests {
                 props,
                 fob: 1000.0,
                 frt: 0.0,
-                petrography: None,
                 purchase_terms: None,
                 coal_type: None,
                 form: None,
@@ -1366,7 +1464,6 @@ mod tests {
             props,
             fob: 1000.0,
             frt: 0.0,
-            petrography: None,
             purchase_terms: Some(terms),
             coal_type: None,
             form: None,
